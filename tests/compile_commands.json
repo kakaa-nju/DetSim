@@ -1,0 +1,146 @@
+[
+  {
+    "arguments": [
+      "/usr/local/bin/g++",
+      "-std=gnu++2a",
+      "-fno-stack-protector",
+      "-I/usr/include/libunwind",
+      "-g",
+      "-c",
+      "-o",
+      "monitor.o",
+      "monitor.cpp"
+    ],
+    "directory": "/home/kaguya/code/ptmc",
+    "file": "/home/kaguya/code/ptmc/monitor.cpp",
+    "output": "/home/kaguya/code/ptmc/monitor.o"
+  },
+  {
+    "arguments": [
+      "/usr/local/bin/g++",
+      "-std=gnu++2a",
+      "-fno-stack-protector",
+      "-I/usr/include/libunwind",
+      "-g",
+      "-c",
+      "-o",
+      "sockstate.o",
+      "sockstate.cpp"
+    ],
+    "directory": "/home/kaguya/code/ptmc",
+    "file": "/home/kaguya/code/ptmc/sockstate.cpp",
+    "output": "/home/kaguya/code/ptmc/sockstate.o"
+  },
+  {
+    "arguments": [
+      "/usr/local/bin/g++",
+      "-std=gnu++2a",
+      "-fno-stack-protector",
+      "-I/usr/include/libunwind",
+      "-g",
+      "-c",
+      "-o",
+      "main.o",
+      "main.cpp"
+    ],
+    "directory": "/home/kaguya/code/ptmc",
+    "file": "/home/kaguya/code/ptmc/main.cpp",
+    "output": "/home/kaguya/code/ptmc/main.o"
+  },
+  {
+    "arguments": [
+      "/usr/local/bin/g++",
+      "-std=gnu++2a",
+      "-fno-stack-protector",
+      "-I/usr/include/libunwind",
+      "-g",
+      "-c",
+      "-o",
+      "fsstate.o",
+      "fsstate.cpp"
+    ],
+    "directory": "/home/kaguya/code/ptmc",
+    "file": "/home/kaguya/code/ptmc/fsstate.cpp",
+    "output": "/home/kaguya/code/ptmc/fsstate.o"
+  },
+  {
+    "arguments": [
+      "/usr/local/bin/g++",
+      "-std=gnu++2a",
+      "-fno-stack-protector",
+      "-I/usr/include/libunwind",
+      "-g",
+      "-c",
+      "-o",
+      "state.o",
+      "state.cpp"
+    ],
+    "directory": "/home/kaguya/code/ptmc",
+    "file": "/home/kaguya/code/ptmc/state.cpp",
+    "output": "/home/kaguya/code/ptmc/state.o"
+  },
+  {
+    "arguments": [
+      "/usr/local/bin/g++",
+      "-std=gnu++2a",
+      "-fno-stack-protector",
+      "-I/usr/include/libunwind",
+      "-g",
+      "-c",
+      "-o",
+      "utils.o",
+      "utils.cpp"
+    ],
+    "directory": "/home/kaguya/code/ptmc",
+    "file": "/home/kaguya/code/ptmc/utils.cpp",
+    "output": "/home/kaguya/code/ptmc/utils.o"
+  },
+  {
+    "arguments": [
+      "/usr/local/bin/g++",
+      "-std=gnu++2a",
+      "-fno-stack-protector",
+      "-I/usr/include/libunwind",
+      "-g",
+      "-c",
+      "-o",
+      "guest.o",
+      "guest.cpp"
+    ],
+    "directory": "/home/kaguya/code/ptmc",
+    "file": "/home/kaguya/code/ptmc/guest.cpp",
+    "output": "/home/kaguya/code/ptmc/guest.o"
+  },
+  {
+    "arguments": [
+      "/usr/local/bin/g++",
+      "-std=gnu++2a",
+      "-fno-stack-protector",
+      "-I/usr/include/libunwind",
+      "-g",
+      "-c",
+      "-o",
+      "md5.o",
+      "md5.cpp"
+    ],
+    "directory": "/home/kaguya/code/ptmc",
+    "file": "/home/kaguya/code/ptmc/md5.cpp",
+    "output": "/home/kaguya/code/ptmc/md5.o"
+  },
+  {
+    "arguments": [
+      "/usr/local/bin/g++",
+      "-std=gnu++2a",
+      "-fno-stack-protector",
+      "-I/usr/include/libunwind",
+      "-g",
+      "-c",
+      "-o",
+      "engine.o",
+      "engine.cpp"
+    ],
+    "directory": "/home/kaguya/code/ptmc",
+    "file": "/home/kaguya/code/ptmc/engine.cpp",
+    "output": "/home/kaguya/code/ptmc/engine.o"
+  }
+]

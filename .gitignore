@@ -1,0 +1,12 @@
+*
+*.*
+!*.c
+!Makefile
+!*.cpp
+!*.h
+!.gitignore
+!tests/
+!/tests/*
+!cereal/
+!/cereal/**
+
