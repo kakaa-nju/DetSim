@@ -167,10 +167,10 @@ static int on_syscall_exit(
       info->args[3], (struct sockaddr *)info->args[4], (socklen_t *)info->args[5]); 
     tracee_set_rax(pid, ret);
     info->rval = ret;
-    // if (ret <= 0)  /* discard state */
-    // { 
-    //   return CKPT_DISCARD;
-    // }
+    if (ret >= 0)  /* discard state */
+    { 
+      return CKPT_NO;
+    }
     break;
   case SYS_sched_yield:
     break;

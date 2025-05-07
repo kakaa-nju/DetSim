@@ -3,6 +3,7 @@
 #include "state.h"
 #include "debug.h"
 #include "monitor.h"
+#include "utils.h"
 #include <assert.h>
 #include <bits/types/cookie_io_functions_t.h>
 #include <cereal/archives/binary.hpp>
@@ -276,8 +277,14 @@ void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size) {
   std::vector<maps_item> items;
   get_maps_item(items, maps);
   fclose(maps);
-  sprintf(filename, "memory/" HASH_FORMAT ".mem", ts_hash);
-  FILE *mem = fopen(filename, "r");
+
+  sprintf(filename, "memory/" HASH_FORMAT ".mem.zstd", ts_hash);
+  int footprint = rand();
+  char tmpfile[64];
+  sprintf(tmpfile, "/tmp/dump.%08x", footprint);
+  decompress_file(filename, tmpfile);
+
+  FILE *mem = fopen(tmpfile, "r");
   assert(mem);
   for (auto &item: items)
   {
@@ -311,6 +318,7 @@ void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size) {
     break;
   }
   fclose(mem);
+  unlink(tmpfile);
   return ret;
 }
 
@@ -379,9 +387,15 @@ void tracee_state::recover_file_descriptors(int index) {
 void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps) {
   char filename[64];
 
-  sprintf(filename, "memory/" HASH_FORMAT ".mem", ts_hash);
+  sprintf(filename, "memory/" HASH_FORMAT ".mem.zstd", ts_hash);
   LOG_TRACE("restore from %s", filename);
-  FILE *dump = fopen(filename, "r");
+  
+  int footprint = rand();
+  char tmpfile[64];
+  sprintf(tmpfile, "/tmp/dump.%08x", footprint);
+  decompress_file(filename, tmpfile);
+
+  FILE *dump = fopen(tmpfile, "r");
   assert(dump);
 
   /* read memory content */
@@ -427,6 +441,8 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps) {
   show_regs(&regs);
   fclose(mem);
   fclose(dump);
+
+  unlink(tmpfile);
 }
 
 void tracee_state::recover_proc_files() {
@@ -524,7 +540,7 @@ void tracee_state::create_mem_reg_snapshot() {
   /* create new temporary dump file */
   int footprint = rand();
   char tmpfile[64];
-  sprintf(tmpfile, "dump.%08x", footprint);
+  sprintf(tmpfile, "/tmp/dump.%08x", footprint);
   FILE *dump = fopen(tmpfile, "w+");
   assert(dump);
 
@@ -578,15 +594,21 @@ void tracee_state::create_mem_reg_snapshot() {
 
   fclose(maps);
   fclose(mem);
+  int pos = ftell(dump);
   save_structure_data(dump);
 
   /* calculate hash */
   fseek(dump, 0, SEEK_SET);
   hash_type hash = crc32(dump);
+
+  ftruncate(fileno(dump), pos);
   fclose(dump);
 
-  sprintf(filename, "memory/" HASH_FORMAT ".mem", hash);
-  assert(rename(tmpfile, filename) == 0);
+
+  sprintf(filename, "memory/" HASH_FORMAT ".mem.zstd", hash);
+  compress_file(tmpfile, filename, 1);
+  // assert(rename(tmpfile, filename) == 0);
+  unlink(tmpfile);
   ts_hash = hash;
 }
 

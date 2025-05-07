@@ -4,6 +4,6 @@
 #include "common.h"
 #include <string>
 
-int deserialize_std_string(const bytes *buf, std::string &s);
-int serialize_std_string(bytes *buf, std::string &s);
+int compress_file(const char *in_path, const char *out_path, int level);
+int decompress_file(const char *in_path, const char *out_path);
 #endif
