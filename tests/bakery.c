@@ -1,69 +1,68 @@
-/* #include <assert.h> */
+/* bakery_lock is too long with ~50 instructions, making it hard to     *
+ * INSTRUCTION LEVEL model check it. bakery_mp.c provide a multiprocess *
+ * version of this algorithm. It uses `lock` file as "shared memory",   * 
+ * which in itself act like some kind of atomic register.               *
+ * In fact, bakery algorithm highly depends on register's atomicity and *
+ * is very sensible to compiler intstruction reordering and CPU out-of- *
+ * order execution.                                                     */
+
+/* In this example, any compile optimization (e.g. -O1) will lead to    *
+ * liveness problem. */
+   
 #include <pthread.h>
-#include <sched.h>
 #include <stdlib.h>
 #include <stdio.h>
-#include <fcntl.h>
 #include <unistd.h>
-/* #define USE_CHOOSING */
+#include <stdbool.h>
+#define USE_CHOOSING
 
 #define max(a, b) ((a > b) ? (a) : (b))
-long critical;
+volatile long critical[2];
 
-int lk;
-
-int Read(int index) {
-  int ret;
-  lseek(lk, 4 * index, SEEK_SET);
-  read(lk, &ret, 4);
-  return ret;
-}
-
-void Write(int index, int value) {
-  lseek(lk, 4 * index, SEEK_SET);
-  write(lk, &value, 4);
-}
+int number[2];
+bool entering[2];
 
 void bakery_lock(int arg) {
   int i = arg;
 #ifdef USE_CHOOSING
-  Write(2 + i, 1);
+  entering[i] = true;
 #endif
-  int number0 = Read(0), number1 = Read(1);
-  Write(i, max(number0, number1) + 1);
+  number[i] = max(number[0], number[1]) + 1;
 #ifdef USE_CHOOSING
-  Write(2 + i, 0);
+  entering[i] = false;
 #endif
   for (int j = 0; j < 2; j++) {
     if (j == i) continue;
 #ifdef USE_CHOOSING
-L2:;
-    int Choosingj = Read(2 + j);
-    if (Choosingj == 1) goto L2;
+    while (entering[j] == true);
 #endif
-L3:;
-    int numberj = Read(j), numberi = Read(i);
-    if (numberj != 0 && (numberj < numberi || (numberj == numberi && j < i))) goto L3;
+    while (number[j] != 0 && (number[j] < number[i] || (number[j] == number[i] && j < i)));
   }
 }
 
 void bakery_unlock(int arg) {
-  Write(arg, 0);
+  number[arg] = 0;
 }
 
-void bakery(int me) {
+void *bakery(void *me) {
+  long i = (long)me;
   while (1) {
-    bakery_lock(me);
-    critical = 1;
-    sched_yield();
-    /* putchar("()"[me]); */
-    critical = 0;
-    bakery_unlock(me);
+    bakery_lock(i);
+    for (int j = 0; j < 100; j++) {
+      putchar('a' + i);
+      fsync(1);
+    }
+    putchar('\n');
+    bakery_unlock(i);
   }
 }
 
 int main(int argc, char *argv[]) {
-  lk = open("lock", O_RDWR);
-  bakery(atoi(argv[1]));
-  close(lk);
+  setbuf(stdout, NULL);
+  pthread_t p[2];
+  pthread_create(&p[0], NULL, bakery, (void *)0);
+  pthread_create(&p[1], NULL, bakery, (void *)1);
+
+  pthread_join(p[0], NULL);
+  pthread_join(p[1], NULL);
 }

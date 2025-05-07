@@ -1,7 +1,6 @@
 #include "common.h"
 #include "guest.h"
 #include "state.h"
-#include "md5.h"
 #include "debug.h"
 #include "monitor.h"
 #include <assert.h>
@@ -35,29 +34,13 @@ void fcopy(char *source_filename, char *destination_filename);
 std::map<int, void *> rseq_struct;
 std::map<int, int> rseq_len;
 
-static uint8_t hex2byte(const char *s) {
-  uint8_t m = 0, n = 0;
-  if ('0' <= s[0] && '9' >= s[0])
-    m = s[0] - '0';
-  else
-    m = s[0] - 'a' + 10;
-  if ('0' <= s[1] && '9' >= s[1])
-    n = s[1] - '0';
-  else
-    n = s[1] - 'a' + 10;
-  assert(0 <= m && m < 16);
-  assert(0 <= n && n < 16);
-  return (m << 4) | n;
-}
-
 /* serialized process state don't include memory and mappings 
  * memory will be recorded when dumping,
  * and mappings will be directly copied from procfs (?)
  */
-static const char *hexdic = "0123456789abcdef";
 char printbuf[1024];
 
-static void construct_syscall_string(std::string ts_hash);
+static void construct_syscall_string(hash_type ts_hash);
 static void construct_syscall_string(tracee_state *t);
 
 void log_syscall(tracee_state *t) {
@@ -67,9 +50,6 @@ void log_syscall(tracee_state *t) {
 
 /* only one tracee_state changed comparing to source_state */
 sys_state::sys_state(struct syscall_info *info) {
-  char ss_hash_tmp[33];
-  memset(ss_hash_tmp, '0', sizeof(ss_hash_tmp));
-
   /* construct all tracee for init_state */
 
   // int index = ptmc_state.cursor;
@@ -81,7 +61,7 @@ sys_state::sys_state(struct syscall_info *info) {
       child[j].save_proc_full_data();
       exited[j] = ptmc_state.exited[j];
       ts_hash[j] = child[j].ts_hash;
-      LOG_DEBUG("Create tstate %s", ts_hash[j].c_str());
+      LOG_DEBUG("Create tstate " HASH_FORMAT, ts_hash[j]);
     }
   // }
   // else 
@@ -92,7 +72,7 @@ sys_state::sys_state(struct syscall_info *info) {
   //   log_syscall(child[index]);
   //   exited[index] = ptmc_state.exited[index];
   //   ts_hash[index] = child[index]->ts_hash;
-  //   LOG_DEBUG("Create tstate %s", ts_hash[index].c_str());
+  //   LOG_DEBUG("Create tstate " HASH_FORMAT, ts_hash[index]);
 
   //   /* not cursor: inherit */
   //   for (int j = 0; j < NP; j++)
@@ -105,20 +85,13 @@ sys_state::sys_state(struct syscall_info *info) {
   // }
 
   /* calc md5 xor */
+  hash_type ss_hash_tmp = 0ULL;
   for (int j = 0; j < NP; j++) 
   {
-    for (int i = 0; i < 16; i++) 
-    {
-      uint8_t byte1 = hex2byte(ts_hash[j].c_str() + 2 * i);
-      uint8_t byte2 = hex2byte(ss_hash_tmp + 2 * i);
-      byte2 ^= byte1;
-      ss_hash_tmp[2 * i] = hexdic[byte2 / 16];
-      ss_hash_tmp[2 * i + 1] = hexdic[byte2 % 16];
-    }
+    ss_hash_tmp ^= ts_hash[j];
   }
-  ss_hash_tmp[HASH_LEN] = 0;
-  ss_hash = std::string(ss_hash_tmp);
-  LOG_DEBUG("Create sstate %s", ss_hash_tmp);
+  ss_hash = ss_hash_tmp;
+  LOG_DEBUG("Create sstate " HASH_FORMAT, ss_hash_tmp);
 }
 
 void state_queue_append(sys_state *s) {
@@ -141,18 +114,18 @@ void sys_state::save_shared_files() {
   for (auto &shared_file: ptmc_state.shared_files) 
   {
     char dump_filename[128];
-    sprintf(dump_filename, "filesystem/%.32s.sfs/%s", ss_hash.c_str(), shared_file.c_str());
+    sprintf(dump_filename, "filesystem/" HASH_FORMAT ".sfs/%s", ss_hash, shared_file.c_str());
     fcopy((char *)shared_file.c_str(), dump_filename);
   }
 }
 
 int sys_state::save_metadata() {
   char filename[64];
-  sprintf(filename, "sstate/%.32s.ss", ss_hash.c_str());
-  LOG_DEBUG("to store sstate %.32s", ss_hash.c_str());
+  sprintf(filename, "sstate/" HASH_FORMAT ".ss", ss_hash);
+  LOG_DEBUG("to store sstate " HASH_FORMAT, ss_hash);
   if (access(filename, R_OK) != 0)
   {
-    LOG_DEBUG("sys_state stores %.32s traceeState %.32s and something else ...", ss_hash.c_str(), ts_hash[0].c_str());
+    LOG_DEBUG("sys_state stores " HASH_FORMAT " traceeState " HASH_FORMAT " and something else ...", ss_hash, ts_hash[0]);
     std::ofstream ofs(filename, std::ios::binary);
     cereal::BinaryOutputArchive outputArchive(ofs);
     outputArchive(*this);
@@ -166,23 +139,23 @@ int sys_state::save_metadata() {
 
 void state_tree_add(sys_state *s, sys_state *t, int which) {
   if (state_tree.count(t->ss_hash) == 0)
-    state_tree[t->ss_hash] = std::pair<std::string, int>(s->ss_hash, which);
+    state_tree[t->ss_hash] = std::pair<hash_type, int>(s->ss_hash, which);
 }
 
 void show_syscall_history() {
-  std::string ss = ptmc_state.dest_state.ss_hash;
+  hash_type ss = ptmc_state.dest_state.ss_hash;
   std::stack<std::string> print_stack;
   int cnt = 0;
   while (state_tree.count(ss)) 
   {
     cnt++;
-    std::string pre = state_tree[ss].first;
+    hash_type pre = state_tree[ss].first;
     int which = state_tree[ss].second;
     sys_state s = sys_state(ss);
     construct_syscall_string(s.ts_hash[which]);
     print_stack.push(std::string(printbuf) + "\n");
-    sprintf(printbuf, "%s => %s\n Tracee %d: ",
-        pre.c_str(), ss.c_str(), which);
+    sprintf(printbuf, HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d: ",
+        pre, ss, which);
     print_stack.push(printbuf);
     ss = pre;
   }
@@ -293,17 +266,17 @@ static bool existmaps_item(maps_item &a, std::vector<maps_item> array) {
 
 /* NOTICE: addr may point read only memory, in which *
  * case has no dump, and need to be read from process */
-void *read_mem(std::string ts_hash, int pid, uint64_t addr, long size) {
+void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size) {
   bytes *ret = (bytes *)malloc(size + 1);
   ret[size] = 0;
   char filename[64];
-  sprintf(filename, "mappings/%.32s.maps", ts_hash.c_str());
+  sprintf(filename, "mappings/" HASH_FORMAT ".maps", ts_hash);
   FILE *maps = fopen(filename, "r");
   assert(maps);
   std::vector<maps_item> items;
   get_maps_item(items, maps);
   fclose(maps);
-  sprintf(filename, "memory/%.32s.mem", ts_hash.c_str());
+  sprintf(filename, "memory/" HASH_FORMAT ".mem", ts_hash);
   FILE *mem = fopen(filename, "r");
   assert(mem);
   for (auto &item: items)
@@ -352,7 +325,7 @@ std::vector<maps_item> tracee_state::recover_brk_mappings() {
     sprintf(filename, "/proc/%d/maps", pid);
     FILE *current_maps = fopen(filename, "r");
     assert(current_maps);
-    sprintf(filename, "mappings/%.32s.maps", ts_hash.c_str());
+    sprintf(filename, "mappings/" HASH_FORMAT ".maps", ts_hash);
     LOG_DEBUG("open mapping file %s", filename);
     FILE *origin_maps = fopen(filename, "r");
     assert(origin_maps);
@@ -406,7 +379,7 @@ void tracee_state::recover_file_descriptors(int index) {
 void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps) {
   char filename[64];
 
-  sprintf(filename, "memory/%.32s.mem", ts_hash.c_str());
+  sprintf(filename, "memory/" HASH_FORMAT ".mem", ts_hash);
   LOG_TRACE("restore from %s", filename);
   FILE *dump = fopen(filename, "r");
   assert(dump);
@@ -464,7 +437,7 @@ void sys_state::recover_shared_files() {
   for (auto &shared_file: ptmc_state.shared_files) 
   {
     char dump_filename[128];
-    sprintf(dump_filename, "filesystem/%.32s.sfs/%s", ss_hash.c_str(), shared_file.c_str());
+    sprintf(dump_filename, "filesystem/" HASH_FORMAT ".sfs/%s", ss_hash, shared_file.c_str());
     fcopy(dump_filename, (char *)shared_file.c_str());
   }
 }
@@ -492,10 +465,10 @@ void tracee_state::recover_running_state(int index) {
   ptmc_state.time[index] = tv;
 }
 
-sys_state::sys_state(std::string hash) {
-  ss_hash = std::string(hash);
+sys_state::sys_state(hash_type hash) {
+  ss_hash = hash;
   char filename[64];
-  sprintf(filename, "sstate/%.32s.ss", hash.c_str());
+  sprintf(filename, "sstate/" HASH_FORMAT ".ss", hash);
 
   std::ifstream ifs(filename, std::ios::binary);
   assert(ifs.is_open());
@@ -520,11 +493,14 @@ void sys_state::recover_running_state() {
   }
 }
 
-tracee_state::tracee_state(std::string hash) {
+tracee_state::tracee_state(hash_type hash) {
   ts_hash = hash;
-  LOG_DEBUG("restore tracee_state = %s", hash.c_str());
+  LOG_DEBUG("restore tracee_state = " HASH_FORMAT, hash);
   
-  std::ifstream ifs("tstate/" + hash + ".ts", std::ios::binary);
+  char filename[64];
+  sprintf(filename, "tstate/" HASH_FORMAT ".ts", hash);
+
+  std::ifstream ifs(filename, std::ios::binary);
   if (!ifs.is_open())
   {
     LOG_CRIT("Open traceeState file failed");
@@ -540,6 +516,7 @@ tracee_state::tracee_state(std::string hash) {
   }
 }
 
+uint64_t crc32(FILE *fp);
 void tracee_state::create_mem_reg_snapshot() {
   char line[1024];
   /* save memory image to file, and calculate process state hash */
@@ -604,14 +581,13 @@ void tracee_state::create_mem_reg_snapshot() {
   save_structure_data(dump);
 
   /* calculate hash */
-  uint8_t md5[HASH_LEN + 1];
-  md5File(dump, md5);
+  fseek(dump, 0, SEEK_SET);
+  hash_type hash = crc32(dump);
   fclose(dump);
 
-  md5[HASH_LEN] = 0;
-  sprintf(filename, "memory/%.32s.mem", md5);
+  sprintf(filename, "memory/" HASH_FORMAT ".mem", hash);
   assert(rename(tmpfile, filename) == 0);
-  ts_hash = std::string((char *)md5);
+  ts_hash = hash;
 }
 
 void tracee_state::get_file_descriptors() {
@@ -686,7 +662,9 @@ void tracee_state::save_structure_data(FILE *fp) {
 }
 
 void tracee_state::save_structure_data() {
-  std::ofstream ofs("tstate/" + ts_hash + ".ts", std::ios::binary);
+  char filename[64];
+  sprintf(filename, "tstate/" HASH_FORMAT ".ts", ts_hash);
+  std::ofstream ofs(filename, std::ios::binary);
   if (!ofs.is_open())
     LOG_CRIT("failed to open tstate file for ts_hash = %s", ts_hash);
   cereal::BinaryOutputArchive outputArchive(ofs);
@@ -699,7 +677,7 @@ void tracee_state::save_brk_mappings() {
   char dest[256];
 
   sprintf(src, "/proc/%d/maps", pid);
-  sprintf(dest, "mappings/%.32s.maps", ts_hash.c_str());
+  sprintf(dest, "mappings/" HASH_FORMAT ".maps", ts_hash);
 
   fcopy(src, dest);
 
@@ -844,7 +822,7 @@ static void construct_syscall_string(tracee_state *t) {
   }
 }
 
-static void construct_syscall_string(std::string ts_hash) {
+static void construct_syscall_string(hash_type ts_hash) {
   tracee_state ts(ts_hash);
   construct_syscall_string(&ts);
 }

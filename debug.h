@@ -50,6 +50,7 @@ static inline void *Lrealloc(void *raw, size_t size) {
 #endif /* DEBUG */
   return realloc(raw, size);
 }
+
 template <class loggerPtr, class... Args>
 void loglineprintf(loggerPtr                 logger,
     spdlog::level::level_enum level,

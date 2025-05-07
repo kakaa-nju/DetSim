@@ -2,7 +2,7 @@
   "Loglevel": 2,
   "Nodes": 2,
   "Tracee": [
-    ["./tests/bakery", "0"], ["./tests/bakery", "1"]
+    ["./tests/bakery_mp", "0"], ["./tests/bakery_mp", "1"]
   ],
   "Addr": [ "192.168.0.1", "192.168.0.2" ],
   "SharedFiles": [ "lock" ],

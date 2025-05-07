@@ -16,6 +16,9 @@
 #include "cereal/types/list.hpp"
 #include "cereal/types/unordered_map.hpp"
 
+typedef uint32_t hash_type;
+#define HASH_FORMAT "%08x"
+
 /* exec state */
 
 struct syscall_info {
@@ -31,7 +34,7 @@ struct syscall_info {
 }; 
 
 typedef struct tracee_state {
-  std::string ts_hash;
+  hash_type ts_hash;
   /* about syscall_info: *
    * here the syscall indicates the last DONE syscall */
   syscall_info si;
@@ -79,7 +82,7 @@ typedef struct tracee_state {
   /* fs -> struct (Constructor) *
    * Read struct from tstate/#tshash.ts, then construct the *
    * structure. */
-  tracee_state(std::string hash);
+  tracee_state(hash_type hash);
 
 /* --------------------------------------------------------- */
   /* struct -> running *
@@ -112,8 +115,8 @@ typedef struct tracee_state {
 } tracee_state;
 
 typedef struct sys_state {
-  std::string ss_hash; // different sys_state may share same traceeState
-  std::string ts_hash[NP];
+  hash_type ss_hash; // different sys_state may share same traceeState
+  hash_type ts_hash[NP];
   tracee_state child[NP];
   int exited[NP];
 
@@ -130,7 +133,7 @@ typedef struct sys_state {
   /* fs -> struct *
    * Construct sys_state from dump file indicated by hash. *
    * Just read metadata. */
-  sys_state(std::string hash);
+  sys_state(hash_type hash);
 
   template <class Archive>
     void serialize(Archive &ar) {
@@ -154,9 +157,9 @@ typedef struct sys_state {
 } sys_state;
 
 /* f: child state -> (parent state, which) */
-typedef std::unordered_map<std::string, std::pair<std::string, int> > TSS;
-typedef std::deque<std::string> LSS;
-typedef std::unordered_set<std::string> SSS;
+typedef std::unordered_map<hash_type, std::pair<hash_type, int> > TSS;
+typedef std::deque<hash_type> LSS;
+typedef std::unordered_set<hash_type> SSS;
 
 void state_queue_append(sys_state *s);
 void state_queue_append_front(sys_state *s);

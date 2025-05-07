@@ -17,8 +17,8 @@ typedef struct {
   int choose;
   sys_state source_state;
   sys_state dest_state;
-  std::string sysstate_hash; /* state in operating system */
-  std::string toload;
+  hash_type sysstate_hash; /* state in operating system */
+  hash_type toload;
 
   int exited[NP];
   std::list<ptmc_sock> sock_lists[NP];

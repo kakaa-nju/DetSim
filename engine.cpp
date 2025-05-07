@@ -307,7 +307,7 @@ int exec_once(syscall_info *info) {
   pid_t pid = pids[index];
 
   if (s.exited[index] == 1) return -1;
-  LOG_DEBUG("exec_once from state %.32s:%.32s", s.ss_hash.c_str(), s.child[index].ts_hash.c_str());
+  LOG_DEBUG("exec_once from state " HASH_FORMAT ":" HASH_FORMAT, s.ss_hash, s.child[index].ts_hash);
 
   while (true) 
   {
@@ -338,8 +338,8 @@ static int check_state() {
     if (!success)
       LOG_ERROR("Failed to evaluate expression \"%s\"", assertion.c_str());
     if (val == false) {
-      printf("Assertion \"%s\" fail at sys_state %s!\n", 
-          assertion.c_str(), ptmc_state.dest_state.ss_hash.c_str());
+      printf("Assertion \"%s\" fail at sys_state " HASH_FORMAT "!\n", 
+          assertion.c_str(), ptmc_state.dest_state.ss_hash);
       return 1;
     }
   }
@@ -436,7 +436,7 @@ again:
       if (ckpt != CKPT_DISCARD) 
       {
         ptmc_state.dest_state.save_metadata();
-        if (!state_set.contains(ptmc_state.dest_state.ss_hash))
+        if (!state_set.count(ptmc_state.dest_state.ss_hash))
         {
           state_queue_append(&ptmc_state.dest_state);
           state_set.emplace(ptmc_state.dest_state.ss_hash);

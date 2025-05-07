@@ -47,7 +47,7 @@ void read_config(const char *cfg_file) {
 
   cJSON *Nodes = cJSON_GetObjectItem(cfg, "Nodes");
   int nodes = cJSON_GetNumberValue(Nodes);
-  Assert(nodes == NP, "Compilation don't support %d processes, please EDIT common.h and recompile", nodes);
+  Assert(nodes == NP, "Build don't support %d processes, please compile with 'NP=%d' and rebuild", nodes, nodes);
   cJSON *tracee = cJSON_GetObjectItem(cfg, "Tracee");
   
   for (int i = 0; i < nodes; i++) 
@@ -103,6 +103,7 @@ void read_config(const char *cfg_file) {
   cJSON *user_check = cJSON_GetObjectItem(cfg, "UserCheck");
   if (user_check)
   {
+    LOG_INFO("Compiling user check sources");
     int user_check_cnt = cJSON_GetArraySize(user_check);
     for (int j = 0; j < user_check_cnt; j++)
     {
@@ -131,6 +132,7 @@ void read_config(const char *cfg_file) {
       int (*func)() = (int (*)())dlsym(handle, "check");
       ptmc_state.user_checks.push_back(func);
     }
+    LOG_INFO("Done");
   }
 }
 
@@ -345,10 +347,10 @@ static int cmd_info(char *args){
   {
     // printf("No Arguments!\n");
     sys_state &s = ptmc_state.dest_state;
-    printf("Stops at state %s\n", s.ss_hash.c_str());
+    printf("Stops at state " HASH_FORMAT " \n", s.ss_hash);
     for (int i = 0; i < NP; i++) 
     {
-      printf("Tracee #%d: %s, exited = %d\n", i, s.ts_hash[i].c_str(), s.exited[i]);
+      printf("Tracee #%d: " HASH_FORMAT ", exited = %d\n", i, s.ts_hash[i], s.exited[i]);
     }
     s.child[ptmc_state.cursor].show_syscall(&s.child[ptmc_state.cursor].si);
 
@@ -382,7 +384,7 @@ static int cmd_load(char *args) {
   }
   else {
     /* match */
-    std::vector<std::string> s;
+    std::vector<hash_type> s;
     DIR *dir = opendir("sstate");
     assert(dir);
     struct dirent *de;
@@ -390,8 +392,12 @@ static int cmd_load(char *args) {
     {
       if (de->d_name[0] == '.') 
         continue;
-      if (strstr(de->d_name, args) == de->d_name)
-        s.push_back(std::string(de->d_name, de->d_name + 32));
+      if (strstr(de->d_name, args) == de->d_name) 
+      {
+        hash_type hash;
+        sscanf(de->d_name, "%lx", &hash);
+        s.push_back(hash);
+      }
     }
     closedir(dir);
 
