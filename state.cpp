@@ -624,7 +624,7 @@ void tracee_state::get_file_descriptors() {
 
     fscanf(fp, "pos: %d flags: %o mnt_id: %d ino: %d", &new_fd.pos,
            &new_fd.flags, &new_fd.mnt_id, &new_fd.ino);
-    close(fd);
+    fclose(fp);
 
     fd_list.emplace_back(new_fd);
   }

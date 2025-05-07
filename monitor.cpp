@@ -134,6 +134,8 @@ void read_config(const char *cfg_file) {
     }
     LOG_INFO("Done");
   }
+  
+  free(cfg);
 }
 
 static inline void welcome() {

@@ -280,7 +280,7 @@ static void init_tracee_state(pid_t pid) {
   ptrace_right(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACESYSGOOD);
 
   /* skip execve */
-  assert(extract_one_syscall(pid).nr == SYS_execve);
+  while (extract_one_syscall(pid).nr != SYS_execve);
   
   /* execve(2): after a successful execve, a SIGTRAP *
    * (instead of SIGTRAP | 0x80) will be sent to it  */

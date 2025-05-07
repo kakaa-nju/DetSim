@@ -2,7 +2,7 @@
 CC = gcc
 CXX = ccache g++
 LD = g++
-CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -g -O3 -msse4.2
+CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
 LDFLAGS = -ldwarf -lreadline -lcjson -lunwind -ldw -rdynamic
 
 SRCS = monitor.cpp main.cpp state.cpp sockstate.cpp guest.cpp fsstate.cpp utils.cpp crc32.cpp engine.cpp expr.cpp emu.cpp
