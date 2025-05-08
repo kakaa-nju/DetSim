@@ -1,4 +1,5 @@
 #include <ctype.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <sys/ptrace.h>
@@ -7,28 +8,18 @@
 #include <unistd.h>
 #include <zstd.h>
 #include <stdlib.h>
+#include <libgen.h>
 #include "debug.h"
 #include "common.h"
-
-/* ptrace with error check */
-long ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data) {
-  /* ptrace(2): On success, the PTRACE_PEEK* operations return the requested *
-   * data ... and other operations return zero. On error, all operations     *
-   * return -1, and errno is set to indicate the error. Since the value      *
-   * returned by a successful PTRACE_PEEK* operation may be -1, the caller   *
-   * must clear errno before the call, and then check it ...                 */
-  errno = 0;
-  int result = ptrace(op, pid, addr, data);
-  if (errno)
-    panic("ptrace: %s", strerror(errno));
-  return result;
-}
+#include "state.h"
 
 #define CHUNK_SIZE 16 KiB
+#define BUFFER_SIZE 8 KiB
 
-int compress_file(const char* in_path, const char* out_path, int level) {
+hash_type crc32(FILE *fp);
+hash_type compress_file(const char* in_path, const char* out_path, int level) {
   FILE* fin = fopen(in_path, "rb");
-  FILE* fout = fopen(out_path, "wb");
+  FILE* fout = fopen(out_path, "wb+");
   if (!fin || !fout) {
     perror("fopen");
     return 1;
@@ -53,11 +44,14 @@ int compress_file(const char* in_path, const char* out_path, int level) {
     fwrite(out_buf, 1, out_size, fout);
   }
 
+  fseek(fout, 0, SEEK_SET);
+  int ret = crc32(fout);
+
   fclose(fin);
   fclose(fout);
   free(in_buf);
   free(out_buf);
-  return 0;
+  return ret;
 }
 
 int decompress_file(const char* in_path, const char* out_path) {
@@ -95,3 +89,119 @@ int decompress_file(const char* in_path, const char* out_path) {
   free(out_buf);
   return 0;
 }
+
+int filecmp(const char *file1, const char *file2) {
+    FILE *fp1 = fopen(file1, "rb");
+    FILE *fp2 = fopen(file2, "rb");
+
+    if (!fp1 || !fp2) {
+        fprintf(stderr, "Error opening files.\n");
+        if (fp1) fclose(fp1);
+        if (fp2) fclose(fp2);
+        return -1;
+    }
+
+    unsigned char buf1[BUFFER_SIZE];
+    unsigned char buf2[BUFFER_SIZE];
+
+    size_t bytes_read1, bytes_read2;
+    int result = 0;
+
+    while (1) {
+        bytes_read1 = fread(buf1, 1, BUFFER_SIZE, fp1);
+        bytes_read2 = fread(buf2, 1, BUFFER_SIZE, fp2);
+
+        if (bytes_read1 != bytes_read2) {
+            result = 1; // size mismatch
+            break;
+        }
+
+        if (bytes_read1 == 0) {
+            // both files reached EOF
+            break;
+        }
+
+        if (memcmp(buf1, buf2, bytes_read1) != 0) {
+            result = 1; // content mismatch
+            break;
+        }
+    }
+
+    fclose(fp1);
+    fclose(fp2);
+    return result;
+}
+
+int mkdir_p(const char *path) {
+    char tmp[256];
+    char *p = NULL;
+    size_t len;
+
+    snprintf(tmp, sizeof(tmp), "%s", path);
+    len = strlen(tmp);
+    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
+
+    for (p = tmp + 1; *p; p++) 
+    {
+        if (*p == '/') {
+            *p = '\0';
+            mkdir(tmp, 0755);
+            *p = '/';
+        }
+    }
+    return mkdir(tmp, 0755);
+}
+
+void fcopy(char *source_filename, char *destination_filename) {
+  int source_fd = open(source_filename, O_RDONLY);
+  if (source_fd == -1) 
+  {
+    perror("Error opening source file");
+    return;
+  }
+
+  char *dup = strdup(destination_filename);
+  char *dir = dirname(dup);
+  mkdir_p(dir);
+  free(dup);
+
+  int dest_fd = open(
+      destination_filename, 
+      O_WRONLY | O_CREAT | O_TRUNC,
+      S_IRUSR | S_IWUSR
+      );
+
+  if (dest_fd == -1) 
+  {
+    perror("Error opening destination file");
+    close(source_fd);
+    return;
+  }
+
+  char buffer[BUFFER_SIZE];
+  ssize_t bytes_read, bytes_written;
+
+  while ((bytes_read = read(source_fd, buffer, BUFFER_SIZE)) > 0) 
+  {
+    bytes_written = write(dest_fd, buffer, bytes_read);
+    if (bytes_written != bytes_read) 
+    {
+      perror("Error writing to destination file");
+      close(source_fd);
+      close(dest_fd);
+      return;
+    }
+  }
+
+  if (bytes_read == -1) 
+  {
+    perror("Error reading from source file");
+    close(source_fd);
+    close(dest_fd);
+    return;
+  }
+
+  close(source_fd);
+  close(dest_fd);
+}
+

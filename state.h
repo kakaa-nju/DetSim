@@ -12,9 +12,6 @@
 #include "fsstate.h"
 #include "guest.h"
 #include "common.h"
-#include "cereal/archives/binary.hpp"
-#include "cereal/types/list.hpp"
-#include "cereal/types/unordered_map.hpp"
 
 typedef uint32_t hash_type;
 #define HASH_FORMAT "%08x"

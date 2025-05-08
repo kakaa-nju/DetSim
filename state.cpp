@@ -6,6 +6,8 @@
 #include "utils.h"
 #include <assert.h>
 #include <bits/types/cookie_io_functions_t.h>
+#include "cereal/types/list.hpp"
+#include "cereal/types/unordered_map.hpp"
 #include <cereal/archives/binary.hpp>
 #include <ctime>
 #include <spdlog/spdlog.h>
@@ -91,6 +93,27 @@ sys_state::sys_state(struct syscall_info *info) {
   {
     ss_hash_tmp ^= ts_hash[j];
   }
+
+  while (true)
+  {
+    if (!state_set.count(ss_hash_tmp)) /* hash doesn't exist */
+      break; /* to use it */
+
+    sys_state s(ss_hash_tmp);
+    int i = 0;
+    for (i = 0; i < NP; i++)
+    {
+      if (s.ts_hash[i] != ts_hash[i])
+        break;
+    }
+    if (i == NP) /* all the same */
+      goto ret;
+    /* it's different */
+    ss_hash_tmp++;
+    continue;
+  }
+
+ret:
   ss_hash = ss_hash_tmp;
   LOG_DEBUG("Create sstate " HASH_FORMAT, ss_hash_tmp);
 }
@@ -174,79 +197,6 @@ static bytes *membuf;
 static int membufsz = 4096;
 
 #define BUFFER_SIZE 4096
-int mkdir_p(const char *path) {
-    char tmp[256];
-    char *p = NULL;
-    size_t len;
-
-    snprintf(tmp, sizeof(tmp), "%s", path);
-    len = strlen(tmp);
-    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
-
-    for (p = tmp + 1; *p; p++) 
-    {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, 0755);
-            *p = '/';
-        }
-    }
-    return mkdir(tmp, 0755);
-}
-
-void fcopy(char *source_filename, char *destination_filename) {
-  int source_fd = open(source_filename, O_RDONLY);
-  if (source_fd == -1) 
-  {
-    perror("Error opening source file");
-    return;
-  }
-
-  char *dup = strdup(destination_filename);
-  char *dir = dirname(dup);
-  mkdir_p(dir);
-  free(dup);
-
-  int dest_fd = open(
-      destination_filename, 
-      O_WRONLY | O_CREAT | O_TRUNC,
-      S_IRUSR | S_IWUSR
-      );
-
-  if (dest_fd == -1) 
-  {
-    perror("Error opening destination file");
-    close(source_fd);
-    return;
-  }
-
-  char buffer[BUFFER_SIZE];
-  ssize_t bytes_read, bytes_written;
-
-  while ((bytes_read = read(source_fd, buffer, BUFFER_SIZE)) > 0) 
-  {
-    bytes_written = write(dest_fd, buffer, bytes_read);
-    if (bytes_written != bytes_read) 
-    {
-      perror("Error writing to destination file");
-      close(source_fd);
-      close(dest_fd);
-      return;
-    }
-  }
-
-  if (bytes_read == -1) 
-  {
-    perror("Error reading from source file");
-    close(source_fd);
-    close(dest_fd);
-    return;
-  }
-
-  close(source_fd);
-  close(dest_fd);
-}
-
 /* NO CONSIDER ABOUT PERFORMANCE */
 static bool maps_item_eq(maps_item &a, maps_item &b) {
   return a.start == b.start && a.end == b.end;
@@ -594,20 +544,31 @@ void tracee_state::create_mem_reg_snapshot() {
 
   fclose(maps);
   fclose(mem);
-  int pos = ftell(dump);
   save_structure_data(dump);
 
-  /* calculate hash */
-  fseek(dump, 0, SEEK_SET);
-  hash_type hash = crc32(dump);
-
-  ftruncate(fileno(dump), pos);
   fclose(dump);
 
+  /* compress first, then calculate hash */
+  sprintf(filename, "/tmp/%08x.mem.zstd", footprint);
+  hash_type hash = compress_file(tmpfile, filename, 1);
+  
+  char dest_filename[64];
+  while(true) 
+  {
+    sprintf(dest_filename, "memory/" HASH_FORMAT ".mem.zstd", hash);
+    if (access(dest_filename, R_OK)) /* file doesn't exist */
+      break; /* to create it */
 
-  sprintf(filename, "memory/" HASH_FORMAT ".mem.zstd", hash);
-  compress_file(tmpfile, filename, 1);
-  // assert(rename(tmpfile, filename) == 0);
+    if (!filecmp(dest_filename, filename))/* it's all the same */
+      goto ret;
+    /* it's different */
+    hash++;
+    continue;
+  }
+  fcopy(filename, dest_filename);
+
+ret:
+  unlink(filename);
   unlink(tmpfile);
   ts_hash = hash;
 }

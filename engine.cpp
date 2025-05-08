@@ -213,10 +213,12 @@ static int on_syscall_exit(
   case SYS_exit:
     return CKPT_EXIT;
 
-  case SYS_brk:
   case SYS_write:
+    return CKPT_YES;
+
   case SYS_read:
   case SYS_nanosleep:
+  case SYS_brk:
     return CKPT_NO;
 
   default:
