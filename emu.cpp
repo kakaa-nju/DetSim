@@ -3,6 +3,7 @@
 #include "monitor.h"
 #include "tests/raft/include/raft.h"
 #include "tests/raft/include/raft_private.h"
+#include <readline/readline.h>
 
 static struct timeval tv_addmsec(struct timeval tv, int msec) {
   long sec = tv.tv_sec;
@@ -19,6 +20,20 @@ static struct timeval choose(struct timeval tv) {
   raft_server_private_t raft;
   tracee_read_mem(pid, (void *)praft, &raft, sizeof(raft));
 
+  if (!is_auto_mode()) {
+    printf("raft.request_timeout = %d, raft.election_timeout_rand = %d\n",
+        raft.request_timeout, raft.election_timeout_rand);
+    printf("choose 0 represents +1ms, 1 represents -1ms\n");
+    static char *line_read = NULL;
+    if (line_read)
+    {
+      free(line_read);
+      line_read = NULL;
+    }
+
+    line_read = readline("You choose? [0/1]: ");
+    sscanf(line_read, "%d", &ptmc_state.choose);
+  }
   assert(ptmc_state.choose >= 0 && ptmc_state.choose < ptmc_state.n_choose);
 
   if (raft.state == RAFT_STATE_LEADER)

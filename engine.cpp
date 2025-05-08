@@ -167,10 +167,10 @@ static int on_syscall_exit(
       info->args[3], (struct sockaddr *)info->args[4], (socklen_t *)info->args[5]); 
     tracee_set_rax(pid, ret);
     info->rval = ret;
-    if (ret >= 0)  /* discard state */
-    { 
-      return CKPT_NO;
-    }
+    // if (ret >= 0)  /* discard state */
+    // { 
+    //   return CKPT_NO;
+    // }
     break;
   case SYS_sched_yield:
     break;
@@ -179,7 +179,7 @@ static int on_syscall_exit(
       info->args[3], (struct sockaddr *)info->args[4], info->args[5]); 
     tracee_set_rax(pid, ret);
     info->rval = ret;
-    return CKPT_NO;
+    return CKPT_YES;
   case SYS_gettimeofday:
     ret = emu_gettimeofday((struct timeval *)info->args[0], (struct timezone *)info->args[1]);
     tracee_set_rax(pid, ret);
@@ -384,7 +384,10 @@ int exec_store() {
   state_tree_add(&ptmc_state.source_state, &ptmc_state.dest_state, index);
   ptmc_state.state = PTMC_STOP;
 
-  assert(check_state() == 0);
+  if (check_state() != 0) {
+    printf("Reach illegal state.\n");
+    show_syscall_history();
+  }
   return 0;
 }
 
@@ -410,8 +413,8 @@ int exec_cont() {
   /* until no state in queue */
   while ((state_fetched = state_queue_extract()) != NULL) 
   {
-    int i = rand() % NP;
-    // for (int i = 0; i < NP; i++) 
+    // int i = rand() % NP;
+    for (int i = 0; i < NP; i++) 
     {
 again:
       ptmc_state.source_state = *state_fetched;

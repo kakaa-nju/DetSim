@@ -733,6 +733,15 @@ __attribute__((constructor)) void init_membuf() {
   membuf = (bytes *)Lmalloc(membufsz);
 }
 
+int format_sockaddr_in(char* dest, struct sockaddr_in* addr) {
+    char ipbuf[INET_ADDRSTRLEN];
+    const char* ipstr = inet_ntop(AF_INET, &(addr->sin_addr), ipbuf, sizeof(ipbuf));
+    if (!ipstr) ipstr = "invalid";
+
+    return sprintf(dest, "{sin_family=AF_INET, sin_port=htons(%d), sin_addr=inet_addr(\"%s\")}",
+             ntohs(addr->sin_port), ipstr);
+}
+
 int construct_mem2str(char *str, char *mem, int len) {
   int pos = 0;
   for (int i = 0; i < len; i++) 
@@ -760,8 +769,14 @@ static void construct_sys_sendto(char *str, tracee_state *t, syscall_info *info)
   assert(mem);
   str += sprintf(str, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
   str += construct_mem2str(str, mem, info->args[2]);
-  str += sprintf(str, "\", %ld) = %ld", info->args[2], info->rval);
+  str += sprintf(str, "\", %ld, %ld, ", info->args[2], info->args[3]);
   free(mem);
+
+  struct sockaddr_in* addr = (struct sockaddr_in*)t->read_snapshot_mem(info->args[4], info->args[5]);
+  str += format_sockaddr_in(str, addr);
+  free(addr);
+
+  str += sprintf(str, ", %ld) = %ld", info->args[5], info->rval);
 }
 
 static void construct_sys_recvfrom(char *str, tracee_state *t, syscall_info *info) {
@@ -769,8 +784,17 @@ static void construct_sys_recvfrom(char *str, tracee_state *t, syscall_info *inf
   assert(mem);
   str += sprintf(str, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
   str += construct_mem2str(str, mem, info->rval);
-  str += sprintf(str, "\", %ld) = %ld", info->args[2], info->rval);
+  str += sprintf(str, "\", %ld, %ld, ", info->args[2], info->args[3]);
   free(mem);
+
+  socklen_t* plen = (socklen_t*)t->read_snapshot_mem(info->args[5], sizeof(socklen_t));
+  socklen_t addrlen = *plen;
+
+  struct sockaddr_in* addr = (struct sockaddr_in*)t->read_snapshot_mem(info->args[4], addrlen);
+  str += format_sockaddr_in(str, addr);
+  free(addr);
+
+  str += sprintf(str, ", [%d]) = %ld", addrlen, info->rval);
 }
 
 static void construct_sys_clock_nanosleep(char *str, tracee_state *t, syscall_info *info) {

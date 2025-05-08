@@ -194,12 +194,13 @@ ssize_t emu_sendto(
     };
     free(dup);
 
-    /* lose packet */
-    if (chan.size() == 3) 
-      return len;
-
     /* add dg to channel */
     chan.push_back(dg);
+
+    if (chan.size() == 2) 
+      /* lose packet */
+      chan.pop_front();
+
     return len;
   }
 

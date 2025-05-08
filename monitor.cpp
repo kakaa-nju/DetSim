@@ -207,7 +207,7 @@ int load_exec_store();
 int is_auto_mode();
 
 /* We use the `readline' library to provide more flexibility to read from stdin. */
-static char* rl_gets() {
+char* rl_gets() {
   static char *line_read = NULL;
 
   if (line_read) 
@@ -228,7 +228,9 @@ static char* rl_gets() {
 
 int exec_cont();
 static int cmd_c(char *args) {
+  auto_mode = 1;
   exec_cont();
+  auto_mode = 0;
   return 0;
 }
 
@@ -248,6 +250,8 @@ static int cmd_load(char *args);
 
 static int cmd_info(char *args);
 
+static int cmd_batch(char *args);
+
 static struct {
   const char *name;
   const char *description;
@@ -260,6 +264,7 @@ static struct {
   { "sw", "Switch control focus on the n-th process", cmd_sw },
   { "load", "Load state of given StateHash", cmd_load },
   { "info", "Display current state history", cmd_info },
+  { "batch", "Read command list from file", cmd_batch },
 };
 
 #define NR_CMD (sizeof(cmd_table) / sizeof(cmd_table[0]))
@@ -338,6 +343,7 @@ static int cmd_si(char *args) {
       /* LOADED */
       exec_store();
   }
+  ptmc_state.dest_state.child[cursor].show_syscall(&ptmc_state.dest_state.child[cursor].si);
       
   return 0;
 }
@@ -383,39 +389,37 @@ static int cmd_load(char *args) {
   if (arg == NULL) 
   {
     printf("No Arguments!\n");
+    return 1;
   }
-  else {
-    /* match */
-    std::vector<hash_type> s;
-    DIR *dir = opendir("sstate");
-    assert(dir);
-    struct dirent *de;
-    while ((de = readdir(dir)) != NULL) 
+  /* match */
+  std::vector<hash_type> s;
+  DIR *dir = opendir("sstate");
+  assert(dir);
+  struct dirent *de;
+  while ((de = readdir(dir)) != NULL) 
+  {
+    if (de->d_name[0] == '.') 
+      continue;
+    if (strstr(de->d_name, args) == de->d_name) 
     {
-      if (de->d_name[0] == '.') 
-        continue;
-      if (strstr(de->d_name, args) == de->d_name) 
-      {
-        hash_type hash;
-        sscanf(de->d_name, "%lx", &hash);
-        s.push_back(hash);
-      }
+      hash_type hash;
+      sscanf(de->d_name, "%x", &hash);
+      s.push_back(hash);
     }
-    closedir(dir);
-
-    if (s.size() == 1) 
-    {
-      ptmc_state.sysstate_hash = s[0];
-      ptmc_state.state = PTMC_PRELOAD;
-    } 
-    else if (s.size() == 0)
-      printf("sys_state hash starts with %s has 0 candidates. Please specify another\n", args);
-    else 
-      printf("sys_state hash starts with %s has multiple candidates. Please specify one\n", args);
   }
+  closedir(dir);
+
+  if (s.size() == 1) 
+  {
+    ptmc_state.sysstate_hash = s[0];
+    ptmc_state.state = PTMC_PRELOAD;
+  } 
+  else if (s.size() == 0)
+    printf("sys_state hash starts with %s has 0 candidates. Please specify another\n", args);
+  else 
+    printf("sys_state hash starts with %s has multiple candidates. Please specify one\n", args);
   return 0;
 }
-
 
 void ui_mainloop() {
   char lastbuf[256], lastcmd[256];
@@ -467,3 +471,35 @@ void ui_mainloop() {
     strcpy(lastcmd, lastbuf);
   }
 }
+
+static int cmd_batch(char *args) {
+  static int in_call = 0;
+  if (in_call) {
+    printf("cmd_batch is not designed for nested invoke\n");
+    return 1;
+  }
+  in_call = 1;
+
+  if (args == NULL) 
+  {
+    printf("No arguments!");
+    return 1;
+  }
+  if (access(args, R_OK))
+  {
+    printf("Please provide a filename\n");
+    return 1;
+  }
+
+  int saved_fd = dup(fileno(stdin));
+  freopen(args, "r", stdin);
+
+  ui_mainloop();
+
+  dup2(saved_fd, fileno(stdin));
+  close(saved_fd);
+
+  in_call = 0;
+  return 0;
+}
+
