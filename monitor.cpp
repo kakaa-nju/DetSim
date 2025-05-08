@@ -7,6 +7,7 @@
 #include <dirent.h>
 #include <getopt.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <wait.h>
 #include <signal.h>
@@ -241,16 +242,13 @@ static int cmd_q(char *args) {
 }
 
 static int cmd_help(char *args);
-
 static int cmd_sw(char *args);
-
 static int cmd_si(char *args);
-
 static int cmd_load(char *args);
-
 static int cmd_info(char *args);
-
 static int cmd_batch(char *args);
+static int cmd_p(char *args);
+static int cmd_x(char *args);
 
 static struct {
   const char *name;
@@ -265,6 +263,8 @@ static struct {
   { "load", "Load state of given StateHash", cmd_load },
   { "info", "Display current state history", cmd_info },
   { "batch", "Read command list from file", cmd_batch },
+  { "p", "Calculate expression", cmd_p },
+  { "x", "Display tracee memory by byte", cmd_x }
 };
 
 #define NR_CMD (sizeof(cmd_table) / sizeof(cmd_table[0]))
@@ -503,3 +503,181 @@ static int cmd_batch(char *args) {
   return 0;
 }
 
+long expr(const char *e, bool *success);
+static int cmd_p(char *args) {
+  if (!args || (args[0] == 0)) 
+  {
+    printf("Give an expression\n");
+    return 1;
+  }
+  bool success;
+  long val = expr(args, &success);
+  if (!success)
+    printf("Error at computing\n");
+  else 
+    printf(" = %ld\n", val);
+
+  return success;
+}
+
+#define DEFAULT_COUNT 1
+#define DEFAULT_FORMAT 'x'
+#define DEFAULT_SIZE 'w'
+#include <inttypes.h>
+
+void print_memory(const void *addr, int count, char format, char size) {
+
+  size_t times = 0;
+  if (size == 'b') 
+    times = 1;
+  else if (size == 'h') 
+    times = 2;
+  else if (size == 'w') 
+    times = 4;
+  else if (size == 'g') 
+    times = 8;
+  else 
+  {
+    fprintf(stderr, "Unsupported size specifier: %c\n", size);
+    return;
+  }
+
+  uint8_t *mem = (uint8_t *)ptmc_state.dest_state
+    .child[ptmc_state.cursor]
+    .read_snapshot_mem((uintptr_t) addr, times * count);
+  uint8_t *p = mem;
+
+  if (!strchr("xdou", format))
+  {
+    fprintf(stderr, "Unsupported format specifier: %c\n", size);
+    return;
+  }
+
+  for (int i = 0; i < count; ++i) 
+  {
+    if (((times * i) & 0xf) == 0) 
+      printf("%p: ", (bytes *)addr + (times * i));
+
+    switch (size) 
+    {
+      case 'b': 
+      {
+        uint8_t val = *(const uint8_t *)p;
+        if (format == 'x') printf("0x%02x ", val);
+        else if (format == 'd') printf("%" PRId8 " ", *(int8_t *)&val);
+        else if (format == 'u') printf("%" PRIu8 " ", val);
+        else if (format == 'o') printf("0%o ", val);
+        p += 1;
+        break;
+      }
+      case 'h': 
+      {
+        uint16_t val = *(const uint16_t *)p;
+        if (format == 'x') printf("0x%04x ", val);
+        else if (format == 'd') printf("%" PRId16 " ", *(int16_t *)&val);
+        else if (format == 'u') printf("%" PRIu16 " ", val);
+        else if (format == 'o') printf("0%o ", val);
+        p += 2;
+        break;
+      }
+      case 'w': 
+      {
+        uint32_t val = *(const uint32_t *)p;
+        if (format == 'x') printf("0x%08x ", val);
+        else if (format == 'd') printf("%" PRId32 " ", *(int32_t *)&val);
+        else if (format == 'u') printf("%" PRIu32 " ", val);
+        else if (format == 'o') printf("0%o ", val);
+        p += 4;
+        break;
+      }
+      case 'g': 
+      {
+        uint64_t val = *(const uint64_t *)p;
+        if (format == 'x') printf("0x%016" PRIx64 " ", val);
+        else if (format == 'd') printf("%" PRId64 " ", *(int64_t *)&val);
+        else if (format == 'u') printf("%" PRIu64 " ", val);
+        else if (format == 'o') printf("0%lo ", val);
+        p += 8;
+        break;
+      }
+      default:
+        assert(0);
+    }
+    if ((((times * (i + 1)) & 0xf) == 0) && (i != count - 1)) 
+      printf("\n");
+  }
+  printf("\n");
+  
+  free(mem);
+}
+
+// Parse input like: x/4xg
+int parse_format_string(const char *fmt, int *count, char *format, char *size) {
+  if (fmt[0] != '/') 
+  {
+    *count = DEFAULT_COUNT;
+    *format = DEFAULT_FORMAT;
+    *size = DEFAULT_SIZE;
+    return 0;
+  }
+
+  int i = 1;
+  *count = 0;
+
+  // Parse optional count
+  while (isdigit(fmt[i])) 
+  {
+    *count = *count * 10 + (fmt[i] - '0');
+    i++;
+  }
+
+  if (*count == 0) 
+    *count = DEFAULT_COUNT;
+
+  // Parse format + size (optional)
+  *format = DEFAULT_FORMAT;
+  *size = DEFAULT_SIZE;
+
+  while (fmt[i]) {
+    if (strchr("xdou", fmt[i]))
+      *format = fmt[i];
+    else if (strchr("bhwg", fmt[i])) 
+      *size = fmt[i];
+    else 
+      return -2;
+    i++;
+  }
+
+  return 0;
+}
+
+static int cmd_x(char *args) {
+  if (!args || (args[0] == 0))
+  {
+    printf("Give an address\n");
+    return 1;
+  }
+
+  args = strtok(args, " ");
+  int count;
+  char format, size;
+  if (parse_format_string(args, &count, &format, &size) != 0) 
+  {
+    fprintf(stderr, "Invalid format string: %s\n", args);
+    return 2;
+  }
+
+  char *arg_next = strtok(NULL, " ");
+  if (arg_next == NULL) arg_next = args;
+
+  // Convert address
+  uintptr_t addr = 0;
+  if (strstr(arg_next, "0x") == arg_next) 
+    addr = strtoull(arg_next, NULL, 16);
+  else 
+    addr = strtoull(arg_next, NULL, 10);
+
+  print_memory((const void *)addr, count, format, size);
+
+  return 0;
+}

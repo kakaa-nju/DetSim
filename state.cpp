@@ -238,16 +238,14 @@ void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size) {
   assert(mem);
   for (auto &item: items)
   {
-    if (item.start == available_memory)
-      continue;
     if (item.start > addr || addr >= item.end) 
     {
-      if (item.flags[1] == 'w')
+      if (item.flags[1] == 'w' && item.start != available_memory)
         fseek(mem, item.end - item.start, SEEK_CUR);
       continue;
     }
     /* or else: within a mapped area */
-    if (item.flags[1] == 'w') /* with dump */
+    if (item.flags[1] == 'w' && item.start != available_memory) /* with dump */
     {
       fseek(mem, addr - item.start, SEEK_CUR);
       int offset = ftell(mem);
