@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unordered_map>
 #include <wait.h>
 #include <signal.h>
 #include <readline/readline.h>
@@ -104,38 +105,83 @@ void read_config(const char *cfg_file) {
   cJSON *user_check = cJSON_GetObjectItem(cfg, "UserCheck");
   if (user_check)
   {
-    LOG_INFO("Compiling user check sources");
-    int user_check_cnt = cJSON_GetArraySize(user_check);
-    for (int j = 0; j < user_check_cnt; j++)
-    {
-      cJSON *u = cJSON_GetArrayItem(user_check, j);
-      char *src = cJSON_GetStringValue(u);
-      std::string obj(src, strchr(src, '.'));
-      obj = "./" + obj + ".so";
+    char *src = cJSON_GetStringValue(user_check);
+    std::string obj(src, strchr(src, '.'));
+    obj = "./" + obj + ".so";
+    LOG_INFO("Compiling user check sources to %s", obj.c_str());
 
-      if (access(obj.c_str(), R_OK | X_OK)) { /* compile */
-        int pid = vfork();
-        if (pid == 0)
-        {
-          char arg_d[10];
-          sprintf(arg_d, "-DNP=%d", NP);
-          execlp("g++", "g++", arg_d, "-fpic", "-shared", src, "-o", obj.c_str(), NULL);
-          perror("exec");
-        }
-        else
-          waitpid(pid, 0, 0);
-      }
-      void *handle = dlopen(obj.c_str(), RTLD_LAZY | RTLD_LOCAL);
-      if (!handle) 
+    if (access(obj.c_str(), R_OK | X_OK)) { /* compile */
+      int pid = vfork();
+      if (pid == 0)
       {
-        panic("%s", dlerror());
+        char arg_d[10];
+        sprintf(arg_d, "-DNP=%d", NP);
+        execlp("g++", "g++", arg_d, "-fpic", "-shared", src, "-o", obj.c_str(), NULL);
+        perror("exec");
       }
-      int (*func)() = (int (*)())dlsym(handle, "check");
-      ptmc_state.user_checks.push_back(func);
+      else
+        waitpid(pid, 0, 0);
     }
+    void *handle = dlopen(obj.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    if (!handle) 
+    {
+      panic("%s", dlerror());
+    }
+    int (*func)() = (int (*)())dlsym(handle, "check");
+    ptmc_state.user_checks.push_back(func);
     LOG_INFO("Done");
   }
   
+  cJSON *choose_points = cJSON_GetObjectItem(cfg, "ChoosePoint");
+  if (choose_points)
+  {
+    int choose_points_cnt = cJSON_GetArraySize(choose_points);
+    for (int j = 0; j < choose_points_cnt; j++)
+    {
+      cJSON *choose_point = cJSON_GetArrayItem(choose_points, j);
+      int nr = cJSON_GetNumberValue(cJSON_GetObjectItem(choose_point, "syscall"));
+      int n_choose = cJSON_GetNumberValue(cJSON_GetObjectItem(choose_point, "choose"));
+      choose_many[nr] = n_choose;
+    }
+  }
+
+  cJSON *choose_function = cJSON_GetObjectItem(cfg, "ChooseFunc");
+  if (choose_function)
+  {
+    char *src = cJSON_GetStringValue(choose_function);
+    std::string obj(src, strchr(src, '.'));
+    obj = "./" + obj + ".so";
+    LOG_INFO("Compiling user choose function sources to %s", obj.c_str());
+
+    if (access(obj.c_str(), R_OK | X_OK)) { /* compile */
+      int pid = vfork();
+      if (pid == 0)
+      {
+        char arg_d[10];
+        sprintf(arg_d, "-DNP=%d", NP);
+        execlp("g++", "g++", arg_d, "-fpic", "-shared", src, "-o", obj.c_str(), NULL);
+        perror("exec");
+      }
+      else
+        waitpid(pid, 0, 0);
+    }
+    void *handle = dlopen(obj.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    if (!handle) 
+    {
+      panic("%s", dlerror());
+    }
+
+    for (int nr = 0; nr < 450; nr++)
+    {
+      if (syscalls[nr] == NULL) continue;
+      char funcname[64];
+      sprintf(funcname, "choose_%s", syscalls[nr]);
+      choose_func func = (choose_func)dlsym(handle, funcname);
+      choose_syswhat[nr] = func;
+    }
+    LOG_INFO("Done");
+  }
+
   free(cfg);
 }
 

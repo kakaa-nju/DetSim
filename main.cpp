@@ -9,11 +9,11 @@ void init_syscalls() {
 }
 
 int main(int argc, char *argv[]) {
-  /* parse arguments, read configuration */
-  init_monitor(argc, argv);
-
   /* syscall list */
   init_syscalls();
+
+  /* parse arguments, read configuration */
+  init_monitor(argc, argv);
 
   /* start tracee, get initial state */
   init_state();

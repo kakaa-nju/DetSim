@@ -4,6 +4,7 @@
 #include "common.h"
 #include "sockstate.h"
 #include "state.h"
+#include "engine.h"
 #include <string>
 
 enum {

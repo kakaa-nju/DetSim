@@ -9,6 +9,7 @@
 #include <string.h>
 #include <errno.h>
 #include "debug.h"
+#include "emu.h"
 
 
 extern const char *syscalls[450];
@@ -40,6 +41,7 @@ void tracee_read_mem(int pid, const void *addr, void *data, int len);
 void remove_vdso(int pid);
 
 void show_regs(struct user_regs_struct *regs);
+void apply_choose(const struct syscall_info &info, choose_out *out);
 void tracee_switch_syscall(
     int pid, 
     int SYS_which, 
@@ -62,6 +64,7 @@ uint64_t tracee_do_syscall(
     uint64_t r9
     );
 
+__attribute__((unused))
 static inline long ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data) {
   /* ptrace(2): On success, the PTRACE_PEEK* operations return the requested *
    * data ... and other operations return zero. On error, all operations     *

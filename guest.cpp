@@ -1,6 +1,7 @@
 /* guest.cpp: interacting with tracee directly */
 
 #include "common.h"
+#include "emu.h"
 #include "guest.h"
 #include "debug.h"
 #include "monitor.h"
@@ -140,6 +141,14 @@ uint64_t tracee_read_word(int pid, void *addr) {
 
 int tracee_write_word(int pid, void *addr, long data) {
   return ptrace_right(PTRACE_POKEDATA, pid, addr, data);
+}
+
+void apply_choose(const syscall_info &info, choose_out *out) {
+  for (int i = 0; i < 6; i++)
+  {
+    if (out->len[i])
+      memcpy_host2guest((void *)info.args[i], out->args[i], out->len[i]);
+  }
 }
 
 void tracee_switch_syscall(

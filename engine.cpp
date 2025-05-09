@@ -19,6 +19,7 @@
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <readline/readline.h>
 
 #define pids ptmc_state.pids
 #define PTRACE_TRAP_SIG (SIGTRAP | 0x80)
@@ -115,6 +116,8 @@ static void do_nosys(int pid) {
 static void on_syscall_enter(pid_t pid, int nr) {
   switch (nr) 
   {
+  /* emulated. so do nothing */ 
+  case SYS_gettimeofday:  
   case SYS_sendto:
   case SYS_recvfrom:
   case SYS_listen:
@@ -125,11 +128,15 @@ static void on_syscall_enter(pid_t pid, int nr) {
   case SYS_connect:
     do_nosys(pid);
     break;
+
+  /* Do not allow process quit. While still allow thread quit(TODO). */
   case SYS_exit_group:
   case SYS_exit:
     /* After yield, rip += 2; mark tracee as EXITED and never get scheduled */
     tracee_switch_syscall(pid, SYS_sched_yield, 0, 0, 0, 0, 0, 0);
     break;
+
+  /* act normally. SYS_sched_yield is preserved for state check */
   case SYS_sched_yield:
   case SYS_write:
   case SYS_read:
@@ -144,9 +151,7 @@ static void on_syscall_enter(pid_t pid, int nr) {
 #define CKPT_EXIT 3
 
 int analyze_choose(struct syscall_info *info) {
-  if (info->nr == SYS_gettimeofday) 
-    return 2;
-  return 0;
+  return choose_many[info->nr];
 }
 
 /* parse syscall_info */
@@ -154,11 +159,25 @@ static int on_syscall_exit(
     pid_t pid,
     struct syscall_info *info
     ) {
-  /* Check and dump for each generated next state */
-  long ret;
   /* calculate choose_n from context */
   ptmc_state.n_choose = analyze_choose(info);
 
+  static char *line_read;
+  if (!is_auto_mode() && ptmc_state.n_choose != 0) /* ask for choose */
+  {
+    printf("Here comes with %d choices.\n", ptmc_state.n_choose);
+    line_read = readline("You choose? [0, N): ");
+    while (sscanf(line_read, "%d", &ptmc_state.choose) != 1 
+        || ptmc_state.choose < 0 || ptmc_state.choose >= ptmc_state.n_choose)
+    {
+      free(line_read);
+      line_read = readline("Please make legal choice: ");
+    }
+    free(line_read);
+  }
+
+  /* Check and dump for each generated next state */
+  long ret;
   switch (info->nr) 
   {
     /* syscalls need scheduled */
@@ -411,12 +430,15 @@ int exec_cont() {
   state_queue.clear();
   state_queue_append(&ptmc_state.dest_state);
   state_set.emplace(ptmc_state.dest_state.ss_hash);
+
+  ptmc_state.n_choose = 0;
+  ptmc_state.choose = 0;
   
   /* until no state in queue */
   while ((state_fetched = state_queue_extract()) != NULL) 
   {
-    int i = rand() % NP;
-    // for (int i = 0; i < NP; i++) 
+    // int i = rand() % NP;
+    for (int i = 0; i < NP; i++) 
     {
 again:
       ptmc_state.source_state = *state_fetched;

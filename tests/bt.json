@@ -1,5 +1,5 @@
 {
-  "Loglevel": 0,
+  "Loglevel": 2,
   "Nodes": 3,
   "Tracee": [
     ["./tests/bt", "0"], ["./tests/bt", "1"], ["./tests/bt", "2"]
