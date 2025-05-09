@@ -167,10 +167,10 @@ static int on_syscall_exit(
       info->args[3], (struct sockaddr *)info->args[4], (socklen_t *)info->args[5]); 
     tracee_set_rax(pid, ret);
     info->rval = ret;
-    // if (ret >= 0)  /* discard state */
-    // { 
-    //   return CKPT_NO;
-    // }
+    if (ret >= 0) /* for willemt/raft, a `poll_msg` cycle will recv() until nothing can be received */
+    { 
+      return CKPT_NO;
+    }
     break;
   case SYS_sched_yield:
     break;
@@ -179,7 +179,7 @@ static int on_syscall_exit(
       info->args[3], (struct sockaddr *)info->args[4], info->args[5]); 
     tracee_set_rax(pid, ret);
     info->rval = ret;
-    return CKPT_YES;
+    return CKPT_NO;
   case SYS_gettimeofday:
     ret = emu_gettimeofday((struct timeval *)info->args[0], (struct timezone *)info->args[1]);
     tracee_set_rax(pid, ret);
@@ -214,8 +214,7 @@ static int on_syscall_exit(
     return CKPT_EXIT;
 
   case SYS_write:
-    return CKPT_YES;
-
+    // return CKPT_YES;
   case SYS_read:
   case SYS_nanosleep:
   case SYS_brk:
@@ -369,6 +368,7 @@ static void load() {
 
 int exec_store() {
   ptmc_state.state = PTMC_RUNNING;
+  ptmc_state.choose = -1;
   int index = ptmc_state.cursor;
   syscall_info info[NP];
 
@@ -383,7 +383,7 @@ int exec_store() {
   /* always store */
   ptmc_state.dest_state = sys_state(info);
   ptmc_state.dest_state.save_metadata();
-  state_tree_add(&ptmc_state.source_state, &ptmc_state.dest_state, index);
+  state_tree_add(&ptmc_state.source_state, &ptmc_state.dest_state, index, ptmc_state.choose);
   ptmc_state.state = PTMC_STOP;
 
   if (check_state() != 0) {
@@ -415,8 +415,8 @@ int exec_cont() {
   /* until no state in queue */
   while ((state_fetched = state_queue_extract()) != NULL) 
   {
-    // int i = rand() % NP;
-    for (int i = 0; i < NP; i++) 
+    int i = rand() % NP;
+    // for (int i = 0; i < NP; i++) 
     {
 again:
       ptmc_state.source_state = *state_fetched;
@@ -446,7 +446,8 @@ again:
           state_queue_append(&ptmc_state.dest_state);
           state_set.emplace(ptmc_state.dest_state.ss_hash);
         }
-        state_tree_add(&s, &ptmc_state.dest_state, i);
+        state_tree_add(&s, &ptmc_state.dest_state, i, 
+            ptmc_state.n_choose ? ptmc_state.choose : -1);
       }
       if (check_state() != 0) {
         printf("Stopped for illegal state. Searched for %ld sys_states\n", state_set.size());

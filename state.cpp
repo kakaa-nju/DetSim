@@ -161,9 +161,9 @@ int sys_state::save_metadata() {
   return 0;
 }
 
-void state_tree_add(sys_state *s, sys_state *t, int which) {
+void state_tree_add(sys_state *s, sys_state *t, int which, int choose) {
   if (state_tree.count(t->ss_hash) == 0)
-    state_tree[t->ss_hash] = std::pair<hash_type, int>(s->ss_hash, which);
+    state_tree[t->ss_hash] = std::tuple<hash_type, int, int>(s->ss_hash, which, choose);
 }
 
 void show_syscall_history() {
@@ -173,13 +173,18 @@ void show_syscall_history() {
   while (state_tree.count(ss)) 
   {
     cnt++;
-    hash_type pre = state_tree[ss].first;
-    int which = state_tree[ss].second;
+    hash_type pre = std::get<0>(state_tree[ss]);
+    int which = std::get<1>(state_tree[ss]);
+    int choose = std::get<2>(state_tree[ss]);
     sys_state s = sys_state(ss);
     construct_syscall_string(s.ts_hash[which]);
     print_stack.push(std::string(printbuf) + "\n");
-    sprintf(printbuf, HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d: ",
-        pre, ss, which);
+    if (choose >= 0)
+      sprintf(printbuf, HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d (choose %d): ",
+          pre, ss, which, choose);
+    else 
+      sprintf(printbuf, HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d: ",
+          pre, ss, which);
     print_stack.push(printbuf);
     ss = pre;
   }

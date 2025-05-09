@@ -69,7 +69,7 @@ static inline long ptrace_right(enum __ptrace_request op, pid_t pid, void *addr,
    * returned by a successful PTRACE_PEEK* operation may be -1, the caller   *
    * must clear errno before the call, and then check it ...                 */
   errno = 0;
-  int result = ptrace(op, pid, addr, data);
+  long result = ptrace(op, pid, addr, data);
   if (errno)
     panic("ptrace(%d, %d, %p, %p): %s", op, pid, addr, data, strerror(errno));
   return result;

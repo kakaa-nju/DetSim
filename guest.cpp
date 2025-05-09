@@ -25,7 +25,6 @@
 #include <libdwarf/libdwarf.h>
 #include <dwarf.h>
 
-
 /* ptrace with error check */
 // Call this function to get a backtrace.
 __attribute__((unused)) void print_call_stack() {
@@ -253,6 +252,7 @@ void *tracee_do_mmap(int pid, uint64_t start, uint64_t end) {
   return ret;
 }
 
+__attribute__((unused))
 static bool addr_executable(uint64_t addr, const std::vector<maps_item> &items) {
   for (auto &item : items) 
   {
@@ -263,6 +263,18 @@ static bool addr_executable(uint64_t addr, const std::vector<maps_item> &items) 
       else
         return false;
     }
+  }
+  return false;
+}
+
+__attribute__((unused))
+static bool addr_on_stack(uint64_t addr, const std::vector<maps_item> &items) {
+  for (auto &item : items) 
+  {
+    if (strcmp(item.name, "[stack]"))
+      continue;
+    if (addr >= item.start && addr < item.end)
+      return true;
   }
   return false;
 }
@@ -279,40 +291,50 @@ void get_maps_item(std::vector<maps_item>&items, FILE *maps) {
   }
 }
 
+int resolve_rip_func(const char *exefile, uintptr_t rip);
 
 void tracee_backtrace(int pid) {
-  /* show function call graph */
-  uint64_t rbp = tracee_get_rbp(pid);
-  uint64_t rsp = tracee_get_rsp(pid);
-  LOG_TRACE("get rbp, rsp = %p, %p", (void *)rbp, (void *)rsp);
+  uintptr_t rip = tracee_get_rip(pid);
+  printf("#0: "); 
+  resolve_rip_func(ptmc_state.tracee[ptmc_state.cursor].executable, rip);
 
-  char filename[32];
-  sprintf(filename, "/proc/%d/maps", pid);
-  FILE *mapsFile = fopen(filename, "r");
-  assert(mapsFile);
-  std::vector<maps_item> mapsItem;
-  get_maps_item(mapsItem, mapsFile);
-  LOG_TRACE("get_maps_item %d items", mapsItem.size());
-  fclose(mapsFile);
-  while (true) {
-    /* x86_64 compilers do not save rbp by default
-       try rsp first */
-    uint64_t return_address_rbp = tracee_read_word(pid, (void *)(rbp + 8));
-    uint64_t return_address_rsp = tracee_read_word(pid, (void *)rsp);
-    LOG_TRACE("raddr_b, raddr_s = %p %p", (void *)return_address_rbp, (void *)return_address_rsp);
-    /* test which address is executable */
-    if (addr_executable(return_address_rsp, mapsItem)) 
-    {
-      LOG_TRACE("Return ptmc_address: %lx", return_address_rsp);
-      rsp += 8;
-    } 
-    else if (addr_executable(return_address_rbp, mapsItem)) 
-    {
-      LOG_TRACE("Return ptmc_address: %lx", return_address_rbp);
-      rbp = tracee_read_word(pid, (void *)rbp);
-    } 
-    else 
+  uintptr_t rbp = tracee_get_rbp(pid);
+  int frame_index = 1;
+
+  char maps_file[64];
+  sprintf(maps_file, "/proc/%d/maps", pid);
+  FILE *maps_fp = fopen(maps_file, "r");
+  std::vector<maps_item> items;
+  get_maps_item(items, maps_fp);
+  fclose(maps_fp);
+
+  while (rbp != 0 && frame_index < 64) 
+  {
+    uintptr_t ret_addr = tracee_read_word(pid, (void *)(rbp + 8));
+    if (!addr_executable(ret_addr, items))
       break;
+    printf("#%d: ", frame_index);
+    resolve_rip_func(ptmc_state.tracee[ptmc_state.cursor].executable, ret_addr);
+
+    uintptr_t next_rbp = tracee_read_word(pid, (void *)rbp);
+    if (next_rbp == 0) 
+    {
+      LOG_TRACE("next rbp == 0");
+      break;
+    }
+    if (next_rbp <= rbp)
+    {
+      LOG_TRACE("next rbp <= rbp (0x%lx, 0x%lx)", next_rbp, rbp);
+      break;
+    }
+    if (!addr_on_stack(next_rbp, items)) 
+    {
+      LOG_TRACE("next_rbp 0x%lx not on stack", next_rbp);
+      break;
+    }
+
+    rbp = next_rbp;
+    frame_index++;
   }
 }
 
@@ -526,3 +548,4 @@ void init_dwarf() {
   dwarf_finish(dbg, &err);
   close(fd);
 }
+

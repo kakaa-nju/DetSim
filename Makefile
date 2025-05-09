@@ -1,19 +1,27 @@
-.PHONY: all debug wc
+.PHONY: all debug release wc clean clear
+
 CC = gcc
 CXX = ccache g++
 LD = g++
-CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
-LDFLAGS = -ldwarf -lreadline -lcjson -lunwind -ldw -lzstd -rdynamic
 
-SRCS = monitor.cpp main.cpp state.cpp sockstate.cpp guest.cpp fsstate.cpp utils.cpp crc32.cpp engine.cpp expr.cpp emu.cpp
+CXXFLAGS ?= -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
+LDFLAGS = -ldwarf -lreadline -lcjson -lunwind -ldw -lzstd -rdynamic -ldw
+
+SRCS = monitor.cpp main.cpp state.cpp sockstate.cpp guest.cpp fsstate.cpp utils.cpp crc32.cpp engine.cpp expr.cpp emu.cpp resolve.cpp
 OBJS = $(SRCS:.cpp=.o)
 DEPS = $(OBJS:.o=.d)
 
-tracer: $(OBJS)
-	$(LD) $^ $(LDFLAGS) -o tracer 
-	-mkdir mappings memory filesystem tstate sstate
+all: release
 
--include $(DEPS)
+release: CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
+release: tracer
+
+debug: CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O0 -g
+debug: tracer
+
+tracer: $(OBJS)
+	$(LD) $^ $(LDFLAGS) -o tracer
+	-mkdir mappings memory filesystem tstate sstate
 
 %.o: %.cpp
 	@if [ -z "$(NP)" ]; then \
@@ -21,9 +29,7 @@ tracer: $(OBJS)
 	fi
 	$(CXX) $< $(CXXFLAGS) -c -o $@ -DNP=$(NP)
 
-
-all: tracer
-
+-include $(DEPS)
 
 wc:
 	find . -regextype posix-extended -regex '.*\.(cpp|h)' | xargs wc -l

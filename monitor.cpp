@@ -249,6 +249,7 @@ static int cmd_info(char *args);
 static int cmd_batch(char *args);
 static int cmd_p(char *args);
 static int cmd_x(char *args);
+static int cmd_bt(char *args);
 
 static struct {
   const char *name;
@@ -264,7 +265,8 @@ static struct {
   { "info", "Display current state history", cmd_info },
   { "batch", "Read command list from file", cmd_batch },
   { "p", "Calculate expression", cmd_p },
-  { "x", "Display tracee memory by byte", cmd_x }
+  { "x", "Display tracee memory by byte", cmd_x },
+  { "bt", "Print backtrace", cmd_bt },
 };
 
 #define NR_CMD (sizeof(cmd_table) / sizeof(cmd_table[0]))
@@ -679,5 +681,10 @@ static int cmd_x(char *args) {
 
   print_memory((const void *)addr, count, format, size);
 
+  return 0;
+}
+
+static int cmd_bt(char *args) {
+  tracee_backtrace(ptmc_state.pids[ptmc_state.cursor]);
   return 0;
 }

@@ -66,6 +66,5 @@ int emu_gettimeofday(struct timeval *tv,
   struct timeval ret = choose(tracee_tv);
   memcpy_host2guest(tv, &ret, sizeof(struct timeval));
   ptmc_state.time[index] = ret;
-
   return 0;
 }

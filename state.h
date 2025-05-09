@@ -153,8 +153,8 @@ typedef struct sys_state {
   ~sys_state() {};
 } sys_state;
 
-/* f: child state -> (parent state, which) */
-typedef std::unordered_map<hash_type, std::pair<hash_type, int> > TSS;
+/* f: child state -> (parent state, which, choose) */
+typedef std::unordered_map<hash_type, std::tuple<hash_type, int, int> > TSS;
 typedef std::deque<hash_type> LSS;
 typedef std::unordered_set<hash_type> SSS;
 
@@ -163,6 +163,6 @@ void state_queue_append_front(sys_state *s);
 
 sys_state *state_queue_extract();
 
-void state_tree_add(sys_state *s, sys_state *t, int which);
+void state_tree_add(sys_state *s, sys_state *t, int which, int choose);
 
 #endif /* __STATE_H */

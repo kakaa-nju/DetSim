@@ -199,7 +199,8 @@ int log_pop(
   return 0;
 }
 
-void poll_msg() {
+__attribute__((noinline))
+int poll_msg() {
   struct sockaddr_in sender_addr = { 0 };
   socklen_t addr_len = sizeof(sender_addr);
   int recvlen = 0;
@@ -286,6 +287,7 @@ void poll_msg() {
     }
     assert(pos == recvlen);
   }
+  return 0;
 }
 
 void logging(raft_server_t *s, raft_node_t *n, void *data, const char *buf) {

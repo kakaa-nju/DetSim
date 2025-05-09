@@ -1,7 +1,7 @@
-CFLAGS += -static -gdwarf-4 -O0
+CFLAGS += -static -gdwarf-4 -O0 -fno-inline -fno-inline-functions -fno-inline-small-functions -fno-omit-frame-pointer
 CC = gcc
 
-TESTS = dummy write loop loop3 bakery_mp bakery member rand brk 
+TESTS = dummy write loop loop3 bakery_mp bakery member rand brk bt
 SRCS = $(TESTS:=.c)
 
 all: $(TESTS)
