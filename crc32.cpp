@@ -4,22 +4,24 @@
 #include <stdio.h>
 
 uint32_t crc32_hw(const void* data, size_t length) {
-    const uint8_t* p = (const uint8_t*)data;
-    uint32_t crc = 0xFFFFFFFF;
+  const uint8_t* p = (const uint8_t*)data;
+  uint32_t crc = 0xFFFFFFFF;
 
-    while (length >= 8) {
-        uint64_t val;
-        __builtin_memcpy(&val, p, sizeof(val));
-        crc = _mm_crc32_u64(crc, val);
-        p += 8;
-        length -= 8;
-    }
+  while (length >= 8) 
+  {
+    uint64_t val;
+    __builtin_memcpy(&val, p, sizeof(val));
+    crc = _mm_crc32_u64(crc, val);
+    p += 8;
+    length -= 8;
+  }
 
-    while (length--) {
-        crc = _mm_crc32_u8(crc, *p++);
-    }
+  while (length--) 
+  {
+    crc = _mm_crc32_u8(crc, *p++);
+  }
 
-    return ~crc;
+  return ~crc;
 }
 
 

@@ -27,24 +27,28 @@ hash_type crc32(FILE *fp);
 hash_type compress_tmp_file(FILE *fin, const char* out_path, int level) {
   fseek(fin, 0, SEEK_SET);
   FILE* fout = fopen(out_path, "w+b");
-  if (!fin || !fout) {
+  if (!fin || !fout) 
+  {
     perror("fopen");
     return 1;
   }
 
   void* in_buf = malloc(CHUNK_SIZE);
   void* out_buf = malloc(ZSTD_compressBound(CHUNK_SIZE));
-  if (!in_buf || !out_buf) {
+  if (!in_buf || !out_buf) 
+  {
     fprintf(stderr, "Memory allocation failed\n");
     return 1;
   }
 
   size_t read_size;
-  while ((read_size = fread(in_buf, 1, CHUNK_SIZE, fin)) > 0) {
+  while ((read_size = fread(in_buf, 1, CHUNK_SIZE, fin)) > 0) 
+  {
 #ifndef NOCOMPRESS
     size_t out_size = ZSTD_compress(out_buf, ZSTD_compressBound(read_size),
         in_buf, read_size, level);
-    if (ZSTD_isError(out_size)) {
+    if (ZSTD_isError(out_size)) 
+    {
       fprintf(stderr, "Compression error: %s\n", ZSTD_getErrorName(out_size));
       return 1;
     }
@@ -68,27 +72,32 @@ hash_type compress_tmp_file(FILE *fin, const char* out_path, int level) {
 FILE* decompress_file_tmp(const char* in_path) {
   FILE* fin = fopen(in_path, "rb");
   FILE *fout = create_anonymous_tmp("decompressed", "r+b"); 
-  if (!fin || !fout) {
+  if (!fin || !fout) 
+  {
     perror("fopen");
     return NULL;
   }
 
   void* in_buf = malloc(ZSTD_compressBound(CHUNK_SIZE));
   void* out_buf = malloc(CHUNK_SIZE);
-  if (!in_buf || !out_buf) {
+  if (!in_buf || !out_buf) 
+  {
     fprintf(stderr, "Memory allocation failed\n");
     return NULL;
   }
 
 #ifndef NOCOMPRESS
   size_t chunk_size;
-  while (fread(&chunk_size, sizeof(size_t), 1, fin) == 1) {
-    if (fread(in_buf, 1, chunk_size, fin) != chunk_size) {
+  while (fread(&chunk_size, sizeof(size_t), 1, fin) == 1) 
+  {
+    if (fread(in_buf, 1, chunk_size, fin) != chunk_size) 
+    {
       fprintf(stderr, "Unexpected EOF\n");
       return NULL;
     }
     size_t out_size = ZSTD_decompress(out_buf, CHUNK_SIZE, in_buf, chunk_size);
-    if (ZSTD_isError(out_size)) {
+    if (ZSTD_isError(out_size)) 
+    {
       fprintf(stderr, "Decompression error: %s\n", ZSTD_getErrorName(out_size));
       return NULL;
     }
@@ -96,7 +105,8 @@ FILE* decompress_file_tmp(const char* in_path) {
   }
 #else
   size_t read_size;
-  while ((read_size = fread(in_buf, 1, CHUNK_SIZE, fin)) > 0) {
+  while ((read_size = fread(in_buf, 1, CHUNK_SIZE, fin)) > 0) 
+  {
     fwrite(in_buf, 1, read_size, fout);
   }
 #endif
@@ -109,65 +119,71 @@ FILE* decompress_file_tmp(const char* in_path) {
 }
 
 int filecmp(const char *file1, const char *file2) {
-    FILE *fp1 = fopen(file1, "rb");
-    FILE *fp2 = fopen(file2, "rb");
+  FILE *fp1 = fopen(file1, "rb");
+  FILE *fp2 = fopen(file2, "rb");
 
-    if (!fp1 || !fp2) {
-        fprintf(stderr, "Error opening files.\n");
-        if (fp1) fclose(fp1);
-        if (fp2) fclose(fp2);
-        return -1;
+  if (!fp1 || !fp2) 
+  {
+    fprintf(stderr, "Error opening files.\n");
+    if (fp1) fclose(fp1);
+    if (fp2) fclose(fp2);
+    return -1;
+  }
+
+  unsigned char buf1[BUFFER_SIZE];
+  unsigned char buf2[BUFFER_SIZE];
+
+  size_t bytes_read1, bytes_read2;
+  int result = 0;
+
+  while (1) 
+  {
+    bytes_read1 = fread(buf1, 1, BUFFER_SIZE, fp1);
+    bytes_read2 = fread(buf2, 1, BUFFER_SIZE, fp2);
+
+    if (bytes_read1 != bytes_read2) 
+    {
+      result = 1; // size mismatch
+      break;
     }
 
-    unsigned char buf1[BUFFER_SIZE];
-    unsigned char buf2[BUFFER_SIZE];
-
-    size_t bytes_read1, bytes_read2;
-    int result = 0;
-
-    while (1) {
-        bytes_read1 = fread(buf1, 1, BUFFER_SIZE, fp1);
-        bytes_read2 = fread(buf2, 1, BUFFER_SIZE, fp2);
-
-        if (bytes_read1 != bytes_read2) {
-            result = 1; // size mismatch
-            break;
-        }
-
-        if (bytes_read1 == 0) {
-            // both files reached EOF
-            break;
-        }
-
-        if (memcmp(buf1, buf2, bytes_read1) != 0) {
-            result = 1; // content mismatch
-            break;
-        }
+    if (bytes_read1 == 0) 
+    {
+      // both files reached EOF
+      break;
     }
 
-    fclose(fp1);
-    fclose(fp2);
-    return result;
+    if (memcmp(buf1, buf2, bytes_read1) != 0) 
+    {
+      result = 1; // content mismatch
+      break;
+    }
+  }
+
+  fclose(fp1);
+  fclose(fp2);
+  return result;
 }
 
 int mkdir_p(const char *path) {
-    char tmp[256];
-    char *p = NULL;
-    size_t len;
+  char tmp[256];
+  char *p = NULL;
+  size_t len;
 
-    snprintf(tmp, sizeof(tmp), "%s", path);
-    len = strlen(tmp);
-    if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
+  snprintf(tmp, sizeof(tmp), "%s", path);
+  len = strlen(tmp);
+  if (tmp[len - 1] == '/') tmp[len - 1] = '\0';
 
-    for (p = tmp + 1; *p; p++) 
+  for (p = tmp + 1; *p; p++) 
+  {
+    if (*p == '/') 
     {
-        if (*p == '/') {
-            *p = '\0';
-            mkdir(tmp, 0755);
-            *p = '/';
-        }
+      *p = '\0';
+      mkdir(tmp, 0755);
+      *p = '/';
     }
-    return mkdir(tmp, 0755);
+  }
+  return mkdir(tmp, 0755);
 }
 
 void fcopy(char *source_filename, char *destination_filename) {
@@ -224,40 +240,47 @@ void fcopy(char *source_filename, char *destination_filename) {
 }
 
 int is_dynamically_linked(const char *filename) {
-  if (elf_version(EV_CURRENT) == EV_NONE) {
+  if (elf_version(EV_CURRENT) == EV_NONE) 
+  {
     fprintf(stderr, "ELF library initialization failed\n");
     return -1;
   }
 
   int fd = open(filename, O_RDONLY);
-  if (fd < 0) {
+  if (fd < 0) 
+  {
     perror("open");
     return -1;
   }
 
   Elf *e = elf_begin(fd, ELF_C_READ, NULL);
-  if (!e) {
+  if (!e) 
+  {
     fprintf(stderr, "elf_begin failed: %s\n", elf_errmsg(-1));
     close(fd);
     return -1;
   }
 
   size_t phnum;
-  if (elf_getphdrnum(e, &phnum) != 0) {
+  if (elf_getphdrnum(e, &phnum) != 0) 
+  {
     fprintf(stderr, "elf_getphdrnum failed\n");
     elf_end(e);
     close(fd);
     return -1;
   }
 
-  for (size_t i = 0; i < phnum; i++) {
+  for (size_t i = 0; i < phnum; i++) 
+  {
     GElf_Phdr phdr;
-    if (gelf_getphdr(e, i, &phdr) != &phdr) {
+    if (gelf_getphdr(e, i, &phdr) != &phdr) 
+    {
       fprintf(stderr, "gelf_getphdr failed\n");
       continue;
     }
 
-    if (phdr.p_type == PT_INTERP) {
+    if (phdr.p_type == PT_INTERP) 
+    {
       char interp[256] = {0};
       lseek(fd, phdr.p_offset, SEEK_SET);
       read(fd, interp, sizeof(interp) - 1);

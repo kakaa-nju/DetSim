@@ -42,7 +42,7 @@ nr2call.o: nr2call.c
 -include $(DEPS)
 
 wc:
-	find . -regextype posix-extended -regex '.*\.(cpp|h)' | xargs wc -l
+	wc *.[ch] *.cpp
 
 clear:
 	-/bin/rm -r mappings memory filesystem tstate sstate

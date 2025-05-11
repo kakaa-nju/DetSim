@@ -15,12 +15,14 @@ int resolve_rip_func(const char *exefile, uintptr_t rip) {
   };
 
   Dwfl *dwfl = dwfl_begin(&callbacks);
-  if (!dwfl) {
+  if (!dwfl) 
+  {
     fprintf(stderr, "dwfl_begin failed: %s\n", dwfl_errmsg(-1));
     return 1;
   }
 
-  if (!dwfl_report_offline(dwfl, "", exefile, -1)) {
+  if (!dwfl_report_offline(dwfl, "", exefile, -1)) 
+  {
     fprintf(stderr, "dwfl_report_offline failed: %s\n", dwfl_errmsg(-1));
     return 1;
   }
@@ -28,7 +30,8 @@ int resolve_rip_func(const char *exefile, uintptr_t rip) {
   dwfl_report_end(dwfl, NULL, NULL);
 
   Dwfl_Module *mod = dwfl_addrmodule(dwfl, addr);
-  if (!mod) {
+  if (!mod) 
+  {
     printf("\n");
     return 1;
   }
@@ -41,13 +44,16 @@ int resolve_rip_func(const char *exefile, uintptr_t rip) {
     */
 
   Dwfl_Line *line = dwfl_module_getsrc(mod, addr);
-  if (line) {
+  if (line) 
+  {
     const char *file;
     int lineno, col;
     file = dwfl_lineinfo(line, &addr, &lineno, &col, NULL, NULL);
     if (file)
       printf(" :%s:%d\n", file, lineno);
-  } else {
+  } 
+  else 
+  {
     printf("\n");
   }
 
