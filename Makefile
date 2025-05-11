@@ -20,9 +20,12 @@ release: tracer
 debug: CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O0 -g -msse4.2
 debug: tracer
 
-tracer: $(OBJS)
+tracer: $(OBJS) nr2call.o
 	$(LD) $^ $(LDFLAGS) -o tracer
 	-mkdir mappings memory filesystem tstate sstate
+
+nr2call.o: nr2call.c
+	gcc -c nr2call.c -O3 -g
 
 %.o: %.cpp
 	@if [ -z "$(NP)" ]; then \
