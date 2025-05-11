@@ -41,6 +41,7 @@ hash_type compress_tmp_file(FILE *fin, const char* out_path, int level) {
 
   size_t read_size;
   while ((read_size = fread(in_buf, 1, CHUNK_SIZE, fin)) > 0) {
+#ifndef NOCOMPRESS
     size_t out_size = ZSTD_compress(out_buf, ZSTD_compressBound(read_size),
         in_buf, read_size, level);
     if (ZSTD_isError(out_size)) {
@@ -49,10 +50,14 @@ hash_type compress_tmp_file(FILE *fin, const char* out_path, int level) {
     }
     fwrite(&out_size, sizeof(size_t), 1, fout);
     fwrite(out_buf, 1, out_size, fout);
+#else
+    fwrite(in_buf, 1, read_size, fout);
+#endif
   }
 
   fseek(fout, 0, SEEK_SET);
-  int ret = crc32(fout);
+  fseek(fin, 0, SEEK_SET);
+  int ret = crc32(fin);
 
   fclose(fout);
   free(in_buf);
@@ -75,6 +80,7 @@ FILE* decompress_file_tmp(const char* in_path) {
     return NULL;
   }
 
+#ifndef NOCOMPRESS
   size_t chunk_size;
   while (fread(&chunk_size, sizeof(size_t), 1, fin) == 1) {
     if (fread(in_buf, 1, chunk_size, fin) != chunk_size) {
@@ -88,6 +94,12 @@ FILE* decompress_file_tmp(const char* in_path) {
     }
     fwrite(out_buf, 1, out_size, fout);
   }
+#else
+  size_t read_size;
+  while ((read_size = fread(in_buf, 1, CHUNK_SIZE, fin)) > 0) {
+    fwrite(in_buf, 1, read_size, fout);
+  }
+#endif
 
   fclose(fin);
   free(in_buf);

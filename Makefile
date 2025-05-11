@@ -17,7 +17,7 @@ all: release
 release: CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
 release: tracer
 
-debug: CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O0 -g -msse4.2
+debug: CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O0 -g -msse4.2 -DNOCOMPRESS
 debug: tracer
 
 tracer: $(OBJS) nr2call.o
