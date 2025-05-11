@@ -7,7 +7,6 @@
 
 #include <stdbool.h>
 #include <stdint.h>
-#include <spdlog/spdlog.h>
 
 #ifndef NP
   #define NP 1

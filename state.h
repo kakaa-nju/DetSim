@@ -6,6 +6,7 @@
 #include <sys/user.h>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <list>
 #include <deque>
 #include "sockstate.h"
@@ -24,10 +25,7 @@ struct syscall_info {
   uintptr_t rval;
   uintptr_t args[6];
 
-  template <class Archive>
-    void serialize(Archive &ar) {
-      ar(nr, rval, args);
-    }
+  template <class Archive> void serialize(Archive &ar);
 }; 
 
 typedef struct tracee_state {
@@ -97,9 +95,7 @@ typedef struct tracee_state {
 
 /* --------------------------------------------------------- */
   template <class Archive>
-    void serialize(Archive &ar) {
-      ar(si, pid, brk, tv.tv_sec, tv.tv_usec, fd_list, sock_list, tcp_buffer_list, udp_buffer_list);
-    }
+    void serialize(Archive &ar);
   
   /* read from tracee snapshot */
   void *read_snapshot_mem(uint64_t addr, long size);
@@ -107,7 +103,11 @@ typedef struct tracee_state {
   void show_syscall(syscall_info *info);
   
   /* default is enough */
-  tracee_state() {}
+  tracee_state() {
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    pid = 0;
+  }
   ~tracee_state() {}
 } tracee_state;
 
@@ -133,9 +133,7 @@ typedef struct sys_state {
   sys_state(hash_type hash);
 
   template <class Archive>
-    void serialize(Archive &ar) {
-      ar(ts_hash, exited);
-    }
+    void serialize(Archive &ar);
 
   /* struct -> fs *
    * Store sys_state information into file. Some metadata *

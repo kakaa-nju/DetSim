@@ -6,6 +6,7 @@
 #include "state.h"
 #include "engine.h"
 #include <string>
+#include <unordered_set>
 
 enum {
   PTMC_PRELOAD, PTMC_LOADED, PTMC_STOP, PTMC_RUNNING, PTMC_END, PTMC_ABORT, PTMC_QUIT 

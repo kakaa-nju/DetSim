@@ -18,8 +18,8 @@
 #include <fcntl.h>
 #include <stdbool.h>
 #include <unistd.h>
-#define UNW_LOCAL_ONLY
 #include <libunwind.h>
+#include <libunwind-ptrace.h>
 #include <vector>
 #include <unordered_map>
 #include <string>
@@ -173,13 +173,22 @@ void tracee_switch_syscall(
   ptrace_right(PTRACE_SETREGS, pid, NULL, &syscall_regs);
 }
 
-void show_regs(struct user_regs_struct *regs) {
+void log_regs(struct user_regs_struct *regs) {
   LOG_TRACE("rax = %016llx rbx = %016llx rcx = %016llx rdx = %016llx\n"
       "rsp = %016llx rbp = %016llx rdi = %016llx rsi = %016llx\n"
       "r8  = %016llx r9  = %016llx r10 = %016llx rip = %016llx\n",
       regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsp, regs->rbp,
       regs->rdi, regs->rsi, regs->r8, regs->r9, regs->r10, regs->rip);
   LOG_TRACE("orig_rax = %016lx", regs->orig_rax);
+}
+
+void show_regs(struct user_regs_struct *regs) {
+  printf("rax = %016llx rbx = %016llx rcx = %016llx rdx = %016llx\n"
+      "rsp = %016llx rbp = %016llx rdi = %016llx rsi = %016llx\n"
+      "r8  = %016llx r9  = %016llx r10 = %016llx rip = %016llx\n",
+      regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsp, regs->rbp,
+      regs->rdi, regs->rsi, regs->r8, regs->r9, regs->r10, regs->rip);
+  printf("orig_rax = %016llx\n", regs->orig_rax);
 }
 
 #define PTRACE_TRAP_SIG (SIGTRAP | 0x80)
@@ -231,7 +240,7 @@ uint64_t tracee_do_syscall(
   /* before syscall enter */
   /* syscall modified already */
   LOG_TRACE("To do syscall:");
-  show_regs(&syscall_regs);
+  log_regs(&syscall_regs);
 
   /* push syscall to exit */
   ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
@@ -303,48 +312,36 @@ void get_maps_item(std::vector<maps_item>&items, FILE *maps) {
 int resolve_rip_func(const char *exefile, uintptr_t rip);
 
 void tracee_backtrace(int pid) {
-  uintptr_t rip = tracee_get_rip(pid);
-  printf("#0: "); 
-  resolve_rip_func(ptmc_state.tracee[ptmc_state.cursor].executable, rip);
-
-  uintptr_t rbp = tracee_get_rbp(pid);
-  int frame_index = 1;
-
-  char maps_file[64];
-  sprintf(maps_file, "/proc/%d/maps", pid);
-  FILE *maps_fp = fopen(maps_file, "r");
-  std::vector<maps_item> items;
-  get_maps_item(items, maps_fp);
-  fclose(maps_fp);
-
-  while (rbp != 0 && frame_index < 64) 
-  {
-    uintptr_t ret_addr = tracee_read_word(pid, (void *)(rbp + 8));
-    if (!addr_executable(ret_addr, items))
-      break;
-    printf("#%d: ", frame_index);
-    resolve_rip_func(ptmc_state.tracee[ptmc_state.cursor].executable, ret_addr);
-
-    uintptr_t next_rbp = tracee_read_word(pid, (void *)rbp);
-    if (next_rbp == 0) 
-    {
-      LOG_TRACE("next rbp == 0");
-      break;
-    }
-    if (next_rbp <= rbp)
-    {
-      LOG_TRACE("next rbp <= rbp (0x%lx, 0x%lx)", next_rbp, rbp);
-      break;
-    }
-    if (!addr_on_stack(next_rbp, items)) 
-    {
-      LOG_TRACE("next_rbp 0x%lx not on stack", next_rbp);
-      break;
-    }
-
-    rbp = next_rbp;
-    frame_index++;
+  unw_addr_space_t as = unw_create_addr_space(&_UPT_accessors, 0);
+  void *ui = _UPT_create(pid);
+  if (!ui) {
+    perror("_UPT_create failed");
+    return;
   }
+  unw_cursor_t cursor;
+  if (unw_init_remote(&cursor, as, ui) < 0) 
+  {
+    LOG_ERROR("unw_init_remote failed\n");
+  }
+  int frame = 0;
+
+  do {
+    printf("#%d ", frame++);
+    unw_word_t rip, rsp;
+    char func[256];
+    unw_get_reg(&cursor, UNW_REG_IP, &rip);
+    unw_get_reg(&cursor, UNW_REG_SP, &rsp);
+
+    if (unw_get_proc_name(&cursor, func, sizeof(func), NULL) == 0) {
+      printf("0x%lx in %s()", (uintptr_t)rip, func);
+      resolve_rip_func(ptmc_state.tracee[ptmc_state.cursor].executable, rip);
+    }
+    else
+      printf("0x%lx in ??\n", (uintptr_t)rip);
+
+  } while (unw_step(&cursor) > 0);
+  _UPT_destroy(ui);
+  unw_destroy_addr_space(as);
 }
 
 const uintptr_t available_memory = 0x0000600000000000;

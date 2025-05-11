@@ -287,7 +287,7 @@ int poll_msg() {
     }
     assert(pos == recvlen);
   }
-  return 0;
+  return 114514;
 }
 
 void logging(raft_server_t *s, raft_node_t *n, void *data, const char *buf) {

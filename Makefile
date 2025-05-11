@@ -5,9 +5,10 @@ CXX = ccache g++
 LD = g++
 
 CXXFLAGS ?= -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
-LDFLAGS = -ldwarf -lreadline -lcjson -lunwind -ldw -lzstd -rdynamic -ldw
+LDFLAGS = -ldwarf -lreadline -lcjson -ldw -lzstd -rdynamic \
+					-lunwind-ptrace -lunwind-generic -lunwind -lelf
 
-SRCS = monitor.cpp main.cpp state.cpp sockstate.cpp guest.cpp fsstate.cpp utils.cpp crc32.cpp engine.cpp expr.cpp emu.cpp resolve.cpp
+SRCS = serialize.cpp sockstate.cpp guest.cpp fsstate.cpp utils.cpp crc32.cpp engine.cpp expr.cpp emu.cpp resolve.cpp monitor.cpp main.cpp state.cpp 
 OBJS = $(SRCS:.cpp=.o)
 DEPS = $(OBJS:.o=.d)
 
@@ -27,7 +28,13 @@ tracer: $(OBJS)
 	@if [ -z "$(NP)" ]; then \
 		echo "NP not set"; exit 1; \
 	fi
-	$(CXX) $< $(CXXFLAGS) -c -o $@ -DNP=$(NP)
+	@echo "Compiling $<"
+	@start=$$(date +%s.%N); \
+	$(CXX) $< $(CXXFLAGS) -c -o $@ -DNP=$(NP); \
+	end=$$(date +%s.%N); \
+	dur=$$(echo "$$end - $$start" | bc); \
+	echo "Compiled $< in $$dur seconds"
+
 
 -include $(DEPS)
 

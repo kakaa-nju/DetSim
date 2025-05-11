@@ -4,11 +4,13 @@ DetSim is a deterministic simulation testing environment for distributed systems
 
 # 依赖
 
+- libdw
 - libcereal-dev
 - libdwarf-dev
 - libelf-dev
 - libreadline-dev
 - libcjson-dev
+- libunwind-dev
 
 # 编译
 
@@ -21,7 +23,7 @@ make NP=$(NODES)
 ## 编译被测程序
 
 ```
-CFLAGS += -static -gdwarf-4
+CFLAGS += -gdwarf-4
 ```
 
 # 启动
@@ -49,8 +51,11 @@ tests/ 下给出了一些例子
 - `c`: 自动探索模式
 - `sw N`: 切换到第 N 个进程
 - `si`: 当前进程向前执行，直至遇到需要进行 checkpoint 的系统调用
-- `info`: 打印当前状态，系统调用历史序列
+- `info`: 打印当前状态，系统调用历史序列，tracee 寄存器
 - `load HASH`: 加载 HASH 前缀所指定的全局状态
 - `q`: 退出
+- `bt`: 打印 tracee 调用栈
+- `p`: 求解简单的表达式
+- `x`: 打印内存位置的内容
 
 在自动探索模式中键入 Ctrl-C 将会发送一个 SIGINT，并最终停止探索，回到交互界面。此时除了最后一个到达的状态以外，状态队列全部清空。

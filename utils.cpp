@@ -3,11 +3,14 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <sys/ptrace.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <errno.h>
 #include <string.h>
 #include <unistd.h>
 #include <zstd.h>
 #include <stdlib.h>
+#include <gelf.h>
 #include <libgen.h>
 #include "debug.h"
 #include "common.h"
@@ -16,10 +19,14 @@
 #define CHUNK_SIZE 16 KiB
 #define BUFFER_SIZE 8 KiB
 
+FILE *create_anonymous_tmp(const char *id, const char *mode) {
+  return fdopen(syscall(SYS_memfd_create, id, 0), mode);
+}
+
 hash_type crc32(FILE *fp);
-hash_type compress_file(const char* in_path, const char* out_path, int level) {
-  FILE* fin = fopen(in_path, "rb");
-  FILE* fout = fopen(out_path, "wb+");
+hash_type compress_tmp_file(FILE *fin, const char* out_path, int level) {
+  fseek(fin, 0, SEEK_SET);
+  FILE* fout = fopen(out_path, "w+b");
   if (!fin || !fout) {
     perror("fopen");
     return 1;
@@ -47,47 +54,46 @@ hash_type compress_file(const char* in_path, const char* out_path, int level) {
   fseek(fout, 0, SEEK_SET);
   int ret = crc32(fout);
 
-  fclose(fin);
   fclose(fout);
   free(in_buf);
   free(out_buf);
   return ret;
 }
 
-int decompress_file(const char* in_path, const char* out_path) {
+FILE* decompress_file_tmp(const char* in_path) {
   FILE* fin = fopen(in_path, "rb");
-  FILE* fout = fopen(out_path, "wb");
+  FILE *fout = create_anonymous_tmp("decompressed", "r+b"); 
   if (!fin || !fout) {
     perror("fopen");
-    return 1;
+    return NULL;
   }
 
   void* in_buf = malloc(ZSTD_compressBound(CHUNK_SIZE));
   void* out_buf = malloc(CHUNK_SIZE);
   if (!in_buf || !out_buf) {
     fprintf(stderr, "Memory allocation failed\n");
-    return 1;
+    return NULL;
   }
 
   size_t chunk_size;
   while (fread(&chunk_size, sizeof(size_t), 1, fin) == 1) {
     if (fread(in_buf, 1, chunk_size, fin) != chunk_size) {
       fprintf(stderr, "Unexpected EOF\n");
-      return 1;
+      return NULL;
     }
     size_t out_size = ZSTD_decompress(out_buf, CHUNK_SIZE, in_buf, chunk_size);
     if (ZSTD_isError(out_size)) {
       fprintf(stderr, "Decompression error: %s\n", ZSTD_getErrorName(out_size));
-      return 1;
+      return NULL;
     }
     fwrite(out_buf, 1, out_size, fout);
   }
 
   fclose(fin);
-  fclose(fout);
   free(in_buf);
   free(out_buf);
-  return 0;
+  fseek(fout, 0, SEEK_SET);
+  return fout;
 }
 
 int filecmp(const char *file1, const char *file2) {
@@ -203,5 +209,55 @@ void fcopy(char *source_filename, char *destination_filename) {
 
   close(source_fd);
   close(dest_fd);
+}
+
+int is_dynamically_linked(const char *filename) {
+  if (elf_version(EV_CURRENT) == EV_NONE) {
+    fprintf(stderr, "ELF library initialization failed\n");
+    return -1;
+  }
+
+  int fd = open(filename, O_RDONLY);
+  if (fd < 0) {
+    perror("open");
+    return -1;
+  }
+
+  Elf *e = elf_begin(fd, ELF_C_READ, NULL);
+  if (!e) {
+    fprintf(stderr, "elf_begin failed: %s\n", elf_errmsg(-1));
+    close(fd);
+    return -1;
+  }
+
+  size_t phnum;
+  if (elf_getphdrnum(e, &phnum) != 0) {
+    fprintf(stderr, "elf_getphdrnum failed\n");
+    elf_end(e);
+    close(fd);
+    return -1;
+  }
+
+  for (size_t i = 0; i < phnum; i++) {
+    GElf_Phdr phdr;
+    if (gelf_getphdr(e, i, &phdr) != &phdr) {
+      fprintf(stderr, "gelf_getphdr failed\n");
+      continue;
+    }
+
+    if (phdr.p_type == PT_INTERP) {
+      char interp[256] = {0};
+      lseek(fd, phdr.p_offset, SEEK_SET);
+      read(fd, interp, sizeof(interp) - 1);
+      printf("Dynamic linker: %s\n", interp);
+      elf_end(e);
+      close(fd);
+      return 1; // dynamically linked
+    }
+  }
+
+  elf_end(e);
+  close(fd);
+  return 0; // statically linked
 }
 

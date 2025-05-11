@@ -3,9 +3,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-/* always analyze after syscall. so rip - 2 */
+/* find last instuction addr */
 int resolve_rip_func(const char *exefile, uintptr_t rip) {
-  Dwarf_Addr addr = rip - 2;
+  Dwarf_Addr addr = rip;
 
   static char *debuginfo_path[] = { NULL };
   Dwfl_Callbacks callbacks = {
@@ -29,14 +29,16 @@ int resolve_rip_func(const char *exefile, uintptr_t rip) {
 
   Dwfl_Module *mod = dwfl_addrmodule(dwfl, addr);
   if (!mod) {
-    fprintf(stderr, "Module not found: %s\n", dwfl_errmsg(-1));
+    printf("\n");
     return 1;
   }
 
+  /*
   const char *funcname = NULL;
   funcname = dwfl_module_addrname(mod, addr);
   if (funcname)
     printf("%s", funcname);
+    */
 
   Dwfl_Line *line = dwfl_module_getsrc(mod, addr);
   if (line) {
@@ -44,9 +46,9 @@ int resolve_rip_func(const char *exefile, uintptr_t rip) {
     int lineno, col;
     file = dwfl_lineinfo(line, &addr, &lineno, &col, NULL, NULL);
     if (file)
-      printf(" at %s: %d\n", file, lineno);
+      printf(" :%s:%d\n", file, lineno);
   } else {
-    printf(" (Line info not found: %s)\n", dwfl_errmsg(-1));
+    printf("\n");
   }
 
   dwfl_end(dwfl);

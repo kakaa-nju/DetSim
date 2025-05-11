@@ -4,6 +4,7 @@
 #include "engine.h"
 #include "tests/raft/include/raft.h"
 #include "tests/raft/include/raft_private.h"
+#include <sys/syscall.h>
 
 choose_func choose_syswhat[450];
 int choose_many[450];

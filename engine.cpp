@@ -6,6 +6,7 @@
 #include "engine.h"
 #include "guest.h"
 #include "emu.h"
+#include "utils.h"
 
 #include <assert.h>
 #include <cstddef>
@@ -53,8 +54,8 @@ static void exit_all(void) {
   exit(EXIT_SUCCESS);
 }
 
-extern std::map<int, void *> rseq_struct;
-extern std::map<int, int> rseq_len;
+extern std::unordered_map<int, void *> rseq_struct;
+extern std::unordered_map<int, int> rseq_len;
 
 /* Extract one entire syscall, preserve its original effect */
 syscall_info extract_one_syscall(pid_t pid) {
@@ -233,7 +234,7 @@ static int on_syscall_exit(
     return CKPT_EXIT;
 
   case SYS_write:
-    // return CKPT_YES;
+    return CKPT_YES;
   case SYS_read:
   case SYS_nanosleep:
   case SYS_brk:
@@ -254,7 +255,7 @@ int do_one_syscall(pid_t pid, syscall_info *si) {
   int wstatus = 0;
   struct ptrace_syscall_info info;
   LOG_TRACE("Do one syscall");
-  tracee_show_regs(pid);
+  // tracee_show_regs(pid);
 
   /* entry */
   ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
@@ -289,9 +290,11 @@ int do_one_syscall(pid_t pid, syscall_info *si) {
   return on_syscall_exit(pid, si);
 }
 
-static void init_tracee_state(pid_t pid) {
+static void init_tracee_state(int index) {
+  int pid = pids[index];
   int wstatus = 0;
-
+  int stop_nr = is_dynamically_linked(ptmc_state.tracee[index].executable)
+      ? SYS_munmap : SYS_mprotect;
   Assert(waitpid(pid, &wstatus, 0) == pid, "%s", strerror(errno));
   assert(WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGSTOP);
   /* tracee: stop at raise(SIGSTOP) */
@@ -312,7 +315,7 @@ static void init_tracee_state(pid_t pid) {
     
   /* skip non-user code: *
    * Libc initialization ends with an `munmap` call */
-  while (extract_one_syscall(pid).nr != SYS_mprotect); 
+  while (extract_one_syscall(pid).nr != stop_nr);
 
   /* Preserve memory for parameters. Need recover registers *
    * for the original first syscall. */
@@ -492,13 +495,19 @@ again:
 
     if (sigint_received) {
       printf("Program received signal SIGINT, Interrupt.\n");
+      printf("Searched for %ld sys_states\n", state_set.size());
+      show_syscall_history();
+      int time_used = time(NULL) - start_time;
+      printf("Time elapsed: %dh%dm%ds\n", time_used / 3600, (time_used / 60) % 60, time_used % 60);
       sigint_received = 0;
       return 0;
     }
 
   }
   printf("Complete explore all %ld sys_states\n", state_set.size());
-
+  show_syscall_history();
+  int time_used = time(NULL) - start_time;
+  printf("Time elapsed: %dh%dm%ds\n", time_used / 3600, (time_used / 60) % 60, time_used % 60);
   return 0;
 }
 
@@ -533,7 +542,7 @@ void init_state() {
   for (int i = 0; i < NP; i++) 
   {
     ptmc_state.cursor = i;
-    init_tracee_state(pids[i]);
+    init_tracee_state(i);
   }
 
   /* Record first sys_state. Notice that the syscall_info need no recording */

@@ -4,13 +4,12 @@
 #include "debug.h"
 #include "monitor.h"
 #include "utils.h"
+#include "fsstate.h"
+#include "sockstate.h"
+#include "cereal/archives/binary.hpp"
 #include <assert.h>
 #include <bits/types/cookie_io_functions_t.h>
-#include "cereal/types/list.hpp"
-#include "cereal/types/unordered_map.hpp"
-#include <cereal/archives/binary.hpp>
 #include <ctime>
-#include <spdlog/spdlog.h>
 #include <stdio.h>
 #include <sys/stat.h>
 #include <sys/ptrace.h>
@@ -34,8 +33,8 @@ struct user_regs_struct regs_on_entry;
 struct user_regs_struct regs;
 void fcopy(char *source_filename, char *destination_filename);
 
-std::map<int, void *> rseq_struct;
-std::map<int, int> rseq_len;
+std::unordered_map<int, void *> rseq_struct;
+std::unordered_map<int, int> rseq_len;
 
 /* serialized process state don't include memory and mappings 
  * memory will be recorded when dumping,
@@ -55,40 +54,17 @@ void log_syscall(tracee_state *t) {
 sys_state::sys_state(struct syscall_info *info) {
   /* construct all tracee for init_state */
 
-  // int index = ptmc_state.cursor;
-  // if (index == -1)
-  // {
-    for (int j = 0; j < NP; j++)
-    {
-      child[j] = tracee_state(j, &info[j]);
-      child[j].save_proc_full_data();
-      exited[j] = ptmc_state.exited[j];
-      ts_hash[j] = child[j].ts_hash;
-      LOG_DEBUG("Create tstate " HASH_FORMAT, ts_hash[j]);
-    }
-  // }
-  // else 
-  // {
-  //   /* cursor */
-  //   child[index] = new tracee_state(index, &info[index]);
-  //   child[index]->save_proc_full_data();
-  //   log_syscall(child[index]);
-  //   exited[index] = ptmc_state.exited[index];
-  //   ts_hash[index] = child[index]->ts_hash;
-  //   LOG_DEBUG("Create tstate " HASH_FORMAT, ts_hash[index]);
-
-  //   /* not cursor: inherit */
-  //   for (int j = 0; j < NP; j++)
-  //   {
-  //     if (j == index) continue;
-  //     child[j] = ptmc_state.source_state.child[j];
-  //     exited[j] = ptmc_state.source_state.exited[j];
-  //     ts_hash[j] = ptmc_state.source_state.ts_hash[j];
-  //   }
-  // }
+  for (int j = 0; j < NP; j++)
+  {
+    child[j] = tracee_state(j, &info[j]);
+    child[j].save_proc_full_data();
+    exited[j] = ptmc_state.exited[j];
+    ts_hash[j] = child[j].ts_hash;
+    LOG_DEBUG("Create tstate " HASH_FORMAT, ts_hash[j]);
+  }
 
   /* calc md5 xor */
-  hash_type ss_hash_tmp = 0ULL;
+  hash_type ss_hash_tmp = 0;
   for (int j = 0; j < NP; j++) 
   {
     ss_hash_tmp ^= ts_hash[j];
@@ -237,9 +213,8 @@ void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size) {
   int footprint = rand();
   char tmpfile[64];
   sprintf(tmpfile, "/tmp/dump.%08x", footprint);
-  decompress_file(filename, tmpfile);
 
-  FILE *mem = fopen(tmpfile, "r");
+  FILE *mem = decompress_file_tmp(filename);
   assert(mem);
   for (auto &item: items)
   {
@@ -326,7 +301,7 @@ void tracee_state::recover_file_descriptors(int index) {
   // open all
   for (auto &fd : fd_list)
   {
-    LOG_TRACE("restore fd, name = %d, %s", fd.fd, fd.fname);
+    LOG_TRACE("restore fd, name = %d, %s", fd.fd, fd.fname.c_str());
     int dfd = tracee_do_open(pid, fd.fname.c_str(), fd.flags);
     if (dfd != fd.fd) 
     {
@@ -346,9 +321,8 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps) {
   int footprint = rand();
   char tmpfile[64];
   sprintf(tmpfile, "/tmp/dump.%08x", footprint);
-  decompress_file(filename, tmpfile);
 
-  FILE *dump = fopen(tmpfile, "r");
+  FILE *dump = decompress_file_tmp(filename);
   assert(dump);
 
   /* read memory content */
@@ -376,7 +350,7 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps) {
     {
       free(membuf);
       membufsz = size;
-      membuf = (bytes *)Lmalloc(membufsz);
+      membuf = (bytes *)malloc(membufsz);
     }
     assert(fread(membuf, 1, size, dump) == size); 
     fseek(mem, item.start, SEEK_SET);
@@ -391,11 +365,9 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps) {
   /* restore registers */
   assert(sizeof(regs) == fread(&regs, 1, sizeof(regs), dump));
   ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-  show_regs(&regs);
+  // show_regs(&regs);
   fclose(mem);
   fclose(dump);
-
-  unlink(tmpfile);
 }
 
 void tracee_state::recover_proc_files() {
@@ -456,9 +428,8 @@ void sys_state::recover_running_state() {
     if (exited[i] == 1) /* exited process need no running state */
       continue;
 
-    // if ((ptmc_state.dest_state).ts_hash[i] != ts_hash[i])
+    // if (ptmc_state.dest_state.ts_hash[i] != ts_hash[i])
     child[i].recover_running_state(i);
-    /* to avoid probable fs bugs */
   }
 }
 
@@ -492,9 +463,7 @@ void tracee_state::create_mem_reg_snapshot() {
 
   /* create new temporary dump file */
   int footprint = rand();
-  char tmpfile[64];
-  sprintf(tmpfile, "/tmp/dump.%08x", footprint);
-  FILE *dump = fopen(tmpfile, "w+");
+  FILE *dump = create_anonymous_tmp("dump", "r+b");
   assert(dump);
 
   /* memory mappings */
@@ -525,7 +494,7 @@ void tracee_state::create_mem_reg_snapshot() {
     {
       free(membuf);
       membufsz = end - start;
-      membuf = (bytes *)Lmalloc(membufsz);
+      membuf = (bytes *)malloc(membufsz);
     }
     fseek(mem, start, SEEK_SET);
     fread(membuf, end - start, 1, mem);
@@ -549,11 +518,10 @@ void tracee_state::create_mem_reg_snapshot() {
   fclose(mem);
   save_structure_data(dump);
 
-  fclose(dump);
-
   /* compress first, then calculate hash */
   sprintf(filename, "/tmp/%08x.mem.zstd", footprint);
-  hash_type hash = compress_file(tmpfile, filename, 1);
+  hash_type hash = compress_tmp_file(dump, filename, 1);
+  fclose(dump);
   
   char dest_filename[64];
   while(true) 
@@ -572,7 +540,6 @@ void tracee_state::create_mem_reg_snapshot() {
 
 ret:
   unlink(filename);
-  unlink(tmpfile);
   ts_hash = hash;
 }
 
@@ -666,9 +633,6 @@ void tracee_state::save_brk_mappings() {
   sprintf(dest, "mappings/" HASH_FORMAT ".maps", ts_hash);
 
   fcopy(src, dest);
-
-  brk = tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
-  LOG_DEBUG("recorded brk = 0x%x", brk);
 }
 
 /* Dump open files to filesystem/#state.fs *
@@ -679,6 +643,10 @@ void tracee_state::save_proc_files() {
 }
 
 void tracee_state::save_proc_full_data() {
+  /* save brk */
+  brk = tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
+  LOG_DEBUG("recorded brk = 0x%x", brk);
+
   /* set ts_hash here */
   create_mem_reg_snapshot();
 
@@ -694,7 +662,7 @@ void tracee_state::save_proc_full_data() {
 
 
 __attribute__((constructor)) void init_membuf() {
-  membuf = (bytes *)Lmalloc(membufsz);
+  membuf = (bytes *)malloc(membufsz);
 }
 
 int format_sockaddr_in(char* dest, struct sockaddr_in* addr) {

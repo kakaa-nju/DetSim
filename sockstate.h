@@ -9,9 +9,6 @@
 #include <deque>
 // #include "utils.h"
 #include <string>
-#include "cereal/archives/binary.hpp"
-#include "cereal/types/string.hpp"
-#include "cereal/types/deque.hpp"
 
 /* System global. Always in tracer so can be very big */
 #define MAXADDR 128 
@@ -41,19 +38,8 @@ enum { TCP_TYPE = 1, UDP_TYPE };
 struct tcp_buffer {
   std::stringstream ss;
 
-  template <class Archive>
-    void save(Archive &ar) const
-    {
-      ar(ss.str());
-    }
-
-  template <class Archive>
-    void load(Archive &ar)
-    {
-      std::string s;
-      ar(s);
-      ss << s;
-    }
+  template <class Archive> void save(Archive &ar) const;
+  template <class Archive> void load(Archive &ar);
 
   tcp_buffer() { }
 
@@ -70,11 +56,7 @@ struct ptmc_datagram {
   std::string content;
   ptmc_addr from;
 
-  template <class Archive>
-    void serialize(Archive &ar)
-    { 
-      ar(content, from);
-    }
+  template <class Archive> void serialize(Archive &ar);
 }; 
 
 typedef std::deque<ptmc_datagram> udp_buffer;
@@ -99,10 +81,7 @@ typedef struct ptmc_sock {
   ptmc_addr addr;
   ptmc_addr dest;
 
-  template <class Archive>
-    void serialize(Archive &ar) {
-      ar(fd, domain, type, protocol, backlog, addr, dest);
-    }
+  template <class Archive> void serialize(Archive &ar);
 } ptmc_sock;
 
 int emu_socket(int sockfd, int domain, int type, int protocol);

@@ -9,7 +9,7 @@ SHELL  = /bin/bash
 CFLAGS += -std=gnu2x -fno-stack-protector -gdwarf-4 \
     -Iinclude -Werror -Werror=return-type -Werror=uninitialized -Wcast-align \
 	  -Wno-pointer-sign -fno-omit-frame-pointer -fno-common -fsigned-char \
-	  -Wunused-variable -static \
+	  -Wunused-variable \
 	  -I$(LLQUEUE_DIR) -Iinclude -g -fPIC -fno-omit-frame-pointer -O0 \
 		-fno-inline -fno-inline-functions -fno-inline-small-functions
 

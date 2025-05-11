@@ -3,8 +3,6 @@
 
 #include <stdint.h>
 #include <string>
-#include "cereal/archives/binary.hpp"
-#include "cereal/types/string.hpp"
 #include "common.h"
 
 /* System global. Always in tracer so can be very big */
@@ -21,9 +19,7 @@ typedef struct ptmc_filedesc {
   std::string fname;
 
   template <class Archive>
-    void serialize(Archive &ar) {
-      ar(fd, pos, flags, mnt_id, ino, fname);
-    }
+    void serialize(Archive &ar);
 
 } ptmc_filedesc;
 

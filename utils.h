@@ -5,8 +5,10 @@
 #include "common.h"
 #include <string>
 
-hash_type compress_file(const char *in_path, const char *out_path, int level);
-int decompress_file(const char *in_path, const char *out_path);
+int is_dynamically_linked(const char *filename);
+hash_type compress_tmp_file(FILE *fin, const char *out_path, int level);
+FILE *decompress_file_tmp(const char *in_path);
 void fcopy(char *source_filename, char *destination_filename);
 int filecmp(const char *file1, const char *file2);
+FILE *create_anonymous_tmp(const char *id, const char *mode);
 #endif

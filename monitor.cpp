@@ -14,13 +14,19 @@
 #include <signal.h>
 #include <readline/readline.h>
 #include <readline/history.h>
-#include <spdlog/spdlog.h>
 #include <dlfcn.h>
 
 static char *log_file = NULL;
 char *cfg_file = (char *)"config.json"; /* default */
 static int auto_mode = 0;
 int is_auto_mode() { return auto_mode; }
+int loglevel = 0;
+
+bool should_log(int level) {
+  if (level >= loglevel) 
+    return true;
+  return false;
+}
 
 FILE *log_fp = NULL;
 
@@ -44,8 +50,7 @@ void read_config(const char *cfg_file) {
   fclose(cfg_fp);
   cJSON *cfg = cJSON_Parse(cfg_str);
   cJSON *Loglevel = cJSON_GetObjectItem(cfg, "Loglevel");
-  int loglevel = cJSON_GetNumberValue(Loglevel);
-  spdlog::set_level((spdlog::level::level_enum)loglevel);
+  loglevel = cJSON_GetNumberValue(Loglevel);
 
   cJSON *Nodes = cJSON_GetObjectItem(cfg, "Nodes");
   int nodes = cJSON_GetNumberValue(Nodes);
@@ -116,7 +121,7 @@ void read_config(const char *cfg_file) {
       {
         char arg_d[10];
         sprintf(arg_d, "-DNP=%d", NP);
-        execlp("g++", "g++", arg_d, "-fpic", "-shared", src, "-o", obj.c_str(), NULL);
+        execlp("g++", "g++", "-O2", arg_d, "-fpic", "-shared", src, "-o", obj.c_str(), NULL);
         perror("exec");
       }
       else
@@ -159,7 +164,7 @@ void read_config(const char *cfg_file) {
       {
         char arg_d[10];
         sprintf(arg_d, "-DNP=%d", NP);
-        execlp("g++", "g++", arg_d, "-fpic", "-shared", src, "-o", obj.c_str(), NULL);
+        execlp("g++", "g++", "-O2", arg_d, "-fpic", "-shared", src, "-o", obj.c_str(), NULL);
         perror("exec");
       }
       else
@@ -230,8 +235,6 @@ static void handle_sigint() {
 void init_regex();
 void init_monitor(int argc, char *argv[]) {
   /* Perform some global initialization. */
-
-  spdlog::enable_backtrace(0);
 
   /* Parse arguments. */
   parse_args(argc, argv);
@@ -412,6 +415,8 @@ static int cmd_info(char *args){
 
     show_syscall_history();
 
+    tracee_show_regs(ptmc_state.pids[ptmc_state.cursor]);
+
     for (int i = 0; i < NP; i++) 
     {
       auto l = ptmc_state.udp_buffer_lists[i];
@@ -475,7 +480,6 @@ void ui_mainloop() {
   if (is_auto_mode()) 
   {
     cmd_c(NULL);
-    return;
   }
 
   for (char *str; (str = rl_gets())!= NULL; ) 
