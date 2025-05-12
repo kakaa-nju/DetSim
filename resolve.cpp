@@ -1,27 +1,26 @@
-#include <elfutils/libdwfl.h>
 #include <dwarf.h>
-#include <stdlib.h>
+#include <elfutils/libdwfl.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* find last instuction addr */
-int resolve_rip_func(const char *exefile, uintptr_t rip) {
+int resolve_rip_func(const char* exefile, uintptr_t rip)
+{
   Dwarf_Addr addr = rip;
 
-  static char *debuginfo_path[] = { NULL };
-  Dwfl_Callbacks callbacks = {
-    .find_elf = dwfl_build_id_find_elf,
-    .find_debuginfo = dwfl_build_id_find_debuginfo,
-    .debuginfo_path = debuginfo_path
-  };
+  static char* debuginfo_path[] = {NULL};
+  Dwfl_Callbacks callbacks = {.find_elf = dwfl_build_id_find_elf,
+                              .find_debuginfo = dwfl_build_id_find_debuginfo,
+                              .debuginfo_path = debuginfo_path};
 
-  Dwfl *dwfl = dwfl_begin(&callbacks);
-  if (!dwfl) 
+  Dwfl* dwfl = dwfl_begin(&callbacks);
+  if (!dwfl)
   {
     fprintf(stderr, "dwfl_begin failed: %s\n", dwfl_errmsg(-1));
     return 1;
   }
 
-  if (!dwfl_report_offline(dwfl, "", exefile, -1)) 
+  if (!dwfl_report_offline(dwfl, "", exefile, -1))
   {
     fprintf(stderr, "dwfl_report_offline failed: %s\n", dwfl_errmsg(-1));
     return 1;
@@ -29,8 +28,8 @@ int resolve_rip_func(const char *exefile, uintptr_t rip) {
 
   dwfl_report_end(dwfl, NULL, NULL);
 
-  Dwfl_Module *mod = dwfl_addrmodule(dwfl, addr);
-  if (!mod) 
+  Dwfl_Module* mod = dwfl_addrmodule(dwfl, addr);
+  if (!mod)
   {
     printf("\n");
     return 1;
@@ -43,16 +42,16 @@ int resolve_rip_func(const char *exefile, uintptr_t rip) {
     printf("%s", funcname);
     */
 
-  Dwfl_Line *line = dwfl_module_getsrc(mod, addr);
-  if (line) 
+  Dwfl_Line* line = dwfl_module_getsrc(mod, addr);
+  if (line)
   {
-    const char *file;
+    const char* file;
     int lineno, col;
     file = dwfl_lineinfo(line, &addr, &lineno, &col, NULL, NULL);
     if (file)
       printf(" :%s:%d\n", file, lineno);
-  } 
-  else 
+  }
+  else
   {
     printf("\n");
   }

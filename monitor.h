@@ -2,17 +2,25 @@
 #define __MONITOR_H
 
 #include "common.h"
+#include "engine.h"
 #include "sockstate.h"
 #include "state.h"
-#include "engine.h"
 #include <string>
 #include <unordered_set>
 
-enum {
-  PTMC_PRELOAD, PTMC_LOADED, PTMC_STOP, PTMC_RUNNING, PTMC_END, PTMC_ABORT, PTMC_QUIT 
+enum
+{
+  PTMC_PRELOAD,
+  PTMC_LOADED,
+  PTMC_STOP,
+  PTMC_RUNNING,
+  PTMC_END,
+  PTMC_ABORT,
+  PTMC_QUIT
 };
 
-typedef struct {
+typedef struct
+{
   int state;
   int cursor;
   int n_choose;
@@ -29,10 +37,11 @@ typedef struct {
 
   int pids[NP];
 
-  struct {
-    char *executable;
+  struct
+  {
+    char* executable;
     int argc;
-    char *argv[5];
+    char* argv[5];
   } tracee[NP];
 
   struct timeval time[NP];

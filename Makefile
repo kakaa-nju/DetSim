@@ -6,7 +6,7 @@ LD = g++
 
 CXXFLAGS ?= -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
 LDFLAGS = -ldwarf -lreadline -lcjson -ldw -lzstd -rdynamic \
-					-lunwind-ptrace -lunwind-generic -lunwind -lelf
+					-lunwind-ptrace -lunwind-generic -lunwind -lelf -lfmt
 
 SRCS = serialize.cpp sockstate.cpp guest.cpp fsstate.cpp utils.cpp crc32.cpp engine.cpp expr.cpp emu.cpp resolve.cpp monitor.cpp main.cpp state.cpp 
 OBJS = $(SRCS:.cpp=.o)

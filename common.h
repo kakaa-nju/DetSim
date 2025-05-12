@@ -9,13 +9,12 @@
 #include <stdint.h>
 
 #ifndef NP
-  #define NP 1
+#define NP 1
 #endif
-#define concat(a, b) a##b
-#define concat3(a, b, c) a##b##c
+
 #define HASH_LEN 8
 
-#define KiB * 1024
+#define KiB *1024
 #define MiB KiB * 1024
 typedef uint8_t bytes;
 // #define DEBUG
