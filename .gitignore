@@ -10,4 +10,5 @@
 !cereal/
 !/cereal/**
 !.clang-format
-
+!docs/
+!/docs/**
