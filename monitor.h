@@ -39,9 +39,9 @@ typedef struct
 
   struct
   {
-    char* executable;
+    char *executable;
     int argc;
-    char* argv[5];
+    char *argv[5];
   } tracee[NP];
 
   struct timeval time[NP];

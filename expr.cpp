@@ -39,7 +39,7 @@ enum
 
 static struct rule
 {
-  const char* regex;
+  const char *regex;
   int token_type;
 } rules[] = {
     {" +", TK_NOTYPE}, // spaces, no precedence
@@ -92,7 +92,7 @@ typedef struct token
 static Token tokens[1024] __attribute__((used)) = {};
 static int nr_token __attribute__((used)) = 0;
 
-static bool make_token(const char* e)
+static bool make_token(const char *e)
 {
   int position = 0;
   int i;
@@ -108,7 +108,7 @@ static bool make_token(const char* e)
       if (regexec(&re[i], e + position, 1, &pmatch, 0) == 0 &&
           pmatch.rm_so == 0)
       {
-        const char* substr_start = e + position;
+        const char *substr_start = e + position;
         int substr_len = pmatch.rm_eo;
 
         LOG_TRACE("match rules[%d] = \"%s\" at position %d with len %d:"
@@ -166,7 +166,7 @@ bool check_parentheses(int p, int q)
   return cnt == 1 && tokens[p].type == TK_LP && tokens[q].type == TK_RP;
 }
 
-op eval(int p, int q, bool* success)
+op eval(int p, int q, bool *success)
 {
   if (p > q)
   {
@@ -220,13 +220,13 @@ op eval(int p, int q, bool* success)
       sscanf(tokens[p].str, "tracee%d", &tracee_index);
       assert(tracee_index >= 0 && tracee_index < NP);
 
-      tracee_state& ts = ptmc_state.dest_state.child[tracee_index];
+      tracee_state &ts = ptmc_state.dest_state.child[tracee_index];
       uintptr_t addr = get_var_addr(tokens[q].str);
       if (!addr)
         LOG_CRIT("Get &%s = NULL", tokens[q].str);
-      void* mem = ts.read_snapshot_mem(addr, 8);
+      void *mem = ts.read_snapshot_mem(addr, 8);
 
-      ret = *(long*)mem;
+      ret = *(long *)mem;
       free(mem);
       LOG_DEBUG("get %s:%s = %ld at addr 0x%lx", tokens[p].str, tokens[q].str,
                 ret, addr);
@@ -272,7 +272,7 @@ op eval(int p, int q, bool* success)
   return nullop;
 }
 
-long expr(const char* e, bool* success)
+long expr(const char *e, bool *success)
 {
   *success = true;
   if (!make_token(e))

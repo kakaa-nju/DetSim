@@ -27,7 +27,7 @@ struct syscall_info
   uintptr_t args[6];
 
   template <class Archive>
-  void serialize(Archive& ar);
+  void serialize(Archive &ar);
 };
 
 typedef struct tracee_state
@@ -50,7 +50,7 @@ typedef struct tracee_state
    * Analyze running state, and record important information *
    * (mainly system resources) into structure. No disk write *
    * included. */
-  tracee_state(int which, struct syscall_info* info);
+  tracee_state(int which, struct syscall_info *info);
 
   void get_file_descriptors();
   /* --------------------------------------------------------- */
@@ -66,11 +66,11 @@ typedef struct tracee_state
   void create_mem_reg_snapshot();
 
   /* Save structure */
-  void save_structure_data(FILE* fp);
+  void save_structure_data(FILE *fp);
   void save_structure_data();
 
   /* Save mappings */
-  void save_brk_mappings();
+  void save_mappings();
 
   /* Save files */
   void save_proc_files();
@@ -94,16 +94,16 @@ typedef struct tracee_state
 
   void recover_file_descriptors(int index);
 
-  void recover_mem_reg_snapshot(std::vector<maps_item>& maps);
+  void recover_mem_reg_snapshot(std::vector<maps_item> &maps);
 
   /* --------------------------------------------------------- */
   template <class Archive>
-  void serialize(Archive& ar);
+  void serialize(Archive &ar);
 
   /* read from tracee snapshot */
-  void* read_snapshot_mem(uint64_t addr, long size);
+  void *read_snapshot_mem(uint64_t addr, long size);
 
-  void show_syscall(syscall_info* info);
+  void show_syscall(syscall_info *info);
 
   /* default is enough */
   tracee_state()
@@ -130,7 +130,7 @@ typedef struct sys_state
    * Also calculates ss_hash, which needs ts_hash. *
    * So here tracee_state should already be dumped *
    * by calling tracee_state::save_proc_full_data */
-  sys_state(struct syscall_info* info);
+  sys_state(struct syscall_info *info);
 
   /* fs -> struct *
    * Construct sys_state from dump file indicated by hash. *
@@ -138,7 +138,7 @@ typedef struct sys_state
   sys_state(hash_type hash);
 
   template <class Archive>
-  void serialize(Archive& ar);
+  void serialize(Archive &ar);
 
   /* struct -> fs *
    * Store sys_state information into file. Some metadata *
@@ -161,11 +161,11 @@ typedef std::unordered_map<hash_type, std::tuple<hash_type, int, int>> TSS;
 typedef std::deque<hash_type> LSS;
 typedef std::unordered_set<hash_type> SSS;
 
-void state_queue_append(sys_state* s);
-void state_queue_append_front(sys_state* s);
+void state_queue_append(sys_state *s);
+void state_queue_append_front(sys_state *s);
 
-sys_state* state_queue_extract();
+sys_state *state_queue_extract();
 
-void state_tree_add(sys_state* s, sys_state* t, int which, int choose);
+void state_tree_add(sys_state *s, sys_state *t, int which, int choose);
 
 #endif /* __STATE_H */

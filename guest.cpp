@@ -5,9 +5,11 @@
 #include "debug.h"
 #include "emu.h"
 #include "monitor.h"
+#include "utils.h"
 #include <cstdint>
 #include <dwarf.h>
 #include <fcntl.h>
+#include <fmt/format.h>
 #include <libdwarf/libdwarf.h>
 #include <libunwind-ptrace.h>
 #include <libunwind.h>
@@ -114,51 +116,60 @@ void remove_vdso(int pid)
   }
 }
 
-void tracee_write_mem(int pid, void* addr, const void* data, int len)
+void tracee_write_mem(int pid, void *addr, const void *data, int len)
 {
-  char filename[32];
-  sprintf(filename, "/proc/%d/mem", pid);
-  int mem = open(filename, O_WRONLY);
-  lseek(mem, (uintptr_t)addr, SEEK_SET);
-  write(mem, data, len);
-  close(mem);
-}
+  std::string path = fmt::format("/proc/{}/mem", pid);
+  auto mem_fp = fileutils::open_cfile(path, "w");
+  if (!mem_fp)
+  {
+    LOG_CRIT("Cannot open %s for read", path.c_str());
+    return;
+  }
 
-__attribute__((unused)) void tracee_read_mem(int pid, const void* addr,
-                                             void* data, int len)
-{
-  char filename[32];
-  sprintf(filename, "/proc/%d/mem", pid);
-  int mem = open(filename, O_RDONLY);
-  lseek(mem, (uintptr_t)addr, SEEK_SET);
-  int size = read(mem, data, len);
+  fseek(mem_fp.get(), (uintptr_t)addr, SEEK_SET);
+  int size = fwrite(data, 1, len, mem_fp.get());
   assert(size == len);
-  close(mem);
 }
 
-__attribute__((unused)) uint8_t tracee_read_byte(int pid, void* addr)
+__attribute__((unused)) void tracee_read_mem(int pid, const void *addr,
+                                             void *data, int len)
+{
+  std::string path = fmt::format("/proc/{}/mem", pid);
+  auto mem_fp = fileutils::open_cfile(path, "r");
+  if (!mem_fp)
+  {
+    LOG_CRIT("Cannot open %s for read", path.c_str());
+    return;
+  }
+
+  fseek(mem_fp.get(), (uintptr_t)addr, SEEK_SET);
+  int size = fread(data, 1, len, mem_fp.get());
+  assert(size == len);
+}
+
+__attribute__((unused)) uint8_t tracee_read_byte(int pid, void *addr)
 {
   uint8_t data[8];
-  *((uint64_t*)data) = ptrace_right(PTRACE_PEEKDATA, pid, addr, NULL);
+  *((uint64_t *)data) = ptrace_right(PTRACE_PEEKDATA, pid, addr, NULL);
   return data[0];
 }
 
-uint64_t tracee_read_word(int pid, void* addr)
+uint64_t tracee_read_word(int pid, void *addr)
 {
   return ptrace_right(PTRACE_PEEKDATA, pid, addr, NULL);
 }
 
-int tracee_write_word(int pid, void* addr, long data)
+int tracee_write_word(int pid, void *addr, long data)
 {
   return ptrace_right(PTRACE_POKEDATA, pid, addr, data);
 }
 
-void apply_choose(const syscall_info& info, choose_out* out)
+void apply_choose(const syscall_info &info, choose_out *out)
 {
   for (int i = 0; i < 6; i++)
   {
     if (out->len[i])
-      memcpy_host2guest((void*)info.args[i], out->args[i], out->len[i]);
+      memcpy_host2guest((void *)info.args[i], out->args[i], out->len[i]);
   }
 }
 
@@ -167,7 +178,7 @@ void tracee_switch_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
 {
   struct user_regs_struct syscall_regs;
   ptrace_right(PTRACE_GETREGS, pid, NULL, &syscall_regs);
-  LOG_TRACE("rip syscall enter: %p", (void*)syscall_regs.rip);
+  LOG_TRACE("rip syscall enter: %p", (void *)syscall_regs.rip);
   syscall_regs.orig_rax = SYS_which;
   syscall_regs.rdi = rdi;
   syscall_regs.rsi = rsi;
@@ -178,7 +189,7 @@ void tracee_switch_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
   ptrace_right(PTRACE_SETREGS, pid, NULL, &syscall_regs);
 }
 
-void log_regs(struct user_regs_struct* regs)
+void log_regs(struct user_regs_struct *regs)
 {
   LOG_TRACE("rax = %016llx rbx = %016llx rcx = %016llx rdx = %016llx\n"
             "rsp = %016llx rbp = %016llx rdi = %016llx rsi = %016llx\n"
@@ -188,7 +199,7 @@ void log_regs(struct user_regs_struct* regs)
   LOG_TRACE("orig_rax = %016lx", regs->orig_rax);
 }
 
-void show_regs(struct user_regs_struct* regs)
+void show_regs(struct user_regs_struct *regs)
 {
   printf("rax = %016llx rbx = %016llx rcx = %016llx rdx = %016llx\n"
          "rsp = %016llx rbp = %016llx rdi = %016llx rsi = %016llx\n"
@@ -214,7 +225,7 @@ uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
   syscall_regs = restore;
 
   syscall_regs.rip -= 2;
-  LOG_TRACE("rip syscall enter: %p", (void*)syscall_regs.rip);
+  LOG_TRACE("rip syscall enter: %p", (void *)syscall_regs.rip);
   syscall_regs.orig_rax = SYS_which;
   syscall_regs.rax = SYS_which;
   syscall_regs.rdi = rdi;
@@ -250,8 +261,8 @@ uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
   assert(WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == PTRACE_TRAP_SIG);
 
   ptrace_right(PTRACE_GETREGS, pid, NULL, &syscall_regs);
-  LOG_TRACE("Syscall returns %p", (void*)syscall_regs.rax);
-  LOG_TRACE("rip syscall return: %p", (void*)syscall_regs.rip);
+  LOG_TRACE("Syscall returns %p", (void *)syscall_regs.rax);
+  LOG_TRACE("rip syscall return: %p", (void *)syscall_regs.rip);
 
   /* restore for another syscall */
   ptrace_right(PTRACE_SETREGS, pid, NULL, &restore);
@@ -265,19 +276,19 @@ void tracee_do_munmap(int pid, uint64_t start, uint64_t end)
   tracee_do_syscall(pid, SYS_munmap, start, end - start, 0, 0, 0, 0);
 }
 
-void* tracee_do_mmap(int pid, uint64_t start, uint64_t end)
+void *tracee_do_mmap(int pid, uint64_t start, uint64_t end)
 {
-  void* ret = (void*)tracee_do_syscall(pid, SYS_mmap, start, end - start,
-                                       PROT_EXEC | PROT_READ | PROT_WRITE,
-                                       MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
+  void *ret = (void *)tracee_do_syscall(pid, SYS_mmap, start, end - start,
+                                        PROT_EXEC | PROT_READ | PROT_WRITE,
+                                        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
   assert(ret != MAP_FAILED);
   return ret;
 }
 
 __attribute__((unused)) static bool
-addr_executable(uint64_t addr, const std::vector<maps_item>& items)
+addr_executable(uint64_t addr, const std::vector<maps_item> &items)
 {
-  for (auto& item : items)
+  for (auto &item : items)
   {
     if (item.start <= addr && addr < item.end)
     {
@@ -291,9 +302,9 @@ addr_executable(uint64_t addr, const std::vector<maps_item>& items)
 }
 
 __attribute__((unused)) static bool
-addr_on_stack(uint64_t addr, const std::vector<maps_item>& items)
+addr_on_stack(uint64_t addr, const std::vector<maps_item> &items)
 {
-  for (auto& item : items)
+  for (auto &item : items)
   {
     if (strcmp(item.name, "[stack]"))
       continue;
@@ -303,7 +314,7 @@ addr_on_stack(uint64_t addr, const std::vector<maps_item>& items)
   return false;
 }
 
-void get_maps_item(std::vector<maps_item>& items, FILE* maps)
+void get_maps_item(std::vector<maps_item> &items, FILE *maps)
 {
   maps_item item;
   char line[1024];
@@ -315,12 +326,12 @@ void get_maps_item(std::vector<maps_item>& items, FILE* maps)
   }
 }
 
-int resolve_rip_func(const char* exefile, uintptr_t rip);
+int resolve_rip_func(const char *exefile, uintptr_t rip);
 
 void tracee_backtrace(int pid)
 {
   unw_addr_space_t as = unw_create_addr_space(&_UPT_accessors, 0);
-  void* ui = _UPT_create(pid);
+  void *ui = _UPT_create(pid);
   if (!ui)
   {
     perror("_UPT_create failed");
@@ -362,13 +373,13 @@ void tracee_get_freepage(int pid)
   tracee_do_mmap(pid, available_memory, available_memory + PAGE_SIZE);
 }
 
-int tracee_do_open(int pid, const char* filename, uint64_t flags)
+int tracee_do_open(int pid, const char *filename, uint64_t flags)
 {
   /* need tracee memory to place filename */
   /* mappings has been restored */
   /* LOG_TRACE("open filename, flags = %s, %o", filename, flags); */
   assert(available_memory);
-  tracee_write_mem(pid, (void*)available_memory, filename,
+  tracee_write_mem(pid, (void *)available_memory, filename,
                    strlen(filename) + 1);
   return tracee_do_syscall(pid, SYS_open, (uint64_t)available_memory, flags, 0,
                            0, 0, 0);
@@ -384,24 +395,24 @@ struct var_info
 
 std::unordered_map<std::string, var_info> global_vars;
 
-uintptr_t get_var_addr(const char* varname)
+uintptr_t get_var_addr(const char *varname)
 {
   return global_vars[varname].address;
 }
 
-std::string get_var_type(const char* varname)
+std::string get_var_type(const char *varname)
 {
   return global_vars[varname].type_name;
 }
 
-void* memcpy_guest2host(void* dest, const void* src, size_t n)
+void *memcpy_guest2host(void *dest, const void *src, size_t n)
 {
   int pid = ptmc_state.pids[ptmc_state.cursor];
   tracee_read_mem(pid, src, dest, n);
   return dest;
 }
 
-void* memcpy_host2guest(void* dest, const void* src, size_t n)
+void *memcpy_host2guest(void *dest, const void *src, size_t n)
 {
   int pid = ptmc_state.pids[ptmc_state.cursor];
   tracee_write_mem(pid, dest, src, n);
@@ -422,7 +433,7 @@ std::string get_type_name(Dwarf_Debug dbg, Dwarf_Die type_die)
   if (dwarf_tag(type_die, &tag, &err) != DW_DLV_OK)
     return "unknown";
 
-  char* type_name = nullptr;
+  char *type_name = nullptr;
   if (dwarf_diename(type_die, &type_name, &err) != DW_DLV_OK)
     type_name = nullptr;
 
@@ -471,7 +482,7 @@ std::string get_type_name(Dwarf_Debug dbg, Dwarf_Die type_die)
   }
 }
 
-bool get_variable_address(Dwarf_Debug dbg, Dwarf_Die die, Dwarf_Addr& addr)
+bool get_variable_address(Dwarf_Debug dbg, Dwarf_Die die, Dwarf_Addr &addr)
 {
   Dwarf_Error err;
   Dwarf_Attribute loc_attr;
@@ -485,8 +496,8 @@ bool get_variable_address(Dwarf_Debug dbg, Dwarf_Die die, Dwarf_Addr& addr)
   if (dwarf_formexprloc(loc_attr, &expr_len, &expr_bytes, &err) != DW_DLV_OK)
     return false;
 
-  const unsigned char* data =
-      reinterpret_cast<const unsigned char*>(expr_bytes);
+  const unsigned char *data =
+      reinterpret_cast<const unsigned char *>(expr_bytes);
 
   if (expr_len > 0 && data[0] == DW_OP_addr)
   {
@@ -547,7 +558,7 @@ void init_dwarf()
               if (dwarf_formflag(attr, &is_external, &err) == DW_DLV_OK &&
                   is_external)
               {
-                char* var_name = nullptr;
+                char *var_name = nullptr;
                 if (dwarf_diename(current_die, &var_name, &err) != DW_DLV_OK)
                   continue;
 

@@ -20,7 +20,7 @@ typedef struct ptmc_filedesc
   std::string fname;
 
   template <class Archive>
-  void serialize(Archive& ar);
+  void serialize(Archive &ar);
 
 } ptmc_filedesc;
 

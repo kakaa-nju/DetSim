@@ -12,7 +12,7 @@ typedef struct choose_in
 
 typedef struct choose_out
 {
-  void* args[6];
+  void *args[6];
   int len[6]; /* 0 represents for unmodified */
   int rval;
 
@@ -28,11 +28,11 @@ typedef struct choose_out
   }
 } choose_out;
 
-typedef choose_out* (*choose_func)(int pid, int choice, const choose_in& in);
+typedef choose_out *(*choose_func)(int pid, int choice, const choose_in &in);
 
 extern choose_func choose_syswhat[450];
 extern int choose_many[450];
 
-int emu_gettimeofday(struct timeval* tv, struct timezone* tz);
+int emu_gettimeofday(struct timeval *tv, struct timezone *tz);
 
 #endif

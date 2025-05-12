@@ -37,8 +37,8 @@
 
 bool should_log(int level);
 
-static void loglineprintf(int level, const char* file, int line,
-                          const char* fmt, ...) noexcept
+static void loglineprintf(int level, const char *file, int line,
+                          const char *fmt, ...) noexcept
 {
   va_list v;
   va_start(v, fmt);
@@ -46,7 +46,7 @@ static void loglineprintf(int level, const char* file, int line,
   {
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    struct tm* tm_now = localtime(&tv.tv_sec);
+    struct tm *tm_now = localtime(&tv.tv_sec);
     char buf[64];
     strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm_now);
     std::string levelstr;

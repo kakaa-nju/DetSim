@@ -42,14 +42,14 @@ struct tcp_buffer
   std::stringstream ss;
 
   template <class Archive>
-  void save(Archive& ar) const;
+  void save(Archive &ar) const;
   template <class Archive>
-  void load(Archive& ar);
+  void load(Archive &ar);
 
   tcp_buffer() {}
 
-  tcp_buffer(const tcp_buffer& b) { ss << b.ss.str(); }
-  tcp_buffer& operator=(const tcp_buffer& b)
+  tcp_buffer(const tcp_buffer &b) { ss << b.ss.str(); }
+  tcp_buffer &operator=(const tcp_buffer &b)
   {
     ss << b.ss.str();
     return *this;
@@ -62,7 +62,7 @@ struct ptmc_datagram
   ptmc_addr from;
 
   template <class Archive>
-  void serialize(Archive& ar);
+  void serialize(Archive &ar);
 };
 
 typedef std::deque<ptmc_datagram> udp_buffer;
@@ -90,7 +90,7 @@ typedef struct ptmc_sock
   ptmc_addr dest;
 
   template <class Archive>
-  void serialize(Archive& ar);
+  void serialize(Archive &ar);
 } ptmc_sock;
 
 int emu_socket(int sockfd, int domain, int type, int protocol);
@@ -98,18 +98,18 @@ int emu_socket(int sockfd, int domain, int type, int protocol);
 /* connetion based */
 int emu_listen(int sockfd, int backlog);
 
-int emu_connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
+int emu_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 
-int emu_bind(int sockfd, const struct sockaddr* addr, socklen_t addrlen);
+int emu_bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 
-ssize_t emu_recvfrom(int sockfd, void* buf, size_t len, int flags,
-                     struct sockaddr* src_addr, socklen_t* addrlen);
+ssize_t emu_recvfrom(int sockfd, void *buf, size_t len, int flags,
+                     struct sockaddr *src_addr, socklen_t *addrlen);
 
-ssize_t emu_sendto(int sockfd, const void* buf, size_t len, int flags,
-                   struct sockaddr* dest_addr, socklen_t addrlen);
+ssize_t emu_sendto(int sockfd, const void *buf, size_t len, int flags,
+                   struct sockaddr *dest_addr, socklen_t addrlen);
 
 /* connection based, return a socket file descriptor */
-int emu_accept4(int sockfd, struct sockaddr* src_addr, socklen_t* addrlen,
+int emu_accept4(int sockfd, struct sockaddr *src_addr, socklen_t *addrlen,
                 int flags);
 
 #endif /* __SOCKSTATE_H */

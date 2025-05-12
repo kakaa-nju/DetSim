@@ -14,7 +14,7 @@ DEPS = $(OBJS:.o=.d)
 
 all: release
 
-release: CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
+release: CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -msse4.2
 release: tracer
 
 debug: CXXFLAGS = -MMD -MP -std=gnu++2a -fno-stack-protector -O0 -g -msse4.2 -DNOCOMPRESS

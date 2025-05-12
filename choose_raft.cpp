@@ -15,14 +15,14 @@ static struct timeval tv_addmsec(struct timeval tv, int msec)
 
 extern "C"
 {
-  choose_out* choose_gettimeofday(int pid, int choice, const choose_in& in)
+  choose_out *choose_gettimeofday(int pid, int choice, const choose_in &in)
   {
-    long praft = tracee_read_word(pid, (void*)get_var_addr("raft"));
+    long praft = tracee_read_word(pid, (void *)get_var_addr("raft"));
     raft_server_private_t raft;
-    tracee_read_mem(pid, (void*)praft, &raft, sizeof(raft));
+    tracee_read_mem(pid, (void *)praft, &raft, sizeof(raft));
 
     struct timeval tv = in.now;
-    struct timeval* tv_out = (struct timeval*)malloc(sizeof(*tv_out));
+    struct timeval *tv_out = (struct timeval *)malloc(sizeof(*tv_out));
 
     if (raft.state == RAFT_STATE_LEADER)
     {
@@ -39,7 +39,7 @@ extern "C"
         *tv_out = tv_addmsec(tv, raft.election_timeout_rand - 1);
     }
 
-    choose_out* out = new choose_out();
+    choose_out *out = new choose_out();
     out->args[0] = tv_out;
     out->len[0] = sizeof(struct timeval);
     out->rval = 0;

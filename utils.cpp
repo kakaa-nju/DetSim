@@ -27,24 +27,24 @@ namespace fs = std::filesystem;
 #define CHUNK_SIZE 16 KiB
 #define BUFFER_SIZE 8 KiB
 
-FILE* create_anonymous_tmp(const char* id, const char* mode)
+FILE *create_anonymous_tmp(const char *id, const char *mode)
 {
   return fdopen(syscall(SYS_memfd_create, id, 0), mode);
 }
 
-hash_type crc32(FILE* fp);
-hash_type compress_tmp_file(FILE* fin, const char* out_path, int level)
+hash_type crc32(FILE *fp);
+hash_type compress_tmp_file(FILE *fin, const char *out_path, int level)
 {
   fseek(fin, 0, SEEK_SET);
-  FILE* fout = fopen(out_path, "w+b");
+  FILE *fout = fopen(out_path, "w+b");
   if (!fin || !fout)
   {
     perror("fopen");
     return 1;
   }
 
-  void* in_buf = malloc(CHUNK_SIZE);
-  void* out_buf = malloc(ZSTD_compressBound(CHUNK_SIZE));
+  void *in_buf = malloc(CHUNK_SIZE);
+  void *out_buf = malloc(ZSTD_compressBound(CHUNK_SIZE));
   if (!in_buf || !out_buf)
   {
     fprintf(stderr, "Memory allocation failed\n");
@@ -79,18 +79,18 @@ hash_type compress_tmp_file(FILE* fin, const char* out_path, int level)
   return ret;
 }
 
-FILE* decompress_file_tmp(const char* in_path)
+FILE *decompress_file_tmp(const char *in_path)
 {
-  FILE* fin = fopen(in_path, "rb");
-  FILE* fout = create_anonymous_tmp("decompressed", "r+b");
+  FILE *fin = fopen(in_path, "rb");
+  FILE *fout = create_anonymous_tmp("decompressed", "r+b");
   if (!fin || !fout)
   {
     perror("fopen");
     return NULL;
   }
 
-  void* in_buf = malloc(ZSTD_compressBound(CHUNK_SIZE));
-  void* out_buf = malloc(CHUNK_SIZE);
+  void *in_buf = malloc(ZSTD_compressBound(CHUNK_SIZE));
+  void *out_buf = malloc(CHUNK_SIZE);
   if (!in_buf || !out_buf)
   {
     fprintf(stderr, "Memory allocation failed\n");
@@ -129,10 +129,10 @@ FILE* decompress_file_tmp(const char* in_path)
   return fout;
 }
 
-int filecmp(const char* file1, const char* file2)
+int filecmp(const char *file1, const char *file2)
 {
-  FILE* fp1 = fopen(file1, "rb");
-  FILE* fp2 = fopen(file2, "rb");
+  FILE *fp1 = fopen(file1, "rb");
+  FILE *fp2 = fopen(file2, "rb");
 
   if (!fp1 || !fp2)
   {
@@ -179,10 +179,10 @@ int filecmp(const char* file1, const char* file2)
   return result;
 }
 
-int mkdir_p(const char* path)
+int mkdir_p(const char *path)
 {
   char tmp[256];
-  char* p = NULL;
+  char *p = NULL;
   size_t len;
 
   snprintf(tmp, sizeof(tmp), "%s", path);
@@ -202,7 +202,7 @@ int mkdir_p(const char* path)
   return mkdir(tmp, 0755);
 }
 
-void fcopy(char* source_filename, char* destination_filename)
+void fcopy(char *source_filename, char *destination_filename)
 {
   int source_fd = open(source_filename, O_RDONLY);
   if (source_fd == -1)
@@ -211,8 +211,8 @@ void fcopy(char* source_filename, char* destination_filename)
     return;
   }
 
-  char* dup = strdup(destination_filename);
-  char* dir = dirname(dup);
+  char *dup = strdup(destination_filename);
+  char *dir = dirname(dup);
   mkdir_p(dir);
   free(dup);
 
@@ -253,7 +253,7 @@ void fcopy(char* source_filename, char* destination_filename)
   close(dest_fd);
 }
 
-int is_dynamically_linked(const char* filename)
+int is_dynamically_linked(const char *filename)
 {
   if (elf_version(EV_CURRENT) == EV_NONE)
   {
@@ -268,7 +268,7 @@ int is_dynamically_linked(const char* filename)
     return -1;
   }
 
-  Elf* e = elf_begin(fd, ELF_C_READ, NULL);
+  Elf *e = elf_begin(fd, ELF_C_READ, NULL);
   if (!e)
   {
     fprintf(stderr, "elf_begin failed: %s\n", elf_errmsg(-1));
@@ -313,10 +313,15 @@ int is_dynamically_linked(const char* filename)
 
 namespace fileutils
 {
+void file_closer::operator()(FILE *fp) const
+{
+  if (fp)
+    fclose(fp);
+}
 
-bool file_exists(const std::string& path) { return fs::exists(path); }
+bool file_exists(const std::string &path) { return fs::exists(path); }
 
-std::optional<std::ifstream> open_ifstream(const std::string& path,
+std::optional<std::ifstream> open_ifstream(const std::string &path,
                                            std::ios::openmode mode)
 {
   std::ifstream ifs(path, mode);
@@ -325,7 +330,7 @@ std::optional<std::ifstream> open_ifstream(const std::string& path,
   return std::move(ifs);
 }
 
-std::optional<std::ofstream> open_ofstream(const std::string& path,
+std::optional<std::ofstream> open_ofstream(const std::string &path,
                                            std::ios::openmode mode)
 {
   std::ofstream ofs(path, mode);
@@ -334,13 +339,13 @@ std::optional<std::ofstream> open_ofstream(const std::string& path,
   return std::move(ofs);
 }
 
-bool read_file(const std::string& path, std::vector<char>& buffer)
+bool read_file(const std::string &path, std::vector<char> &buffer)
 {
   auto ifs_opt = open_ifstream(path);
   if (!ifs_opt)
     return false;
 
-  std::ifstream& ifs = *ifs_opt;
+  std::ifstream &ifs = *ifs_opt;
   ifs.seekg(0, std::ios::end);
   size_t size = ifs.tellg();
   ifs.seekg(0);
@@ -349,18 +354,18 @@ bool read_file(const std::string& path, std::vector<char>& buffer)
   return true;
 }
 
-bool write_file(const std::string& path, const std::vector<char>& buffer)
+bool write_file(const std::string &path, const std::vector<char> &buffer)
 {
   auto ofs_opt = open_ofstream(path);
   if (!ofs_opt)
     return false;
 
-  std::ofstream& ofs = *ofs_opt;
+  std::ofstream &ofs = *ofs_opt;
   ofs.write(buffer.data(), buffer.size());
   return true;
 }
 
-std::string temp_filename(const std::string& prefix, const std::string& ext)
+std::string temp_filename(const std::string &prefix, const std::string &ext)
 {
   char tmpl[64];
   snprintf(tmpl, sizeof(tmpl), "/tmp/%sXXXXXX", prefix.c_str());
@@ -371,52 +376,52 @@ std::string temp_filename(const std::string& prefix, const std::string& ext)
   return std::string(tmpl) + ext;
 }
 
-bool copy_file(const std::string& src, const std::string& dst)
+bool copy_file(const std::string &src, const std::string &dst)
 {
   std::error_code ec;
   fs::create_directories(fs::path(dst).parent_path(), ec);
   return fs::copy_file(src, dst, fs::copy_options::overwrite_existing, ec);
 }
 
-bool remove_file(const std::string& path)
+bool remove_file(const std::string &path)
 {
   std::error_code ec;
   return fs::remove(path, ec);
 }
 
-std::unique_ptr<FILE, decltype(&fclose)> open_cfile(const std::string& path,
-                                                    const char* mode)
+std::unique_ptr<FILE, file_closer> open_cfile(const std::string &path,
+                                              const char *mode)
 {
-  FILE* fp = fopen(path.c_str(), mode);
-  return std::unique_ptr<FILE, decltype(&fclose)>(fp, fclose);
+  FILE *fp = fopen(path.c_str(), mode);
+  return std::unique_ptr<FILE, file_closer>(fp);
 }
 
-std::string format_hash_filename(const std::string& dir, const std::string& ext,
+std::string format_hash_filename(const std::string &dir, const std::string &ext,
                                  uint32_t hash)
 {
   return dir + fmt::sprintf("/" HASH_FORMAT, hash) + ext;
 }
 
-std::unique_ptr<FILE, decltype(&fclose)> open_map_file(hash_type hash,
-                                                       const char* mode)
+std::unique_ptr<FILE, file_closer> open_map_file(hash_type hash,
+                                                 const char *mode)
 {
   std::string filename = format_hash_filename("mappings", ".maps", hash);
   return open_cfile(filename, mode);
 }
 
-std::unique_ptr<FILE, decltype(&fclose)> open_mem_file(hash_type hash,
-                                                       const char* mode)
+std::unique_ptr<FILE, file_closer> open_mem_file(hash_type hash,
+                                                 const char *mode)
 {
   std::string filename = format_hash_filename("memory", ".mem.zstd", hash);
-  FILE* raw_fp = decompress_file_tmp(filename.c_str());
+  FILE *raw_fp = decompress_file_tmp(filename.c_str());
   if (!raw_fp)
-    return {nullptr, fclose};
-  return std::unique_ptr<FILE, decltype(&fclose)>(raw_fp, fclose);
+    return nullptr;
+  return std::unique_ptr<FILE, file_closer>(raw_fp);
 }
 
-std::unique_ptr<FILE, decltype(&fclose)>
-open_state_file(hash_type hash, const std::string& prefix,
-                const std::string& ext)
+std::unique_ptr<FILE, file_closer> open_state_file(hash_type hash,
+                                                   const std::string &prefix,
+                                                   const std::string &ext)
 {
   std::string filename = format_hash_filename(prefix, ext, hash);
   return open_cfile(filename, "rb");

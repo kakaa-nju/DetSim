@@ -5,7 +5,6 @@
 #define __USE_GNU
 #endif
 
-#include <stdbool.h>
 #include <stdint.h>
 
 #ifndef NP

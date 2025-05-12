@@ -17,14 +17,12 @@
 #include <string.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
-#include <sys/user.h>
 #include <sys/wait.h>
-#include <syscall.h>
 #include <unistd.h>
 
 #define pids ptmc_state.pids
 #define PTRACE_TRAP_SIG (SIGTRAP | 0x80)
-extern FILE* log_fp;
+extern FILE *log_fp;
 
 /* prepare tracee for ptrace, and execve */
 static void start_tracee(int id)
@@ -55,7 +53,7 @@ static void exit_all(void)
   exit(EXIT_SUCCESS);
 }
 
-extern std::unordered_map<int, void*> rseq_struct;
+extern std::unordered_map<int, void *> rseq_struct;
 extern std::unordered_map<int, int> rseq_len;
 
 /* Extract one entire syscall, preserve its original effect */
@@ -73,7 +71,7 @@ syscall_info extract_one_syscall(pid_t pid)
   waitpid(pid, &wstatus, 0);
   assert(WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == PTRACE_TRAP_SIG);
 
-  ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void*)sizeof(info), &info);
+  ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(info), &info);
   assert(info.op == PTRACE_SYSCALL_INFO_ENTRY);
   ret.nr = info.entry.nr;
   for (int i = 0; i < 6; i++)
@@ -84,7 +82,7 @@ syscall_info extract_one_syscall(pid_t pid)
   waitpid(pid, &wstatus, 0);
   assert(WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == PTRACE_TRAP_SIG);
 
-  ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void*)sizeof(info), &info);
+  ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(info), &info);
   assert(info.op == PTRACE_SYSCALL_INFO_EXIT);
   ret.rval = info.exit.rval;
 
@@ -98,14 +96,14 @@ syscall_info extract_one_syscall(pid_t pid)
   /* getrandom */
   if (ret.nr == SYS_getrandom)
   {
-    memcpy_host2guest((void*)ret.args[0], "\0\0\0\0\0\0\0\0", 8);
+    memcpy_host2guest((void *)ret.args[0], "\0\0\0\0\0\0\0\0", 8);
   }
   /* rseq mask */
   if (ret.nr == SYS_rseq)
   {
-    rseq_struct[pid] = (void*)ret.args[0];
+    rseq_struct[pid] = (void *)ret.args[0];
     rseq_len[pid] = ret.args[1];
-    LOG_TRACE("Record rseq(%p, %d)", (void*)ret.args[0], ret.args[1]);
+    LOG_TRACE("Record rseq(%p, %d)", (void *)ret.args[0], ret.args[1]);
   }
   return ret;
 }
@@ -155,15 +153,15 @@ static void on_syscall_enter(pid_t pid, int nr)
 #define CKPT_DISCARD 2
 #define CKPT_EXIT 3
 
-int analyze_choose(struct syscall_info* info) { return choose_many[info->nr]; }
+int analyze_choose(struct syscall_info *info) { return choose_many[info->nr]; }
 
 /* parse syscall_info */
-static int on_syscall_exit(pid_t pid, struct syscall_info* info)
+static int on_syscall_exit(pid_t pid, struct syscall_info *info)
 {
   /* calculate choose_n from context */
   ptmc_state.n_choose = analyze_choose(info);
 
-  static char* line_read;
+  static char *line_read;
   if (!is_auto_mode() && ptmc_state.n_choose != 0) /* ask for choose */
   {
     printf("Here comes with %d choices.\n", ptmc_state.n_choose);
@@ -183,9 +181,9 @@ static int on_syscall_exit(pid_t pid, struct syscall_info* info)
   {
       /* syscalls need scheduled */
     case SYS_recvfrom:
-      ret = emu_recvfrom(info->args[0], (void*)info->args[1], info->args[2],
-                         info->args[3], (struct sockaddr*)info->args[4],
-                         (socklen_t*)info->args[5]);
+      ret = emu_recvfrom(info->args[0], (void *)info->args[1], info->args[2],
+                         info->args[3], (struct sockaddr *)info->args[4],
+                         (socklen_t *)info->args[5]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
       if (ret >= 0) /* for willemt/raft, a `poll_msg` cycle will recv() until
@@ -197,15 +195,15 @@ static int on_syscall_exit(pid_t pid, struct syscall_info* info)
     case SYS_sched_yield:
       break;
     case SYS_sendto:
-      ret = emu_sendto(info->args[0], (void*)info->args[1], info->args[2],
-                       info->args[3], (struct sockaddr*)info->args[4],
+      ret = emu_sendto(info->args[0], (void *)info->args[1], info->args[2],
+                       info->args[3], (struct sockaddr *)info->args[4],
                        info->args[5]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
       return CKPT_NO;
     case SYS_gettimeofday:
-      ret = emu_gettimeofday((struct timeval*)info->args[0],
-                             (struct timezone*)info->args[1]);
+      ret = emu_gettimeofday((struct timeval *)info->args[0],
+                             (struct timezone *)info->args[1]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
       return CKPT_YES;
@@ -222,13 +220,13 @@ static int on_syscall_exit(pid_t pid, struct syscall_info* info)
       info->rval = ret;
       return CKPT_NO;
     case SYS_bind:
-      ret = emu_bind(info->args[0], (const struct sockaddr*)info->args[1],
+      ret = emu_bind(info->args[0], (const struct sockaddr *)info->args[1],
                      info->args[2]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
       return CKPT_NO;
     case SYS_connect:
-      ret = emu_connect(info->args[0], (const struct sockaddr*)info->args[1],
+      ret = emu_connect(info->args[0], (const struct sockaddr *)info->args[1],
                         info->args[2]);
       tracee_do_open(pid, "/dev/null", O_RDWR);
       tracee_set_rax(pid, ret);
@@ -254,7 +252,7 @@ static int on_syscall_exit(pid_t pid, struct syscall_info* info)
 
 void show_syscall_history();
 /* Do one syscall, with its effects altered */
-int do_one_syscall(pid_t pid, syscall_info* si)
+int do_one_syscall(pid_t pid, syscall_info *si)
 {
   /* ptrace(2): When delivering system call traps, set bit 7 in the signal     *
    * number (i.e., deliver SIGTRAP|0x80). This makes it easy for the tracer to *
@@ -279,7 +277,7 @@ int do_one_syscall(pid_t pid, syscall_info* si)
     assert(WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) == PTRACE_TRAP_SIG));
   }
 
-  ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void*)sizeof(info), &info);
+  ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(info), &info);
   assert(info.op == PTRACE_SYSCALL_INFO_ENTRY);
 
   on_syscall_enter(pid, info.entry.nr);
@@ -292,7 +290,7 @@ int do_one_syscall(pid_t pid, syscall_info* si)
   waitpid(pid, &wstatus, 0);
   assert(WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) == PTRACE_TRAP_SIG));
 
-  ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void*)sizeof(info), &info);
+  ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(info), &info);
   assert(info.op == PTRACE_SYSCALL_INFO_EXIT);
   si->rval = info.exit.rval;
   return on_syscall_exit(pid, si);
@@ -336,9 +334,9 @@ static void init_tracee_state(int index)
 
 /* loaded, exec 1 STEP, not stored. Save Last syscall into `info` *
  * 1 STEP = critical syscall step */
-int exec_once(syscall_info* info)
+int exec_once(syscall_info *info)
 {
-  sys_state& s = ptmc_state.source_state;
+  sys_state &s = ptmc_state.source_state;
   int index = ptmc_state.cursor;
   pid_t pid = pids[index];
 
@@ -367,11 +365,11 @@ int exec_once(syscall_info* info)
   return 0;
 }
 
-long expr(const char* e, bool* success);
+long expr(const char *e, bool *success);
 /* Judge state assertions. Return 0 if legal */
 static int check_state()
 {
-  for (auto& assertion : ptmc_state.assertions)
+  for (auto &assertion : ptmc_state.assertions)
   {
     bool success;
     long val = expr(assertion.c_str(), &success);
@@ -460,7 +458,7 @@ int exec_cont()
 {
   double start_time = gettime();
   srand(time(NULL));
-  sys_state* state_fetched = NULL;
+  sys_state *state_fetched = NULL;
   syscall_info syscall_info[NP];
 
   state_queue.clear();
@@ -478,7 +476,7 @@ int exec_cont()
     {
     again:
       ptmc_state.source_state = *state_fetched;
-      auto& s = ptmc_state.source_state;
+      auto &s = ptmc_state.source_state;
 
       for (int j = 0; j < NP; j++)
         ptmc_state.exited[j] = s.exited[j];

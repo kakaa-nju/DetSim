@@ -16,8 +16,8 @@
 #include <unordered_map>
 #include <wait.h>
 
-static char* log_file = NULL;
-char* cfg_file = (char*)"config.json"; /* default */
+static char *log_file = NULL;
+char *cfg_file = (char *)"config.json"; /* default */
 static int auto_mode = 0;
 int is_auto_mode() { return auto_mode; }
 int loglevel = 0;
@@ -29,9 +29,9 @@ bool should_log(int level)
   return false;
 }
 
-FILE* log_fp = NULL;
+FILE *log_fp = NULL;
 
-void init_log(const char* log_file)
+void init_log(const char *log_file)
 {
   if (log_file == NULL)
   {
@@ -43,82 +43,82 @@ void init_log(const char* log_file)
 }
 
 static char cfg_str[4096];
-void read_config(const char* cfg_file)
+void read_config(const char *cfg_file)
 {
   assert(cfg_file);
-  FILE* cfg_fp = fopen(cfg_file, "r");
+  FILE *cfg_fp = fopen(cfg_file, "r");
   Assert(cfg_fp, "Can not open '%s'", cfg_file);
 
   fread(cfg_str, 4096, 1, cfg_fp);
   fclose(cfg_fp);
-  cJSON* cfg = cJSON_Parse(cfg_str);
-  cJSON* Loglevel = cJSON_GetObjectItem(cfg, "Loglevel");
+  cJSON *cfg = cJSON_Parse(cfg_str);
+  cJSON *Loglevel = cJSON_GetObjectItem(cfg, "Loglevel");
   loglevel = cJSON_GetNumberValue(Loglevel);
 
-  cJSON* Nodes = cJSON_GetObjectItem(cfg, "Nodes");
+  cJSON *Nodes = cJSON_GetObjectItem(cfg, "Nodes");
   int nodes = cJSON_GetNumberValue(Nodes);
   Assert(nodes == NP,
          "Build don't support %d processes, please compile with 'NP=%d' and "
          "rebuild",
          nodes, nodes);
-  cJSON* tracee = cJSON_GetObjectItem(cfg, "Tracee");
+  cJSON *tracee = cJSON_GetObjectItem(cfg, "Tracee");
 
   for (int i = 0; i < nodes; i++)
   {
-    cJSON* argv = cJSON_GetArrayItem(tracee, i);
+    cJSON *argv = cJSON_GetArrayItem(tracee, i);
     int argc = cJSON_GetArraySize(tracee);
     Assert(argc <= 5, "More than 5 arguments is not supported");
 
     ptmc_state.tracee[i].argc = argc;
     for (int j = 0; j < argc; j++)
     {
-      cJSON* arg = cJSON_GetArrayItem(argv, j);
+      cJSON *arg = cJSON_GetArrayItem(argv, j);
       ptmc_state.tracee[i].argv[j] = cJSON_GetStringValue(arg);
     }
     ptmc_state.tracee[i].executable = ptmc_state.tracee[i].argv[0];
     ptmc_state.tracee[i].argv[argc] = NULL;
   }
 
-  cJSON* addrs = cJSON_GetObjectItem(cfg, "Addr");
+  cJSON *addrs = cJSON_GetObjectItem(cfg, "Addr");
   if (addrs)
   {
     int addrs_cnt = cJSON_GetArraySize(addrs);
     assert(addrs_cnt == NP);
     for (int j = 0; j < addrs_cnt; j++)
     {
-      cJSON* addr = cJSON_GetArrayItem(addrs, j);
+      cJSON *addr = cJSON_GetArrayItem(addrs, j);
       ptmc_state.addrs[j] = std::string(cJSON_GetStringValue(addr));
     }
   }
 
-  cJSON* shared_files = cJSON_GetObjectItem(cfg, "SharedFiles");
+  cJSON *shared_files = cJSON_GetObjectItem(cfg, "SharedFiles");
   if (shared_files)
   {
     int shared_files_cnt = cJSON_GetArraySize(shared_files);
     for (int j = 0; j < shared_files_cnt; j++)
     {
-      cJSON* shared_file = cJSON_GetArrayItem(shared_files, j);
+      cJSON *shared_file = cJSON_GetArrayItem(shared_files, j);
       ptmc_state.shared_files.emplace(
           std::string(cJSON_GetStringValue(shared_file)));
     }
   }
 
-  cJSON* assertions = cJSON_GetObjectItem(cfg, "Assertions");
+  cJSON *assertions = cJSON_GetObjectItem(cfg, "Assertions");
   if (assertions)
   {
     int assertions_cnt = cJSON_GetArraySize(assertions);
     for (int j = 0; j < assertions_cnt; j++)
     {
-      cJSON* assertion = cJSON_GetArrayItem(assertions, j);
+      cJSON *assertion = cJSON_GetArrayItem(assertions, j);
       ptmc_state.assertions.emplace(
           std::string(cJSON_GetStringValue(assertion)));
     }
   }
 
-  cJSON* user_check = cJSON_GetObjectItem(cfg, "UserCheck");
+  cJSON *user_check = cJSON_GetObjectItem(cfg, "UserCheck");
   if (user_check)
   {
-    char* src = cJSON_GetStringValue(user_check);
+    char *src = cJSON_GetStringValue(user_check);
     std::string obj(src, strchr(src, '.'));
     obj = "./" + obj + ".so";
     LOG_INFO("Compiling user check sources to %s", obj.c_str());
@@ -137,7 +137,7 @@ void read_config(const char* cfg_file)
       else
         waitpid(pid, 0, 0);
     }
-    void* handle = dlopen(obj.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    void *handle = dlopen(obj.c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle)
     {
       panic("%s", dlerror());
@@ -147,13 +147,13 @@ void read_config(const char* cfg_file)
     LOG_INFO("Done");
   }
 
-  cJSON* choose_points = cJSON_GetObjectItem(cfg, "ChoosePoint");
+  cJSON *choose_points = cJSON_GetObjectItem(cfg, "ChoosePoint");
   if (choose_points)
   {
     int choose_points_cnt = cJSON_GetArraySize(choose_points);
     for (int j = 0; j < choose_points_cnt; j++)
     {
-      cJSON* choose_point = cJSON_GetArrayItem(choose_points, j);
+      cJSON *choose_point = cJSON_GetArrayItem(choose_points, j);
       int nr =
           cJSON_GetNumberValue(cJSON_GetObjectItem(choose_point, "syscall"));
       int n_choose =
@@ -162,10 +162,10 @@ void read_config(const char* cfg_file)
     }
   }
 
-  cJSON* choose_function = cJSON_GetObjectItem(cfg, "ChooseFunc");
+  cJSON *choose_function = cJSON_GetObjectItem(cfg, "ChooseFunc");
   if (choose_function)
   {
-    char* src = cJSON_GetStringValue(choose_function);
+    char *src = cJSON_GetStringValue(choose_function);
     std::string obj(src, strchr(src, '.'));
     obj = "./" + obj + ".so";
     LOG_INFO("Compiling user choose function sources to %s", obj.c_str());
@@ -184,7 +184,7 @@ void read_config(const char* cfg_file)
       else
         waitpid(pid, 0, 0);
     }
-    void* handle = dlopen(obj.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    void *handle = dlopen(obj.c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle)
     {
       panic("%s", dlerror());
@@ -212,7 +212,7 @@ static inline void welcome()
   printf("For help, type \"help\"\n");
 }
 
-static inline void parse_args(int argc, char* argv[])
+static inline void parse_args(int argc, char *argv[])
 {
   const struct option table[] = {
       {"auto", no_argument, NULL, 'a'},
@@ -252,7 +252,7 @@ static void ctrl_c(int _) { sigint_received = 1; }
 static void handle_sigint() { signal(SIGINT, ctrl_c); }
 
 void init_regex();
-void init_monitor(int argc, char* argv[])
+void init_monitor(int argc, char *argv[])
 {
   /* Perform some global initialization. */
 
@@ -278,9 +278,9 @@ int is_auto_mode();
 
 /* We use the `readline' library to provide more flexibility to read from stdin.
  */
-char* rl_gets()
+char *rl_gets()
 {
-  static char* line_read = NULL;
+  static char *line_read = NULL;
 
   if (line_read)
   {
@@ -299,7 +299,7 @@ char* rl_gets()
 }
 
 int exec_cont();
-static int cmd_c(char* args)
+static int cmd_c(char *args)
 {
   auto_mode = 1;
   exec_cont();
@@ -307,27 +307,27 @@ static int cmd_c(char* args)
   return 0;
 }
 
-static int cmd_q(char* args)
+static int cmd_q(char *args)
 {
   ptmc_state.state = PTMC_QUIT;
   return -1;
 }
 
-static int cmd_help(char* args);
-static int cmd_sw(char* args);
-static int cmd_si(char* args);
-static int cmd_load(char* args);
-static int cmd_info(char* args);
-static int cmd_batch(char* args);
-static int cmd_p(char* args);
-static int cmd_x(char* args);
-static int cmd_bt(char* args);
+static int cmd_help(char *args);
+static int cmd_sw(char *args);
+static int cmd_si(char *args);
+static int cmd_load(char *args);
+static int cmd_info(char *args);
+static int cmd_batch(char *args);
+static int cmd_p(char *args);
+static int cmd_x(char *args);
+static int cmd_bt(char *args);
 
 static struct
 {
-  const char* name;
-  const char* description;
-  int (*handler)(char*);
+  const char *name;
+  const char *description;
+  int (*handler)(char *);
 } cmd_table[] = {
     {"help", "Display informations about all supported commands", cmd_help},
     {"c", "Continue the execution of the program, start from current state",
@@ -345,9 +345,9 @@ static struct
 
 #define NR_CMD (sizeof(cmd_table) / sizeof(cmd_table[0]))
 
-static int cmd_help(char* args)
+static int cmd_help(char *args)
 {
-  char* arg = strtok(NULL, " ");
+  char *arg = strtok(NULL, " ");
   int i;
 
   if (arg == NULL)
@@ -373,9 +373,9 @@ static int cmd_help(char* args)
   return 0;
 }
 
-static int cmd_sw(char* args)
+static int cmd_sw(char *args)
 {
-  char* arg = strtok(args, " ");
+  char *arg = strtok(args, " ");
   if (arg == NULL)
   {
     printf("No Arguments!\n");
@@ -394,7 +394,7 @@ static int cmd_sw(char* args)
   return 0;
 }
 
-static int cmd_si(char* args)
+static int cmd_si(char *args)
 {
   /* check cursor range */
   int cursor = ptmc_state.cursor;
@@ -430,13 +430,13 @@ static int cmd_si(char* args)
 }
 
 void show_syscall_history();
-static int cmd_info(char* args)
+static int cmd_info(char *args)
 {
-  char* arg = strtok(args, " ");
+  char *arg = strtok(args, " ");
   if (arg == NULL)
   {
     // printf("No Arguments!\n");
-    sys_state& s = ptmc_state.dest_state;
+    sys_state &s = ptmc_state.dest_state;
     printf("Stops at state " HASH_FORMAT " \n", s.ss_hash);
     for (int i = 0; i < NP; i++)
     {
@@ -453,7 +453,7 @@ static int cmd_info(char* args)
     {
       auto l = ptmc_state.udp_buffer_lists[i];
       printf("Tracee %d's udp packages:\n", i);
-      for (auto& b : l)
+      for (auto &b : l)
       {
         printf("  for recvsock %d: %ld messages\n", b.first, b.second.size());
       }
@@ -469,9 +469,9 @@ static int cmd_info(char* args)
 
 #include <vector>
 /* Command `load` will only set ptmc_state.ss */
-static int cmd_load(char* args)
+static int cmd_load(char *args)
 {
-  char* arg = strtok(args, " ");
+  char *arg = strtok(args, " ");
   if (arg == NULL)
   {
     printf("No Arguments!\n");
@@ -479,9 +479,9 @@ static int cmd_load(char* args)
   }
   /* match */
   std::vector<hash_type> s;
-  DIR* dir = opendir("sstate");
+  DIR *dir = opendir("sstate");
   assert(dir);
-  struct dirent* de;
+  struct dirent *de;
   while ((de = readdir(dir)) != NULL)
   {
     if (de->d_name[0] == '.')
@@ -520,13 +520,13 @@ void ui_mainloop()
     cmd_c(NULL);
   }
 
-  for (char* str; (str = rl_gets()) != NULL;)
+  for (char *str; (str = rl_gets()) != NULL;)
   {
     if (str[0] != 0)
       strcpy(lastbuf, str);
-    char* str_end = str + strlen(str);
+    char *str_end = str + strlen(str);
     /* extract the first token as the command */
-    char* cmd = strtok(str, " ");
+    char *cmd = strtok(str, " ");
     if (cmd == NULL)
     {
       strcpy(str, lastcmd);
@@ -541,7 +541,7 @@ void ui_mainloop()
     /* treat the remaining string as the arguments,
      * which may need further parsing
      */
-    char* args = cmd + strlen(cmd) + 1;
+    char *args = cmd + strlen(cmd) + 1;
     if (args >= str_end)
       args = NULL;
 
@@ -562,7 +562,7 @@ void ui_mainloop()
   }
 }
 
-static int cmd_batch(char* args)
+static int cmd_batch(char *args)
 {
   static int in_call = 0;
   if (in_call)
@@ -595,8 +595,8 @@ static int cmd_batch(char* args)
   return 0;
 }
 
-long expr(const char* e, bool* success);
-static int cmd_p(char* args)
+long expr(const char *e, bool *success);
+static int cmd_p(char *args)
 {
   if (!args || (args[0] == 0))
   {
@@ -618,7 +618,7 @@ static int cmd_p(char* args)
 #define DEFAULT_SIZE 'w'
 #include <inttypes.h>
 
-void print_memory(const void* addr, int count, char format, char size)
+void print_memory(const void *addr, int count, char format, char size)
 {
 
   size_t times = 0;
@@ -636,9 +636,9 @@ void print_memory(const void* addr, int count, char format, char size)
     return;
   }
 
-  uint8_t* mem = (uint8_t*)ptmc_state.dest_state.child[ptmc_state.cursor]
+  uint8_t *mem = (uint8_t *)ptmc_state.dest_state.child[ptmc_state.cursor]
                      .read_snapshot_mem((uintptr_t)addr, times * count);
-  uint8_t* p = mem;
+  uint8_t *p = mem;
 
   if (!strchr("xdou", format))
   {
@@ -649,17 +649,17 @@ void print_memory(const void* addr, int count, char format, char size)
   for (int i = 0; i < count; ++i)
   {
     if (((times * i) & 0xf) == 0)
-      printf("%p: ", (bytes*)addr + (times * i));
+      printf("%p: ", (bytes *)addr + (times * i));
 
     switch (size)
     {
       case 'b':
       {
-        uint8_t val = *(const uint8_t*)p;
+        uint8_t val = *(const uint8_t *)p;
         if (format == 'x')
           printf("0x%02x ", val);
         else if (format == 'd')
-          printf("%" PRId8 " ", *(int8_t*)&val);
+          printf("%" PRId8 " ", *(int8_t *)&val);
         else if (format == 'u')
           printf("%" PRIu8 " ", val);
         else if (format == 'o')
@@ -669,11 +669,11 @@ void print_memory(const void* addr, int count, char format, char size)
       }
       case 'h':
       {
-        uint16_t val = *(const uint16_t*)p;
+        uint16_t val = *(const uint16_t *)p;
         if (format == 'x')
           printf("0x%04x ", val);
         else if (format == 'd')
-          printf("%" PRId16 " ", *(int16_t*)&val);
+          printf("%" PRId16 " ", *(int16_t *)&val);
         else if (format == 'u')
           printf("%" PRIu16 " ", val);
         else if (format == 'o')
@@ -683,11 +683,11 @@ void print_memory(const void* addr, int count, char format, char size)
       }
       case 'w':
       {
-        uint32_t val = *(const uint32_t*)p;
+        uint32_t val = *(const uint32_t *)p;
         if (format == 'x')
           printf("0x%08x ", val);
         else if (format == 'd')
-          printf("%" PRId32 " ", *(int32_t*)&val);
+          printf("%" PRId32 " ", *(int32_t *)&val);
         else if (format == 'u')
           printf("%" PRIu32 " ", val);
         else if (format == 'o')
@@ -697,11 +697,11 @@ void print_memory(const void* addr, int count, char format, char size)
       }
       case 'g':
       {
-        uint64_t val = *(const uint64_t*)p;
+        uint64_t val = *(const uint64_t *)p;
         if (format == 'x')
           printf("0x%016" PRIx64 " ", val);
         else if (format == 'd')
-          printf("%" PRId64 " ", *(int64_t*)&val);
+          printf("%" PRId64 " ", *(int64_t *)&val);
         else if (format == 'u')
           printf("%" PRIu64 " ", val);
         else if (format == 'o')
@@ -721,7 +721,7 @@ void print_memory(const void* addr, int count, char format, char size)
 }
 
 // Parse input like: x/4xg
-int parse_format_string(const char* fmt, int* count, char* format, char* size)
+int parse_format_string(const char *fmt, int *count, char *format, char *size)
 {
   if (fmt[0] != '/')
   {
@@ -762,7 +762,7 @@ int parse_format_string(const char* fmt, int* count, char* format, char* size)
   return 0;
 }
 
-static int cmd_x(char* args)
+static int cmd_x(char *args)
 {
   if (!args || (args[0] == 0))
   {
@@ -779,7 +779,7 @@ static int cmd_x(char* args)
     return 2;
   }
 
-  char* arg_next = strtok(NULL, " ");
+  char *arg_next = strtok(NULL, " ");
   if (arg_next == NULL)
     arg_next = args;
 
@@ -790,12 +790,12 @@ static int cmd_x(char* args)
   else
     addr = strtoull(arg_next, NULL, 10);
 
-  print_memory((const void*)addr, count, format, size);
+  print_memory((const void *)addr, count, format, size);
 
   return 0;
 }
 
-static int cmd_bt(char* args)
+static int cmd_bt(char *args)
 {
   tracee_backtrace(ptmc_state.pids[ptmc_state.cursor]);
   return 0;

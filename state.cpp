@@ -1,25 +1,21 @@
 #include "state.h"
+#include "cereal/archives/binary.hpp"
 #include "common.h"
 #include "debug.h"
 #include "fsstate.h"
 #include "guest.h"
 #include "monitor.h"
 #include "utils.h"
-// #include "sockstate.h"
-#include "cereal/archives/binary.hpp"
 #include <assert.h>
-#include <bits/types/cookie_io_functions_t.h>
 #include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
-#include <libgen.h>
 #include <stack>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ptrace.h>
-#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/user.h>
 
@@ -28,11 +24,7 @@ TSS state_tree;
 LSS state_queue;
 SSS state_set;
 
-struct user_regs_struct regs_on_entry;
-struct user_regs_struct regs;
-void fcopy(char* source_filename, char* destination_filename);
-
-std::unordered_map<int, void*> rseq_struct;
+std::unordered_map<int, void *> rseq_struct;
 std::unordered_map<int, int> rseq_len;
 
 /* serialized process state don't include memory and mappings
@@ -42,16 +34,16 @@ std::unordered_map<int, int> rseq_len;
 char printbuf[1024];
 
 static void construct_syscall_string(hash_type ts_hash);
-static void construct_syscall_string(tracee_state* t);
+static void construct_syscall_string(tracee_state *t);
 
-void log_syscall(tracee_state* t)
+void log_syscall(tracee_state *t)
 {
   construct_syscall_string(t);
   LOG_TRACE("%s", printbuf);
 }
 
 /* only one tracee_state changed comparing to source_state */
-sys_state::sys_state(struct syscall_info* info)
+sys_state::sys_state(struct syscall_info *info)
 {
   /* construct all tracee for init_state */
 
@@ -95,25 +87,25 @@ ret:
   LOG_DEBUG("Create sstate " HASH_FORMAT, ss_hash_tmp);
 }
 
-void state_queue_append(sys_state* s) { state_queue.push_back(s->ss_hash); }
+void state_queue_append(sys_state *s) { state_queue.push_back(s->ss_hash); }
 
-void state_queue_append_front(sys_state* s)
+void state_queue_append_front(sys_state *s)
 {
   state_queue.push_front(s->ss_hash);
 }
 
-sys_state* state_queue_extract()
+sys_state *state_queue_extract()
 {
   if (state_queue.empty())
     return NULL;
-  sys_state* s = new sys_state(state_queue.front());
+  sys_state *s = new sys_state(state_queue.front());
   state_queue.pop_front();
   return s;
 }
 
 void sys_state::save_shared_files()
 {
-  for (auto& shared_file : ptmc_state.shared_files)
+  for (auto &shared_file : ptmc_state.shared_files)
   {
     auto sfs_filename =
         fileutils::format_hash_filename("filesystem", ".sfs", ss_hash);
@@ -143,7 +135,7 @@ int sys_state::save_metadata()
   return 0;
 }
 
-void state_tree_add(sys_state* s, sys_state* t, int which, int choose)
+void state_tree_add(sys_state *s, sys_state *t, int which, int choose)
 {
   if (state_tree.count(t->ss_hash) == 0)
     state_tree[t->ss_hash] =
@@ -183,23 +175,23 @@ void show_syscall_history()
   printf("%d steps in total.\n", cnt);
 }
 
-static bytes* membuf;
+static bytes *membuf;
 static int membufsz = 4096;
 
 #define BUFFER_SIZE 4096
 /* NO CONSIDER ABOUT PERFORMANCE */
-static bool maps_item_eq(maps_item& a, maps_item& b)
+static bool maps_item_eq(maps_item &a, maps_item &b)
 {
   return a.start == b.start && a.end == b.end;
 }
 
-static bool existmaps_item(maps_item& a, std::vector<maps_item> array)
+static bool existmaps_item(maps_item &a, std::vector<maps_item> array)
 {
   /* which will be managed by SYS_brk */
   if (!strcmp(a.name, "[heap]"))
     return true;
 
-  for (auto& item : array)
+  for (auto &item : array)
   {
     if (maps_item_eq(a, item))
       return true;
@@ -209,9 +201,9 @@ static bool existmaps_item(maps_item& a, std::vector<maps_item> array)
 
 /* NOTICE: addr may point read only memory, in which *
  * case has no dump, and need to be read from process */
-void* read_mem(hash_type ts_hash, int pid, uint64_t addr, long size)
+void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size)
 {
-  bytes* ret = (bytes*)malloc(size + 1);
+  bytes *ret = (bytes *)malloc(size + 1);
   ret[size] = 0;
 
   auto maps_fp = fileutils::open_map_file(ts_hash);
@@ -230,7 +222,7 @@ void* read_mem(hash_type ts_hash, int pid, uint64_t addr, long size)
     return nullptr;
   }
 
-  for (auto& item : items)
+  for (auto &item : items)
   {
     if (item.start > addr || addr >= item.end)
     {
@@ -243,7 +235,7 @@ void* read_mem(hash_type ts_hash, int pid, uint64_t addr, long size)
     {
       fseek(mem_fp.get(), addr - item.start, SEEK_CUR);
       fread(ret, 1, size, mem_fp.get());
-      LOG_TRACE("read addr %p from memory dump", (void*)addr);
+      LOG_TRACE("read addr %p from memory dump", (void *)addr);
     }
     else
     {
@@ -257,7 +249,7 @@ void* read_mem(hash_type ts_hash, int pid, uint64_t addr, long size)
       }
       fseek(proc_fp.get(), addr, SEEK_SET);
       fread(ret, 1, size, proc_fp.get());
-      LOG_TRACE("read addr %p from procfs", (void*)addr);
+      LOG_TRACE("read addr %p from procfs", (void *)addr);
     }
     break;
   }
@@ -265,7 +257,7 @@ void* read_mem(hash_type ts_hash, int pid, uint64_t addr, long size)
   return ret;
 }
 
-void* tracee_state::read_snapshot_mem(uint64_t addr, long size)
+void *tracee_state::read_snapshot_mem(uint64_t addr, long size)
 {
   return read_mem(ts_hash, pid, addr, size);
 }
@@ -292,7 +284,7 @@ std::vector<maps_item> tracee_state::recover_brk_mappings()
   get_maps_item(maps_old, current_maps_fp.get());
   get_maps_item(maps_new, origin_maps_fp.get());
 
-  for (auto& item_old : maps_old)
+  for (auto &item_old : maps_old)
   {
     if (!existmaps_item(item_old, maps_new))
     {
@@ -300,7 +292,7 @@ std::vector<maps_item> tracee_state::recover_brk_mappings()
     }
   }
 
-  for (auto& item_new : maps_new)
+  for (auto &item_new : maps_new)
   {
     if (!existmaps_item(item_new, maps_old))
     {
@@ -315,18 +307,18 @@ std::vector<maps_item> tracee_state::recover_brk_mappings()
 
 void tracee_state::recover_file_descriptors(int index)
 {
-  sys_state& last = ptmc_state.dest_state;
-  tracee_state& old_state = last.child[index];
+  sys_state &last = ptmc_state.dest_state;
+  tracee_state &old_state = last.child[index];
 
   // close all
-  for (auto& fd : old_state.fd_list)
+  for (auto &fd : old_state.fd_list)
   {
     LOG_TRACE("close fd %d", fd.fd);
     tracee_do_syscall(pid, SYS_close, fd.fd, 0, 0, 0, 0, 0);
   }
 
   // open all
-  for (auto& fd : fd_list)
+  for (auto &fd : fd_list)
   {
     LOG_TRACE("restore fd, name = %d, %s", fd.fd, fd.fname.c_str());
     int dfd = tracee_do_open(pid, fd.fname.c_str(), fd.flags);
@@ -339,7 +331,7 @@ void tracee_state::recover_file_descriptors(int index)
   }
 }
 
-void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item>& maps)
+void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps)
 {
   auto dump_fp = fileutils::open_mem_file(ts_hash);
   if (!dump_fp)
@@ -356,11 +348,11 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item>& maps)
     return;
   }
 
-  void* rseq = malloc(rseq_len[pid]);
+  void *rseq = malloc(rseq_len[pid]);
   fseek(mem_fp.get(), (uintptr_t)rseq_struct[pid], SEEK_SET);
   fread(rseq, rseq_len[pid], 1, mem_fp.get());
 
-  for (auto& item : maps)
+  for (auto &item : maps)
   {
     if (item.flags[1] != 'w' || item.start == available_memory)
       continue;
@@ -370,20 +362,21 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item>& maps)
     {
       free(membuf);
       membufsz = size;
-      membuf = (bytes*)malloc(membufsz);
+      membuf = (bytes *)malloc(membufsz);
     }
 
     fread(membuf, 1, size, dump_fp.get());
     fseek(mem_fp.get(), item.start, SEEK_SET);
     fwrite(membuf, 1, size, mem_fp.get());
 
-    LOG_TRACE("Restore mem %p-%p", (void*)item.start, (void*)item.end);
+    LOG_TRACE("Restore mem %p-%p", (void *)item.start, (void *)item.end);
   }
 
   fseek(mem_fp.get(), (uintptr_t)rseq_struct[pid], SEEK_SET);
   fwrite(rseq, rseq_len[pid], 1, mem_fp.get());
   free(rseq);
 
+  struct user_regs_struct regs;
   fread(&regs, sizeof(regs), 1, dump_fp.get());
   ptrace(PTRACE_SETREGS, pid, NULL, &regs);
 }
@@ -395,7 +388,7 @@ void tracee_state::recover_proc_files()
 
 void sys_state::recover_shared_files()
 {
-  for (auto& shared_file : ptmc_state.shared_files)
+  for (auto &shared_file : ptmc_state.shared_files)
   {
     auto sfs_filename =
         fileutils::format_hash_filename("filesystem", ".sfs/", ss_hash) +
@@ -475,13 +468,13 @@ tracee_state::tracee_state(hash_type hash)
   inputArchive(*this);
 
   LOG_DEBUG("Deserialize: %d buffers", udp_buffer_list.size());
-  for (auto& b : udp_buffer_list)
+  for (auto &b : udp_buffer_list)
   {
     LOG_DEBUG("Deserialize: %d messages", b.second.size());
   }
 }
 
-uint64_t crc32(FILE* fp);
+uint64_t crc32(FILE *fp);
 void tracee_state::create_mem_reg_snapshot()
 {
   std::string maps_path = fmt::format("/proc/{}/maps", pid);
@@ -495,7 +488,7 @@ void tracee_state::create_mem_reg_snapshot()
     exit(1);
   }
 
-  FILE* dump = create_anonymous_tmp("dump", "r+b");
+  FILE *dump = create_anonymous_tmp("dump", "r+b");
   assert(dump);
 
   char line[1024];
@@ -519,7 +512,7 @@ void tracee_state::create_mem_reg_snapshot()
     {
       free(membuf);
       membufsz = region_size;
-      membuf = (bytes*)malloc(membufsz);
+      membuf = (bytes *)malloc(membufsz);
     }
 
     fseek(mem_fp.get(), start, SEEK_SET);
@@ -536,6 +529,7 @@ void tracee_state::create_mem_reg_snapshot()
     LOG_TRACE("dump %lx-%lx, %s", start, end, name);
   }
 
+  struct user_regs_struct regs;
   ptrace(PTRACE_GETREGS, pid, NULL, &regs);
   fwrite(&regs, sizeof(regs), 1, dump);
 
@@ -573,10 +567,10 @@ void tracee_state::get_file_descriptors()
   sprintf(fdinfo_dir, "/proc/%d/fdinfo", pid);
 
   int fd_fdinfo = open(fdinfo_dir, O_RDONLY | O_DIRECTORY);
-  DIR* fdinfo = fdopendir(fd_fdinfo);
+  DIR *fdinfo = fdopendir(fd_fdinfo);
   assert(fdinfo);
 
-  struct dirent* de;
+  struct dirent *de;
   while ((de = readdir(fdinfo)) != NULL)
   {
     if (de->d_name[0] == '.')
@@ -595,7 +589,7 @@ void tracee_state::get_file_descriptors()
 
     int fd = openat(fd_fdinfo, de->d_name, O_RDONLY);
     assert(fd >= 0);
-    FILE* fp = fdopen(fd, "r");
+    FILE *fp = fdopen(fd, "r");
     assert(fp);
 
     fscanf(fp, "pos: %d flags: %o mnt_id: %d ino: %d", &new_fd.pos,
@@ -610,7 +604,7 @@ void tracee_state::get_file_descriptors()
 /* from system process to data structure *
  * At this moment, nothing should be written into disk. *
  * And because MD5 is not calculated, ts_hash is not set. */
-tracee_state::tracee_state(int which, struct syscall_info* info)
+tracee_state::tracee_state(int which, struct syscall_info *info)
 {
   /* 1. save syscallinfo to struct
    * here info is on stack. copy it */
@@ -629,7 +623,7 @@ tracee_state::tracee_state(int which, struct syscall_info* info)
   tv = ptmc_state.time[which];
 }
 
-void tracee_state::save_structure_data(FILE* fp)
+void tracee_state::save_structure_data(FILE *fp)
 {
   std::stringstream ofs;
   cereal::BinaryOutputArchive outputArchive(ofs);
@@ -650,15 +644,13 @@ void tracee_state::save_structure_data()
   outputArchive(*this);
 }
 
-void tracee_state::save_brk_mappings()
+void tracee_state::save_mappings()
 {
-  char src[256];
-  char dest[256];
+  std::string src = fmt::format("/proc/{}/maps", pid);
+  std::string dest =
+      fileutils::format_hash_filename("mappings", ".maps", ts_hash);
 
-  sprintf(src, "/proc/%d/maps", pid);
-  sprintf(dest, "mappings/" HASH_FORMAT ".maps", ts_hash);
-
-  fcopy(src, dest);
+  fileutils::copy_file(src, dest);
 }
 
 /* Dump open files to filesystem/#state.fs *
@@ -679,7 +671,7 @@ void tracee_state::save_proc_full_data()
   create_mem_reg_snapshot();
 
   /* save mappings */
-  save_brk_mappings();
+  save_mappings();
 
   /* serialize */
   save_structure_data();
@@ -690,13 +682,13 @@ void tracee_state::save_proc_full_data()
 
 __attribute__((constructor)) void init_membuf()
 {
-  membuf = (bytes*)malloc(membufsz);
+  membuf = (bytes *)malloc(membufsz);
 }
 
-int format_sockaddr_in(char* dest, struct sockaddr_in* addr)
+int format_sockaddr_in(char *dest, struct sockaddr_in *addr)
 {
   char ipbuf[INET_ADDRSTRLEN];
-  const char* ipstr =
+  const char *ipstr =
       inet_ntop(AF_INET, &(addr->sin_addr), ipbuf, sizeof(ipbuf));
   if (!ipstr)
     ipstr = "invalid";
@@ -707,7 +699,7 @@ int format_sockaddr_in(char* dest, struct sockaddr_in* addr)
       ntohs(addr->sin_port), ipstr);
 }
 
-int construct_mem2str(char* str, char* mem, int len)
+int construct_mem2str(char *str, char *mem, int len)
 {
   int pos = 0;
   for (int i = 0; i < len; i++)
@@ -721,61 +713,61 @@ int construct_mem2str(char* str, char* mem, int len)
   return pos;
 }
 
-static void construct_sys_d_s_d_d(char* str, tracee_state* t,
-                                  syscall_info* info)
+static void construct_sys_d_s_d_d(char *str, tracee_state *t,
+                                  syscall_info *info)
 {
-  char* mem = (char*)t->read_snapshot_mem(info->args[1], info->args[2]);
+  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
   assert(mem);
   str += sprintf(str, "%s(%ld, %p(\"", syscalls[info->nr], info->args[0],
-                 (void*)info->args[1]);
+                 (void *)info->args[1]);
   str += construct_mem2str(str, mem, info->args[2]);
   str += sprintf(str, "\"), %ld) = %ld", info->args[2], info->rval);
   free(mem);
 }
 
-static void construct_sys_sendto(char* str, tracee_state* t, syscall_info* info)
+static void construct_sys_sendto(char *str, tracee_state *t, syscall_info *info)
 {
-  char* mem = (char*)t->read_snapshot_mem(info->args[1], info->args[2]);
+  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
   assert(mem);
   str += sprintf(str, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
   str += construct_mem2str(str, mem, info->args[2]);
   str += sprintf(str, "\", %ld, %ld, ", info->args[2], info->args[3]);
   free(mem);
 
-  struct sockaddr_in* addr =
-      (struct sockaddr_in*)t->read_snapshot_mem(info->args[4], info->args[5]);
+  struct sockaddr_in *addr =
+      (struct sockaddr_in *)t->read_snapshot_mem(info->args[4], info->args[5]);
   str += format_sockaddr_in(str, addr);
   free(addr);
 
   str += sprintf(str, ", %ld) = %ld", info->args[5], info->rval);
 }
 
-static void construct_sys_recvfrom(char* str, tracee_state* t,
-                                   syscall_info* info)
+static void construct_sys_recvfrom(char *str, tracee_state *t,
+                                   syscall_info *info)
 {
-  char* mem = (char*)t->read_snapshot_mem(info->args[1], info->args[2]);
+  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
   assert(mem);
   str += sprintf(str, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
   str += construct_mem2str(str, mem, info->rval);
   str += sprintf(str, "\", %ld, %ld, ", info->args[2], info->args[3]);
   free(mem);
 
-  socklen_t* plen =
-      (socklen_t*)t->read_snapshot_mem(info->args[5], sizeof(socklen_t));
+  socklen_t *plen =
+      (socklen_t *)t->read_snapshot_mem(info->args[5], sizeof(socklen_t));
   socklen_t addrlen = *plen;
 
-  struct sockaddr_in* addr =
-      (struct sockaddr_in*)t->read_snapshot_mem(info->args[4], addrlen);
+  struct sockaddr_in *addr =
+      (struct sockaddr_in *)t->read_snapshot_mem(info->args[4], addrlen);
   str += format_sockaddr_in(str, addr);
   free(addr);
 
   str += sprintf(str, ", [%d]) = %ld", addrlen, info->rval);
 }
 
-static void construct_sys_clock_nanosleep(char* str, tracee_state* t,
-                                          syscall_info* info)
+static void construct_sys_clock_nanosleep(char *str, tracee_state *t,
+                                          syscall_info *info)
 {
-  struct timespec* mem = (struct timespec*)t->read_snapshot_mem(
+  struct timespec *mem = (struct timespec *)t->read_snapshot_mem(
       info->args[2], sizeof(struct timespec));
   assert(mem);
   str += sprintf(str, "%s(%ld nanosec) = %ld", syscalls[info->nr],
@@ -783,17 +775,17 @@ static void construct_sys_clock_nanosleep(char* str, tracee_state* t,
   free(mem);
 }
 
-static void construct_sys_brk(char* str, syscall_info* info)
+static void construct_sys_brk(char *str, syscall_info *info)
 {
   str += sprintf(str, "brk(0x%lx) = 0x%lx", info->args[0], info->rval);
 }
 
-static void construct_sys_exit(char* str, syscall_info* info)
+static void construct_sys_exit(char *str, syscall_info *info)
 {
   str += sprintf(str, "%s(%ld) = ?", syscalls[info->nr], info->args[0]);
 }
 
-static void construct_sys_default(char* str, syscall_info* info)
+static void construct_sys_default(char *str, syscall_info *info)
 {
   str +=
       sprintf(str, "%s(0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx) = %ld",
@@ -801,16 +793,16 @@ static void construct_sys_default(char* str, syscall_info* info)
               info->args[3], info->args[4], info->args[5], info->rval);
 }
 
-static void construct_sys_d_d(char* str, syscall_info* info)
+static void construct_sys_d_d(char *str, syscall_info *info)
 {
   str += sprintf(str, "%s(%ld) = %ld", syscalls[info->nr], info->args[0],
                  info->rval);
 }
 
-static void construct_sys_gettimeofday(char* str, tracee_state* t,
-                                       syscall_info* info)
+static void construct_sys_gettimeofday(char *str, tracee_state *t,
+                                       syscall_info *info)
 {
-  struct timeval* tv = (struct timeval*)t->read_snapshot_mem(
+  struct timeval *tv = (struct timeval *)t->read_snapshot_mem(
       info->args[0], sizeof(struct timeval));
   assert(tv);
   str += sprintf(
@@ -819,7 +811,7 @@ static void construct_sys_gettimeofday(char* str, tracee_state* t,
   free(tv);
 }
 
-static void construct_syscall_string(tracee_state* t)
+static void construct_syscall_string(tracee_state *t)
 {
   auto info = &t->si;
   switch (info->nr)
@@ -872,7 +864,7 @@ static void construct_syscall_string(hash_type ts_hash)
   construct_syscall_string(&ts);
 }
 
-void tracee_state::show_syscall(syscall_info* info)
+void tracee_state::show_syscall(syscall_info *info)
 {
   construct_syscall_string(this);
   printf("%s\n", printbuf);

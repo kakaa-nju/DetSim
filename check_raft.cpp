@@ -16,10 +16,10 @@ extern "C"
     int leader = -1;
     for (int i = 0; i < NP; i++)
     {
-      long praft = tracee_read_word(ptmc_state.pids[i], (void*)addr);
+      long praft = tracee_read_word(ptmc_state.pids[i], (void *)addr);
       if (praft == 0)
         continue;
-      tracee_read_mem(ptmc_state.pids[i], (const void*)praft, raft + i,
+      tracee_read_mem(ptmc_state.pids[i], (const void *)praft, raft + i,
                       sizeof(raft_server_private_t));
       if (raft[i].state == RAFT_STATE_LEADER)
       {
