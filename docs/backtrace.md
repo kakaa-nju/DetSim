@@ -68,7 +68,7 @@ sub  $N, %rsp        ; 分配局部变量空间
 
 ### 概述
 
-在完全静态链接的可执行文件上 （[例子](#1. 复现"丢帧"问题最小示例)），使用 `libunwind‑ptrace` 做远程栈回溯，得到的结果是：
+在完全静态链接的可执行文件上 （[例子](#1-复现丢帧问题最小示例)），使用 `libunwind‑ptrace` 做远程栈回溯，得到的结果是：
 
 ```
 #0 __libc_recvfrom
@@ -193,7 +193,7 @@ readelf -wf recvfrom.o | head
 
 ### 1. 复现“丢帧”问题最小示例
 
-```
+```c
 // demo.c ─── gcc demo.c -static -g -fno-omit-frame-pointer \
 //                      -fasynchronous-unwind-tables -o demo 
 #include <sys/socket.h>

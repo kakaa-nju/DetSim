@@ -16,7 +16,7 @@ typedef struct choose_out
   int len[6]; /* 0 represents for unmodified */
   int rval;
 
-  choose_out() { memset(this, 0, sizeof(*this)); }
+  choose_out() = default;
 
   ~choose_out()
   {

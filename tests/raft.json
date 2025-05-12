@@ -10,6 +10,5 @@
   "ChoosePoint": [
     { "syscall": 96, "choose": 2 }
   ],
-  "ChooseFunc": "choose_raft.cpp",
-  "Build": "static"
+  "ChooseFunc": "choose_raft.cpp"
 }
