@@ -2,11 +2,11 @@
 
 CC = gcc
 CXX = ccache g++
-LD = g++
+LD = g++ -L/usr/local/lib
 
 CXXFLAGS ?= -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
-LDFLAGS = -ldwarf -lreadline -lcjson -ldw -lzstd -rdynamic \
-					-lunwind-ptrace -lunwind-generic -lunwind -lelf -lfmt
+LDFLAGS = -g -ldwarf -lreadline -lcjson -ldw -lzstd -rdynamic \
+					-lunwind-ptrace -lunwind-x86_64 -lunwind -lelf -lfmt
 
 SRCS = serialize.cpp sockstate.cpp guest.cpp fsstate.cpp utils.cpp crc32.cpp engine.cpp expr.cpp emu.cpp resolve.cpp monitor.cpp main.cpp state.cpp 
 OBJS = $(SRCS:.cpp=.o)
@@ -45,7 +45,7 @@ wc:
 	wc *.[ch] *.cpp
 
 clear:
-	-/bin/rm -r mappings memory filesystem tstate sstate
+	-/bin/rm -rf mappings memory filesystem tstate sstate
 	-mkdir mappings memory filesystem tstate sstate
 
 clean:

@@ -1,18 +1,15 @@
 #ifndef __STATE_H
 #define __STATE_H
 #include "common.h"
-#include "fsstate.h"
-#include "guest.h"
-#include "sockstate.h"
-#include <deque>
-#include <list>
-#include <stdbool.h>
-#include <stdint.h>
-#include <string>
 #include <sys/user.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <list>
+#include "sockstate.h"
+#include "fsstate.h"
+#include "guest.h"
+
 
 typedef uint32_t hash_type;
 #define HASH_FORMAT "%08x"
@@ -40,7 +37,7 @@ typedef struct tracee_state
   int pid;
   uintptr_t brk;
   struct timeval tv;
-  std::list<ptmc_filedesc> fd_list;
+  FileSystemState fs_state;
   std::list<ptmc_sock> sock_list;
 
   std::unordered_map<int, tcp_buffer> tcp_buffer_list;

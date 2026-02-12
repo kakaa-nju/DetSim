@@ -129,6 +129,16 @@ static void on_syscall_enter(pid_t pid, int nr)
     case SYS_clock_nanosleep:
     case SYS_socket:
     case SYS_connect:
+    /* VFS emulated */
+    case SYS_open:
+    case SYS_openat:
+    case SYS_chdir:
+    case SYS_read:
+    case SYS_write:
+    case SYS_close:
+    case SYS_lseek:
+    case SYS_stat:
+    case SYS_fstat:
       do_nosys(pid);
       break;
 
@@ -141,8 +151,6 @@ static void on_syscall_enter(pid_t pid, int nr)
 
     /* act normally. SYS_sched_yield is preserved for state check */
     case SYS_sched_yield:
-    case SYS_write:
-    case SYS_read:
     default:
       break;
   }
@@ -233,13 +241,74 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
       info->rval = ret;
       return CKPT_NO;
 
+    case SYS_chdir: {
+      // Read the path string from the tracee memory and update cwd on success
+      uintptr_t guest_ptr = info->args[0];
+      // helper: read null-terminated string from guest using memcpy_guest2host
+      std::string path;
+      char ch;
+      size_t idx = 0;
+      do {
+        memcpy_guest2host(&ch, (const void *)(guest_ptr + idx), 1);
+        if (ch != '\0') path.push_back(ch);
+        idx++;
+      } while (ch != '\0');
+
+      if ((long)info->rval >= 0) {
+        // success: update cwd of current fs_state
+        ptmc_state.fs_states[ptmc_state.cursor].set_cwd(path);
+      }
+      // reflect syscall return
+      tracee_set_rax(pid, info->rval);
+      return CKPT_YES;
+    }
+
     case SYS_exit_group:
     case SYS_exit:
       return CKPT_EXIT;
 
-    case SYS_write:
+    /* VFS Handlers */
+    case SYS_open:
+        ret = guest_do_vfs_openat(AT_FDCWD, (const char *)info->args[0], info->args[1], info->args[2]);
+        tracee_set_rax(pid, ret);
+        info->rval = ret;
+        return CKPT_YES;
+    case SYS_openat:
+      ret = guest_do_vfs_openat(info->args[0], (const char *)info->args[1], info->args[2], info->args[3]);
+      tracee_set_rax(pid, ret);
+      info->rval = ret;
       return CKPT_YES;
     case SYS_read:
+      ret = guest_do_vfs_read(info->args[0], (void *)info->args[1], info->args[2]);
+      tracee_set_rax(pid, ret);
+      info->rval = ret;
+      return CKPT_YES;
+    case SYS_write:
+      ret = guest_do_vfs_write(info->args[0], (const void *)info->args[1], info->args[2]);
+      tracee_set_rax(pid, ret);
+      info->rval = ret;
+      return CKPT_YES;
+    case SYS_close:
+        ret = guest_do_vfs_close(info->args[0]);
+        tracee_set_rax(pid, ret);
+        info->rval = ret;
+        return CKPT_YES;
+    case SYS_lseek:
+        ret = guest_do_vfs_lseek(info->args[0], info->args[1], info->args[2]);
+        tracee_set_rax(pid, ret);
+        info->rval = ret;
+        return CKPT_YES;
+    case SYS_stat:
+        ret = guest_do_vfs_stat((const char *)info->args[0], (struct stat *)info->args[1]);
+        tracee_set_rax(pid, ret);
+        info->rval = ret;
+        return CKPT_YES;
+    case SYS_fstat:
+        ret = guest_do_vfs_fstat(info->args[0], (struct stat *)info->args[1]);
+        tracee_set_rax(pid, ret);
+        info->rval = ret;
+        return CKPT_YES;
+
     case SYS_nanosleep:
     case SYS_brk:
       return CKPT_NO;

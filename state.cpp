@@ -307,28 +307,7 @@ std::vector<maps_item> tracee_state::recover_brk_mappings()
 
 void tracee_state::recover_file_descriptors(int index)
 {
-  sys_state &last = ptmc_state.dest_state;
-  tracee_state &old_state = last.child[index];
-
-  // close all
-  for (auto &fd : old_state.fd_list)
-  {
-    LOG_TRACE("close fd %d", fd.fd);
-    tracee_do_syscall(pid, SYS_close, fd.fd, 0, 0, 0, 0, 0);
-  }
-
-  // open all
-  for (auto &fd : fd_list)
-  {
-    LOG_TRACE("restore fd, name = %d, %s", fd.fd, fd.fname.c_str());
-    int dfd = tracee_do_open(pid, fd.fname.c_str(), fd.flags);
-    if (dfd != fd.fd)
-    {
-      tracee_do_syscall(pid, SYS_dup2, dfd, fd.fd, 0, 0, 0, 0);
-      tracee_do_syscall(pid, SYS_close, dfd, 0, 0, 0, 0, 0);
-    }
-    tracee_do_syscall(pid, SYS_lseek, fd.fd, fd.pos, SEEK_SET, 0, 0, 0);
-  }
+  return;
 }
 
 void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps)
@@ -416,6 +395,7 @@ void tracee_state::recover_running_state(int index)
   ptmc_state.sock_lists[index] = sock_list;
   ptmc_state.tcp_buffer_lists[index] = tcp_buffer_list;
   ptmc_state.udp_buffer_lists[index] = udp_buffer_list;
+  ptmc_state.fs_states[index] = fs_state;
 
   /* 4. time */
   ptmc_state.time[index] = tv;
@@ -561,44 +541,7 @@ done:
 
 void tracee_state::get_file_descriptors()
 {
-  char link[256];
-  char fdinfo_dir[128];
-  char fdfile[128]; /* symbolic link */
-  sprintf(fdinfo_dir, "/proc/%d/fdinfo", pid);
-
-  int fd_fdinfo = open(fdinfo_dir, O_RDONLY | O_DIRECTORY);
-  DIR *fdinfo = fdopendir(fd_fdinfo);
-  assert(fdinfo);
-
-  struct dirent *de;
-  while ((de = readdir(fdinfo)) != NULL)
-  {
-    if (de->d_name[0] == '.')
-      continue;
-
-    ptmc_filedesc new_fd;
-    /* get opened file name */
-    sprintf(fdfile, "/proc/%d/fd/%s", pid, de->d_name);
-
-    /* NOTE: `readlink` will NOT set a nullbyte after filename */
-    int linkLen = readlink(fdfile, link, 256);
-    link[linkLen] = 0;
-    sscanf(de->d_name, "%d", &new_fd.fd);
-
-    new_fd.fname = std::string(link, link + linkLen);
-
-    int fd = openat(fd_fdinfo, de->d_name, O_RDONLY);
-    assert(fd >= 0);
-    FILE *fp = fdopen(fd, "r");
-    assert(fp);
-
-    fscanf(fp, "pos: %d flags: %o mnt_id: %d ino: %d", &new_fd.pos,
-           &new_fd.flags, &new_fd.mnt_id, &new_fd.ino);
-    fclose(fp);
-
-    fd_list.emplace_back(new_fd);
-  }
-  closedir(fdinfo);
+  return;
 }
 
 /* from system process to data structure *
@@ -618,6 +561,7 @@ tracee_state::tracee_state(int which, struct syscall_info *info)
   sock_list = ptmc_state.sock_lists[which];
   tcp_buffer_list = ptmc_state.tcp_buffer_lists[which];
   udp_buffer_list = ptmc_state.udp_buffer_lists[which];
+  fs_state = ptmc_state.fs_states[which];
 
   /* 4. time */
   tv = ptmc_state.time[which];

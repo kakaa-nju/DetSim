@@ -34,6 +34,7 @@ typedef struct
   std::list<ptmc_sock> sock_lists[NP];
   std::unordered_map<int, tcp_buffer> tcp_buffer_lists[NP];
   std::unordered_map<int, udp_buffer> udp_buffer_lists[NP];
+  FileSystemState fs_states[NP];
 
   int pids[NP];
 

@@ -2,26 +2,81 @@
 #define __FSSTATE_H
 
 #include "common.h"
-#include <stdint.h>
+#include <map>
 #include <string>
+#include <sys/stat.h>
+#include <vector>
 
-/* System global. Always in tracer so can be very big */
-#define MAXFILEENTRY 128
+// Represents a node in the virtual file system. Can be a file or a directory.
+struct VFSNode {
+  // Complete file content. For directories, this is typically empty.
+  std::vector<char> content;
 
-#define MAXFD 128
+  // File metadata (permissions, size, timestamps, etc.).
+  struct stat metadata;
 
-typedef struct ptmc_filedesc
-{
-  int fd;
-  int pos;
-  uint32_t flags;
-  int mnt_id;
-  int ino;
-  std::string fname;
+  template <class Archive> void serialize(Archive &ar);
+};
 
-  template <class Archive>
-  void serialize(Archive &ar);
+// Represents an entry in a process's file descriptor table.
+struct OpenFileDescription {
+  // The absolute path of the file in the VFS.
+  std::string path;
 
-} ptmc_filedesc;
+  // The current read/write offset into the file's content.
+  off_t offset;
+
+  // The flags used when opening the file (e.g., O_RDONLY, O_WRONLY, O_APPEND).
+  int flags;
+
+  template <class Archive> void serialize(Archive &ar);
+};
+
+// Manages the complete file system state for a single tracee.
+class FileSystemState {
+public:
+  // The entire virtual file system, mapping absolute paths to VFSNodes.
+  std::map<std::string, VFSNode> filesystem;
+
+  // The table of open files for the process, mapping a file descriptor (int)
+  // to its description.
+  std::map<int, OpenFileDescription> open_files;
+
+  // Current working directory for the tracee (in VFS namespace)
+  std::string cwd;
+
+  // Mappings from host directories into the VFS. Each pair is (host_base, target_base)
+  std::vector<std::pair<std::string, std::string>> mappings;
+
+private:
+  // The next available file descriptor to be allocated.
+  int next_fd = 3; // Start after stdin, stdout, stderr
+
+public:
+  // Finds the next available file descriptor.
+  int get_new_fd();
+
+  template <class Archive> void serialize(Archive &ar);
+
+  // --- Syscall Implementations ---
+  // These will be implemented in fsstate.cpp
+  int do_open(const std::string &path, int flags, mode_t mode);
+  ssize_t do_read(int fd, void *buf, size_t count);
+  ssize_t do_write(int fd, const void *buf, size_t count);
+  int do_close(int fd);
+  off_t do_lseek(int fd, off_t offset, int whence);
+  int do_stat(const std::string &path, struct stat *statbuf);
+  int do_fstat(int fd, struct stat *statbuf);
+
+  // Initialize VFS from host mappings (may load files into memory)
+  void init_from_mappings(const std::vector<std::pair<std::string, std::string>> &maps);
+
+  // Resolve a pathname according to dirfd and cwd. Returns an absolute VFS path.
+  std::string resolve_path(int dirfd, const std::string &path);
+
+  // Set/get cwd
+  void set_cwd(const std::string &path);
+  const std::string &get_cwd() const;
+};
 
 #endif /* __FSSTATE_H */

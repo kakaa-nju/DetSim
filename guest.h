@@ -51,7 +51,7 @@ uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
                            uint64_t r9);
 
 __attribute__((unused)) static inline long
-ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data)
+Ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data)
 {
   /* ptrace(2): On success, the PTRACE_PEEK* operations return the requested *
    * data ... and other operations return zero. On error, all operations     *
@@ -65,11 +65,21 @@ ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data)
   return result;
 }
 
-#define ptrace_right(a, b, c, d) ptrace_right(a, b, (void *)(c), (void *)(d))
+#define ptrace_right(a, b, c, d) Ptrace_right((enum __ptrace_request)a, (pid_t)b, (void *)(c), (void *)(d))
 void tracee_do_munmap(int pid, uint64_t start, uint64_t end);
 void *tracee_do_mmap(int pid, uint64_t start, uint64_t end);
 void *tracee_do_mmap_back(int pid, uint64_t start, uint64_t end);
 int tracee_do_open(int pid, const char *filename, uint64_t flags);
+
+/* --- VFS-based Syscall Handlers --- */
+long guest_do_vfs_openat(int dirfd, const char *path, int flags, mode_t mode);
+long guest_do_vfs_read(int fd, void *buf, size_t count);
+long guest_do_vfs_write(int fd, const void *buf, size_t count);
+long guest_do_vfs_close(int fd);
+long guest_do_vfs_lseek(int fd, off_t offset, int whence);
+long guest_do_vfs_stat(const char *path, struct stat *statbuf);
+long guest_do_vfs_fstat(int fd, struct stat *statbuf);
+
 void tracee_backtrace(int pid);
 void tracee_show_regs(int pid);
 void get_maps_item(std::vector<maps_item> &items, FILE *maps);

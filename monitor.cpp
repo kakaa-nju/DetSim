@@ -1,6 +1,8 @@
 #include "monitor.h"
+#include "fsstate.h"
 #include "debug.h"
 #include "state.h"
+#include "guest.h"
 #include <cjson/cJSON.h>
 #include <cjson/cJSON_Utils.h>
 #include <csignal>
@@ -101,6 +103,38 @@ void read_config(const char *cfg_file)
       ptmc_state.shared_files.emplace(
           std::string(cJSON_GetStringValue(shared_file)));
     }
+  }
+
+  /* Working directory for tracees (applied to all nodes unless per-node
+     configuration is added later). */
+  cJSON *working_dir = cJSON_GetObjectItem(cfg, "WorkingDir");
+  std::string workdir = "/";
+  if (working_dir) {
+    workdir = std::string(cJSON_GetStringValue(working_dir));
+  }
+
+  /* FSMap: array of mappings { "Host": "/path/on/host", "Target": "/" } */
+  cJSON *fsmap = cJSON_GetObjectItem(cfg, "FSMap");
+  std::vector<std::pair<std::string, std::string>> maps;
+  if (fsmap) {
+    int cnt = cJSON_GetArraySize(fsmap);
+    for (int i = 0; i < cnt; i++) {
+      cJSON *item = cJSON_GetArrayItem(fsmap, i);
+      cJSON *host = cJSON_GetObjectItem(item, "Host");
+      cJSON *target = cJSON_GetObjectItem(item, "Target");
+      if (host && target) {
+        maps.emplace_back(std::string(cJSON_GetStringValue(host)),
+                          std::string(cJSON_GetStringValue(target)));
+      }
+    }
+  }
+
+  /* Initialize per-node fs state from mappings and set working dir */
+  for (int i = 0; i < NP; i++) {
+    if (!maps.empty()) {
+      ptmc_state.fs_states[i].init_from_mappings(maps);
+    }
+    ptmc_state.fs_states[i].set_cwd(workdir);
   }
 
   cJSON *assertions = cJSON_GetObjectItem(cfg, "Assertions");
@@ -322,6 +356,9 @@ static int cmd_batch(char *args);
 static int cmd_p(char *args);
 static int cmd_x(char *args);
 static int cmd_bt(char *args);
+static int cmd_ls(char *args);
+static int cmd_stat(char *args);
+static int cmd_hexdump(char *args);
 
 static struct
 {
@@ -332,7 +369,7 @@ static struct
     {"help", "Display informations about all supported commands", cmd_help},
     {"c", "Continue the execution of the program, start from current state",
      cmd_c},
-    {"q", "Exit ptrace_rightMC", cmd_q},
+    {"q", "Exit ptraceMC", cmd_q},
     {"si", "Step from current state, on focused process", cmd_si},
     {"sw", "Switch control focus on the n-th process", cmd_sw},
     {"load", "Load state of given StateHash", cmd_load},
@@ -341,6 +378,9 @@ static struct
     {"p", "Calculate expression", cmd_p},
     {"x", "Display tracee memory by byte", cmd_x},
     {"bt", "Print backtrace", cmd_bt},
+    {"ls", "List files in current node's filesystem", cmd_ls},
+    {"stat", "Show stat of files matching pattern", cmd_stat},
+    {"hexdump", "Hexdump of a file (c: continue, q: quit)", cmd_hexdump},
 };
 
 #define NR_CMD (sizeof(cmd_table) / sizeof(cmd_table[0]))
@@ -798,5 +838,147 @@ static int cmd_x(char *args)
 static int cmd_bt(char *args)
 {
   tracee_backtrace(ptmc_state.pids[ptmc_state.cursor]);
+  return 0;
+}
+
+static int cmd_ls(char *args)
+{
+  int cursor = ptmc_state.cursor;
+  if (cursor < 0 || cursor >= NP)
+  {
+    printf("Invalid cursor: %d\n", cursor);
+    return 0;
+  }
+  auto &fs = ptmc_state.dest_state.child[cursor].fs_state.filesystem;
+  printf("FileSystem State (Node %d, %lu files):\n", cursor, fs.size());
+  for (const auto &pair : fs)
+  {
+    const auto &path = pair.first;
+    const auto &node = pair.second;
+    const char *type = S_ISDIR(node.metadata.st_mode) ? "DIR" : "FILE";
+    printf("  [%s] %s (size: %ld)\n", type, path.c_str(), node.metadata.st_size);
+  }
+  return 0;
+}
+
+static int cmd_stat(char *args)
+{
+  if (!args)
+  {
+    printf("Usage: stat <pattern>\n");
+    return 0;
+  }
+  int cursor = ptmc_state.cursor;
+  auto &fs = ptmc_state.dest_state.child[cursor].fs_state.filesystem;
+  bool found = false;
+  for (const auto &pair : fs)
+  {
+    if (pair.first.find(args) != std::string::npos)
+    {
+      found = true;
+      const auto &node = pair.second;
+      const struct stat &st = node.metadata;
+
+      printf("File: %s\n", pair.first.c_str());
+      printf("  Size: %-10ld Blocks: %-10ld IO Block: %-10ld\n", st.st_size,
+             st.st_blocks, st.st_blksize);
+      printf("  Device: %-8ld Inode: %-11ld Links: %-10ld\n", st.st_dev,
+             st.st_ino, st.st_nlink);
+      printf("  Access: (%04o)  Uid: %-10d Gid: %-10d\n", (st.st_mode & 0777),
+             st.st_uid, st.st_gid);
+
+      char buffer[80];
+      struct tm *tm_info;
+
+      tm_info = localtime(&st.st_atime);
+      strftime(buffer, 80, "%Y-%m-%d %H:%M:%S", tm_info);
+      printf("  Access: %s\n", buffer);
+
+      tm_info = localtime(&st.st_mtime);
+      strftime(buffer, 80, "%Y-%m-%d %H:%M:%S", tm_info);
+      printf("  Modify: %s\n", buffer);
+
+      tm_info = localtime(&st.st_ctime);
+      strftime(buffer, 80, "%Y-%m-%d %H:%M:%S", tm_info);
+      printf("  Change: %s\n", buffer);
+      printf("----------------------------------------\n");
+    }
+  }
+  if (!found)
+  {
+    printf("No files found matching pattern: %s\n", args);
+  }
+  return 0;
+}
+
+static int cmd_hexdump(char *args)
+{
+  if (!args)
+  {
+    printf("Usage: hexdump <filepath>\n");
+    return 0;
+  }
+  int cursor = ptmc_state.cursor;
+  auto &fs = ptmc_state.dest_state.child[cursor].fs_state.filesystem;
+
+  auto it = fs.find(args);
+  if (it == fs.end())
+  {
+    printf("File not found: %s\n", args);
+    return 0;
+  }
+
+  const std::vector<char> &content = it->second.content;
+  size_t len = content.size();
+  size_t offset = 0;
+  const size_t lines_per_page = 16;
+
+  while (offset < len)
+  {
+    for (size_t line = 0; line < lines_per_page && offset < len; ++line)
+    {
+      printf("%08lx  ", offset);
+
+      // Hex bytes
+      for (size_t j = 0; j < 16; ++j)
+      {
+        if (j == 8) printf(" ");
+        if (offset + j < len)
+        {
+          printf("%02x ", (unsigned char)content[offset + j]);
+        }
+        else
+        {
+          printf("   ");
+        }
+      }
+
+      printf(" |");
+      // ASCII
+      for (size_t j = 0; j < 16; ++j)
+      {
+        if (offset + j < len)
+        {
+          char c = content[offset + j];
+          if (c >= 32 && c <= 126)
+            printf("%c", c);
+          else
+            printf(".");
+        }
+      }
+      printf("|\n");
+      offset += 16;
+    }
+
+    if (offset < len)
+    {
+      printf("--More-- (c: continue, q: quit) ");
+      char buf[10];
+      if (fgets(buf, sizeof(buf), stdin))
+      {
+        if (buf[0] == 'q') break;
+      }
+    }
+  }
   return 0;
 }

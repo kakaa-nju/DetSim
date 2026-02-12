@@ -16,7 +16,7 @@ void syscall_info::serialize(Archive &ar)
 template <class Archive>
 void tracee_state::serialize(Archive &ar)
 {
-  ar(si, pid, brk, tv.tv_sec, tv.tv_usec, fd_list, sock_list, tcp_buffer_list,
+  ar(si, pid, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_list, tcp_buffer_list,
      udp_buffer_list);
 }
 
@@ -78,12 +78,3 @@ tcp_buffer::load<cereal::BinaryInputArchive>(cereal::BinaryInputArchive &);
 template void tcp_buffer::save<cereal::BinaryOutputArchive>(
     cereal::BinaryOutputArchive &) const;
 
-template <class Archive>
-void ptmc_filedesc::serialize(Archive &ar)
-{
-  ar(fd, pos, flags, mnt_id, ino, fname);
-}
-template void ptmc_filedesc::serialize<cereal::BinaryInputArchive>(
-    cereal::BinaryInputArchive &);
-template void ptmc_filedesc::serialize<cereal::BinaryOutputArchive>(
-    cereal::BinaryOutputArchive &);

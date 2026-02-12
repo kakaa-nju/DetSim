@@ -58,21 +58,21 @@ __attribute__((unused)) void print_call_stack()
 
 #define def_tracee_set(reg)                                                    \
   void tracee_set_##reg(int pid, uint64_t val)                                 \
-  {                                                                            \
-    struct user_regs_struct uregs;                                             \
-    ptrace_right(PTRACE_GETREGS, pid, NULL, &uregs);                           \
-    uregs.reg = val;                                                           \
-    ptrace_right(PTRACE_SETREGS, pid, NULL, &uregs);                           \
-  }
-def_tracee_set(rax);
+  { \
+    struct user_regs_struct uregs; \
+    ptrace_right(PTRACE_GETREGS, pid, NULL, &uregs); \
+    uregs.reg = val; \
+    ptrace_right(PTRACE_SETREGS, pid, NULL, &uregs); \
+  } 
+def_tracee_set(rax); 
 def_tracee_set(orig_rax);
 
 #define def_tracee_get(reg)                                                    \
   uint64_t tracee_get_##reg(int pid)                                           \
-  {                                                                            \
-    struct user_regs_struct uregs;                                             \
-    ptrace_right(PTRACE_GETREGS, pid, NULL, &uregs);                           \
-    return uregs.reg;                                                          \
+  { \
+    struct user_regs_struct uregs; \
+    ptrace_right(PTRACE_GETREGS, pid, NULL, &uregs); \
+    return uregs.reg; \
   }
 
 __attribute__((unused)) def_tracee_get(rip);
@@ -594,4 +594,82 @@ void init_dwarf()
 
   dwarf_finish(dbg, &err);
   close(fd);
+}
+
+/* --- VFS-based Syscall Handlers --- */
+
+// Helper to read a null-terminated string from guest memory.
+static std::string read_guest_string(uintptr_t guest_addr) {
+    std::string str;
+    char ch;
+    do {
+        memcpy_guest2host(&ch, (void*)(guest_addr + str.length()), 1);
+        if (ch != '\0') {
+            str += ch;
+        }
+    } while (ch != '\0');
+    return str;
+}
+
+long guest_do_vfs_open(const char *path_ptr, int flags, mode_t mode) {
+    std::string path = read_guest_string((uintptr_t)path_ptr);
+    return ptmc_state.fs_states[ptmc_state.cursor].do_open(path, flags, mode);
+}
+
+long guest_do_vfs_read(int fd, void *buf, size_t count) {
+    // We need a temporary buffer on the host to hold the data read from the VFS.
+    std::vector<char> host_buf(count);
+    long bytes_read = ptmc_state.fs_states[ptmc_state.cursor].do_read(fd, host_buf.data(), count);
+
+    if (bytes_read > 0) {
+        // If the read was successful, copy the data to the guest's buffer.
+        memcpy_host2guest(buf, host_buf.data(), bytes_read);
+    }
+    return bytes_read;
+}
+
+long guest_do_vfs_openat(int dirfd, const char *path_ptr, int flags, mode_t mode) {
+  std::string path = read_guest_string((uintptr_t)path_ptr);
+  std::string resolved = ptmc_state.fs_states[ptmc_state.cursor].resolve_path(dirfd, path);
+  return ptmc_state.fs_states[ptmc_state.cursor].do_open(resolved, flags, mode);
+}
+
+long guest_do_vfs_write(int fd, const void *buf, size_t count) {
+    // We need to copy the data from the guest's buffer to a host buffer first.
+    std::vector<char> host_buf(count);
+    memcpy_guest2host(host_buf.data(), buf, count);
+    
+    return ptmc_state.fs_states[ptmc_state.cursor].do_write(fd, host_buf.data(), count);
+}
+
+long guest_do_vfs_close(int fd) {
+    return ptmc_state.fs_states[ptmc_state.cursor].do_close(fd);
+}
+
+long guest_do_vfs_lseek(int fd, off_t offset, int whence) {
+    return ptmc_state.fs_states[ptmc_state.cursor].do_lseek(fd, offset, whence);
+}
+
+long guest_do_vfs_stat(const char *path_ptr, struct stat *statbuf) {
+    std::string path = read_guest_string((uintptr_t)path_ptr);
+    
+    struct stat host_statbuf;
+    long result = ptmc_state.fs_states[ptmc_state.cursor].do_stat(path, &host_statbuf);
+
+    if (result == 0) {
+        // Copy the stat structure to guest memory.
+        memcpy_host2guest(statbuf, &host_statbuf, sizeof(struct stat));
+    }
+    return result;
+}
+
+long guest_do_vfs_fstat(int fd, struct stat *statbuf) {
+    struct stat host_statbuf;
+    long result = ptmc_state.fs_states[ptmc_state.cursor].do_fstat(fd, &host_statbuf);
+
+    if (result == 0) {
+        // Copy the stat structure to guest memory.
+        memcpy_host2guest(statbuf, &host_statbuf, sizeof(struct stat));
+    }
+    return result;
 }
