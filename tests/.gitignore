@@ -6,3 +6,5 @@
 !.gitignore
 !raft/
 !/raft/*
+!fs_root/
+!/fs_root/**
