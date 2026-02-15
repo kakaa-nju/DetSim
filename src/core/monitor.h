@@ -1,3 +1,7 @@
+/*
+ * monitor.h - Monitor/CLI interface
+ */
+
 #ifndef __MONITOR_H
 #define __MONITOR_H
 
