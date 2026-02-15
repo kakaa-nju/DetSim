@@ -31,22 +31,299 @@ std::unordered_map<int, int> rseq_len;
  * memory will be recorded when dumping,
  * and mappings will be directly copied from procfs (?)
  */
-char printbuf[1024];
 
-static void construct_syscall_string(hash_type ts_hash);
-static void construct_syscall_string(tracee_state *t);
+/* ========================================================================
+ * Syscall String Formatting
+ * ======================================================================== */
+
+namespace syscall_fmt {
+
+/* Format: int fd, void *buf, size_t count (read/write style) */
+static void format_fd_buf_count(char *buf, tracee_state *t, syscall_info *info)
+{
+  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
+  assert(mem);
+  
+  int pos = sprintf(buf, "%s(%ld, %p(\"", syscalls[info->nr], info->args[0],
+                    (void *)info->args[1]);
+  
+  /* Escape non-printable characters */
+  for (size_t i = 0; i < info->args[2]; i++)
+  {
+    uint8_t val = mem[i];
+    if (isprint(mem[i]))
+      pos += sprintf(buf + pos, "%c", mem[i]);
+    else
+      pos += sprintf(buf + pos, "\\%03u", val);
+  }
+  
+  pos += sprintf(buf + pos, "\"), %ld) = %ld", info->args[2], info->rval);
+  free(mem);
+}
+
+/* Format: int fd (close style) */
+static void format_fd_only(char *buf, syscall_info *info)
+{
+  sprintf(buf, "%s(%ld) = %ld", syscalls[info->nr], info->args[0], info->rval);
+}
+
+/* Format: int fd, const void *buf, size_t len, int flags, 
+ *         const struct sockaddr *dest_addr, socklen_t addrlen (sendto) */
+static void format_sendto(char *buf, tracee_state *t, syscall_info *info)
+{
+  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
+  assert(mem);
+  
+  int pos = sprintf(buf, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
+  
+  for (size_t i = 0; i < info->args[2]; i++)
+  {
+    uint8_t val = mem[i];
+    if (isprint(mem[i]))
+      pos += sprintf(buf + pos, "%c", mem[i]);
+    else
+      pos += sprintf(buf + pos, "\\%03u", val);
+  }
+  
+  pos += sprintf(buf + pos, "\", %ld, %ld, ", info->args[2], info->args[3]);
+  free(mem);
+
+  struct sockaddr_in *addr =
+      (struct sockaddr_in *)t->read_snapshot_mem(info->args[4], info->args[5]);
+  
+  char ipbuf[INET_ADDRSTRLEN];
+  const char *ipstr = inet_ntop(AF_INET, &(addr->sin_addr), ipbuf, sizeof(ipbuf));
+  if (!ipstr) ipstr = "invalid";
+  
+  pos += sprintf(buf + pos, "{sin_family=AF_INET, sin_port=htons(%d), sin_addr=inet_addr(\"%s\")}",
+                 ntohs(addr->sin_port), ipstr);
+  free(addr);
+
+  sprintf(buf + pos, ", %ld) = %ld", info->args[5], info->rval);
+}
+
+/* Format: recvfrom style (with output addr) */
+static void format_recvfrom(char *buf, tracee_state *t, syscall_info *info)
+{
+  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
+  assert(mem);
+  
+  int pos = sprintf(buf, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
+  
+  for (size_t i = 0; i < (size_t)info->rval; i++)
+  {
+    uint8_t val = mem[i];
+    if (isprint(mem[i]))
+      pos += sprintf(buf + pos, "%c", mem[i]);
+    else
+      pos += sprintf(buf + pos, "\\%03u", val);
+  }
+  
+  pos += sprintf(buf + pos, "\", %ld, %ld, ", info->args[2], info->args[3]);
+  free(mem);
+
+  socklen_t *plen = (socklen_t *)t->read_snapshot_mem(info->args[5], sizeof(socklen_t));
+  socklen_t addrlen = *plen;
+
+  struct sockaddr_in *addr =
+      (struct sockaddr_in *)t->read_snapshot_mem(info->args[4], addrlen);
+  
+  char ipbuf[INET_ADDRSTRLEN];
+  const char *ipstr = inet_ntop(AF_INET, &(addr->sin_addr), ipbuf, sizeof(ipbuf));
+  if (!ipstr) ipstr = "invalid";
+  
+  pos += sprintf(buf + pos, "{sin_family=AF_INET, sin_port=htons(%d), sin_addr=inet_addr(\"%s\")}",
+                 ntohs(addr->sin_port), ipstr);
+  free(addr);
+
+  sprintf(buf + pos, ", [%d]) = %ld", addrlen, info->rval);
+}
+
+/* Format: void *addr (brk/mmap style) */
+static void format_addr(char *buf, syscall_info *info)
+{
+  sprintf(buf, "%s(0x%lx) = 0x%lx", syscalls[info->nr], 
+          info->args[0], info->rval);
+}
+
+/* Format: int status (exit style) */
+static void format_exit(char *buf, syscall_info *info)
+{
+  sprintf(buf, "%s(%ld) = ?", syscalls[info->nr], info->args[0]);
+}
+
+/* Format: const char *pathname, int flags, mode_t mode (open style) */
+static void format_openat(char *buf, tracee_state *t, syscall_info *info)
+{
+  char *path = (char *)t->read_snapshot_mem(info->args[1], 256);
+  assert(path);
+  
+  const char *flag_str = "";
+  int flags = info->args[2];
+  if ((flags & O_RDWR) == O_RDWR) flag_str = "O_RDWR";
+  else if (flags & O_WRONLY) flag_str = "O_WRONLY";
+  else flag_str = "O_RDONLY";
+  
+  sprintf(buf, "openat(%ld, \"%s\", %s|0x%x, 0%03lo) = %ld",
+          info->args[0], path, flag_str, flags & ~O_ACCMODE, info->args[3], info->rval);
+  free(path);
+}
+
+/* Format: struct timeval *tv (gettimeofday style) */
+static void format_gettimeofday(char *buf, tracee_state *t, syscall_info *info)
+{
+  struct timeval *tv = (struct timeval *)t->read_snapshot_mem(
+      info->args[0], sizeof(struct timeval));
+  assert(tv);
+  
+  sprintf(buf, "%s({tv_sec=%ld, tv_usec=%ld}, %p) = %ld",
+          syscalls[info->nr], tv->tv_sec, tv->tv_usec,
+          (void *)info->args[1], info->rval);
+  free(tv);
+}
+
+/* Format: clock_nanosleep */
+static void format_clock_nanosleep(char *buf, tracee_state *t, syscall_info *info)
+{
+  struct timespec *ts = (struct timespec *)t->read_snapshot_mem(
+      info->args[2], sizeof(struct timespec));
+  assert(ts);
+  
+  sprintf(buf, "clock_nanosleep(%ld, %ld, {tv_sec=%ld, tv_nsec=%ld}, %p) = %ld",
+          info->args[0], info->args[1], ts->tv_sec, ts->tv_nsec,
+          (void *)info->args[3], info->rval);
+  free(ts);
+}
+
+/* Format: socket */
+static void format_socket(char *buf, syscall_info *info)
+{
+  const char *domain_str = "AF_???";
+  if (info->args[0] == AF_INET) domain_str = "AF_INET";
+  else if (info->args[0] == AF_UNIX) domain_str = "AF_UNIX";
+  
+  const char *type_str = "SOCK_???";
+  if (info->args[1] == SOCK_STREAM) type_str = "SOCK_STREAM";
+  else if (info->args[1] == SOCK_DGRAM) type_str = "SOCK_DGRAM";
+  
+  sprintf(buf, "socket(%s, %s, %ld) = %ld",
+          domain_str, type_str, info->args[2], info->rval);
+}
+
+/* Format: bind/listen/accept */
+static void format_socket_fd(char *buf, syscall_info *info)
+{
+  sprintf(buf, "%s(%ld, ...) = %ld", syscalls[info->nr], info->args[0], info->rval);
+}
+
+/* Format: default (6 arguments hex) */
+static void format_default(char *buf, syscall_info *info)
+{
+  sprintf(buf, "%s(0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx) = %ld",
+          syscalls[info->nr], info->args[0], info->args[1], info->args[2],
+          info->args[3], info->args[4], info->args[5], info->rval);
+}
+
+/* Main formatting function */
+void format(char *buf, tracee_state *t, syscall_info *info)
+{
+  switch (info->nr)
+  {
+    /* Network */
+    case SYS_sendto:
+      format_sendto(buf, t, info);
+      break;
+    case SYS_recvfrom:
+      format_recvfrom(buf, t, info);
+      break;
+    case SYS_socket:
+      format_socket(buf, info);
+      break;
+    case SYS_bind:
+    case SYS_listen:
+    case SYS_accept:
+    case SYS_accept4:
+      format_socket_fd(buf, info);
+      break;
+    case SYS_connect:
+      format_socket_fd(buf, info);
+      break;
+
+    /* File I/O */
+    case SYS_read:
+    case SYS_write:
+      format_fd_buf_count(buf, t, info);
+      break;
+    case SYS_openat:
+      format_openat(buf, t, info);
+      break;
+    case SYS_close:
+      format_fd_only(buf, info);
+      break;
+
+    /* Memory */
+    case SYS_brk:
+    case SYS_mmap:
+      format_addr(buf, info);
+      break;
+
+    /* Time */
+    case SYS_gettimeofday:
+      format_gettimeofday(buf, t, info);
+      break;
+    case SYS_clock_nanosleep:
+      format_clock_nanosleep(buf, t, info);
+      break;
+
+    /* Process */
+    case SYS_exit:
+    case SYS_exit_group:
+      format_exit(buf, info);
+      break;
+
+    /* Simple fd-only */
+    case SYS_sched_yield:
+    case SYS_set_tid_address:
+      format_fd_only(buf, info);
+      break;
+
+    /* Default */
+    default:
+      format_default(buf, info);
+      break;
+  }
+}
+
+} // namespace syscall_fmt
+
+/* ========================================================================
+ * Tracee State Operations
+ * ======================================================================== */
+
+static bytes *membuf;
+static int membufsz = 4096;
 
 void log_syscall(tracee_state *t)
 {
-  construct_syscall_string(t);
-  LOG_TRACE("%s", printbuf);
+  char buf[1024];
+  syscall_fmt::format(buf, t, &t->si);
+  LOG_TRACE("%s", buf);
 }
 
-/* only one tracee_state changed comparing to source_state */
+void tracee_state::show_syscall(syscall_info *info)
+{
+  char buf[1024];
+  syscall_fmt::format(buf, this, info);
+  printf("%s\n", buf);
+}
+
+/* ========================================================================
+ * Global State Operations
+ * ======================================================================== */
+
 sys_state::sys_state(struct syscall_info *info)
 {
   /* construct all tracee for init_state */
-
   for (int j = 0; j < NP; j++)
   {
     child[j] = tracee_state(j, &info[j]);
@@ -63,10 +340,11 @@ sys_state::sys_state(struct syscall_info *info)
     ss_hash_tmp ^= ts_hash[j];
   }
 
+  /* handle hash collision */
   while (true)
   {
-    if (!state_set.count(ss_hash_tmp)) /* hash doesn't exist */
-      break;                           /* to use it */
+    if (!state_set.count(ss_hash_tmp))
+      break;
 
     sys_state s(ss_hash_tmp);
     int i = 0;
@@ -75,11 +353,9 @@ sys_state::sys_state(struct syscall_info *info)
       if (s.ts_hash[i] != ts_hash[i])
         break;
     }
-    if (i == NP) /* all the same */
+    if (i == NP)
       goto ret;
-    /* it's different */
     ss_hash_tmp++;
-    continue;
   }
 
 ret:
@@ -142,28 +418,39 @@ void state_tree_add(sys_state *s, sys_state *t, int which, int choose)
         std::tuple<hash_type, int, int>(s->ss_hash, which, choose);
 }
 
+/* Format syscall for history display using syscall_fmt */
+static void format_syscall_for_history(char *buf, hash_type ts_hash)
+{
+  tracee_state ts(ts_hash);
+  syscall_fmt::format(buf, &ts, &ts.si);
+}
+
 void show_syscall_history()
 {
   hash_type ss = ptmc_state.dest_state.ss_hash;
   std::stack<std::string> print_stack;
   int cnt = 0;
+  
   while (state_tree.count(ss))
   {
     cnt++;
     hash_type pre = std::get<0>(state_tree[ss]);
     int which = std::get<1>(state_tree[ss]);
     int choose = std::get<2>(state_tree[ss]);
+    
     sys_state s = sys_state(ss);
-    construct_syscall_string(s.ts_hash[which]);
-    print_stack.push(std::string(printbuf) + "\n");
+    
+    char buf[1024];
+    format_syscall_for_history(buf, s.ts_hash[which]);
+    print_stack.push(std::string(buf) + "\n");
+    
     if (choose >= 0)
-      sprintf(printbuf,
-              HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d (choose %d): ", pre,
-              ss, which, choose);
+      sprintf(buf, HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d (choose %d): ", 
+              pre, ss, which, choose);
     else
-      sprintf(printbuf, HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d: ", pre,
-              ss, which);
-    print_stack.push(printbuf);
+      sprintf(buf, HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d: ", 
+              pre, ss, which);
+    print_stack.push(buf);
     ss = pre;
   }
 
@@ -175,11 +462,12 @@ void show_syscall_history()
   printf("%d steps in total.\n", cnt);
 }
 
-static bytes *membuf;
-static int membufsz = 4096;
+/* ========================================================================
+ * Memory Operations
+ * ======================================================================== */
 
 #define BUFFER_SIZE 4096
-/* NO CONSIDER ABOUT PERFORMANCE */
+
 static bool maps_item_eq(maps_item &a, maps_item &b)
 {
   return a.start == b.start && a.end == b.end;
@@ -187,7 +475,7 @@ static bool maps_item_eq(maps_item &a, maps_item &b)
 
 static bool existmaps_item(maps_item &a, std::vector<maps_item> array)
 {
-  /* which will be managed by SYS_brk */
+  /* heap is managed by SYS_brk */
   if (!strcmp(a.name, "[heap]"))
     return true;
 
@@ -199,8 +487,6 @@ static bool existmaps_item(maps_item &a, std::vector<maps_item> array)
   return false;
 }
 
-/* NOTICE: addr may point read only memory, in which *
- * case has no dump, and need to be read from process */
 void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size)
 {
   bytes *ret = (bytes *)malloc(size + 1);
@@ -376,8 +662,6 @@ void sys_state::recover_shared_files()
   }
 }
 
-/* Process[index] <- tracee_state s */
-/* Need index for configure which tracee in last state */
 void tracee_state::recover_running_state(int index)
 {
   auto maps = recover_brk_mappings();
@@ -385,8 +669,7 @@ void tracee_state::recover_running_state(int index)
   /* Goes before file descriptors */
   recover_proc_files();
 
-  /* Goes before snapshot, *
-   * for %RIP will change in recover_proc_files(). */
+  /* Goes before snapshot, for %RIP will change in recover_proc_files(). */
   recover_file_descriptors(index);
 
   recover_mem_reg_snapshot(maps);
@@ -423,10 +706,9 @@ void sys_state::recover_running_state()
   {
     child[i] = tracee_state(ts_hash[i]);
 
-    if (exited[i] == 1) /* exited process need no running state */
+    if (exited[i] == 1)
       continue;
 
-    // if (ptmc_state.dest_state.ts_hash[i] != ts_hash[i])
     child[i].recover_running_state(i);
   }
 }
@@ -544,13 +826,9 @@ void tracee_state::get_file_descriptors()
   return;
 }
 
-/* from system process to data structure *
- * At this moment, nothing should be written into disk. *
- * And because MD5 is not calculated, ts_hash is not set. */
 tracee_state::tracee_state(int which, struct syscall_info *info)
 {
-  /* 1. save syscallinfo to struct
-   * here info is on stack. copy it */
+  /* 1. save syscallinfo to struct */
   si = *info;
   pid = ptmc_state.pids[which];
 
@@ -597,12 +875,9 @@ void tracee_state::save_mappings()
   fileutils::copy_file(src, dest);
 }
 
-/* Dump open files to filesystem/#state.fs *
- * Well, actually... Open files may not be enough for *
- * processes. Should specify all needed files in config */
 void tracee_state::save_proc_files()
 {
-  // TODO();
+  // TODO
 }
 
 void tracee_state::save_proc_full_data()
@@ -627,189 +902,4 @@ void tracee_state::save_proc_full_data()
 __attribute__((constructor)) void init_membuf()
 {
   membuf = (bytes *)malloc(membufsz);
-}
-
-int format_sockaddr_in(char *dest, struct sockaddr_in *addr)
-{
-  char ipbuf[INET_ADDRSTRLEN];
-  const char *ipstr =
-      inet_ntop(AF_INET, &(addr->sin_addr), ipbuf, sizeof(ipbuf));
-  if (!ipstr)
-    ipstr = "invalid";
-
-  return sprintf(
-      dest,
-      "{sin_family=AF_INET, sin_port=htons(%d), sin_addr=inet_addr(\"%s\")}",
-      ntohs(addr->sin_port), ipstr);
-}
-
-int construct_mem2str(char *str, char *mem, int len)
-{
-  int pos = 0;
-  for (int i = 0; i < len; i++)
-  {
-    uint8_t val = mem[i];
-    if (isprint(mem[i]))
-      pos += sprintf(str + pos, "%c", mem[i]);
-    else
-      pos += sprintf(str + pos, "\\%03u", val);
-  }
-  return pos;
-}
-
-static void construct_sys_d_s_d_d(char *str, tracee_state *t,
-                                  syscall_info *info)
-{
-  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
-  assert(mem);
-  str += sprintf(str, "%s(%ld, %p(\"", syscalls[info->nr], info->args[0],
-                 (void *)info->args[1]);
-  str += construct_mem2str(str, mem, info->args[2]);
-  str += sprintf(str, "\"), %ld) = %ld", info->args[2], info->rval);
-  free(mem);
-}
-
-static void construct_sys_sendto(char *str, tracee_state *t, syscall_info *info)
-{
-  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
-  assert(mem);
-  str += sprintf(str, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
-  str += construct_mem2str(str, mem, info->args[2]);
-  str += sprintf(str, "\", %ld, %ld, ", info->args[2], info->args[3]);
-  free(mem);
-
-  struct sockaddr_in *addr =
-      (struct sockaddr_in *)t->read_snapshot_mem(info->args[4], info->args[5]);
-  str += format_sockaddr_in(str, addr);
-  free(addr);
-
-  str += sprintf(str, ", %ld) = %ld", info->args[5], info->rval);
-}
-
-static void construct_sys_recvfrom(char *str, tracee_state *t,
-                                   syscall_info *info)
-{
-  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
-  assert(mem);
-  str += sprintf(str, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
-  str += construct_mem2str(str, mem, info->rval);
-  str += sprintf(str, "\", %ld, %ld, ", info->args[2], info->args[3]);
-  free(mem);
-
-  socklen_t *plen =
-      (socklen_t *)t->read_snapshot_mem(info->args[5], sizeof(socklen_t));
-  socklen_t addrlen = *plen;
-
-  struct sockaddr_in *addr =
-      (struct sockaddr_in *)t->read_snapshot_mem(info->args[4], addrlen);
-  str += format_sockaddr_in(str, addr);
-  free(addr);
-
-  str += sprintf(str, ", [%d]) = %ld", addrlen, info->rval);
-}
-
-static void construct_sys_clock_nanosleep(char *str, tracee_state *t,
-                                          syscall_info *info)
-{
-  struct timespec *mem = (struct timespec *)t->read_snapshot_mem(
-      info->args[2], sizeof(struct timespec));
-  assert(mem);
-  str += sprintf(str, "%s(%ld nanosec) = %ld", syscalls[info->nr],
-                 mem->tv_sec * 1000000000 + mem->tv_nsec, info->rval);
-  free(mem);
-}
-
-static void construct_sys_brk(char *str, syscall_info *info)
-{
-  str += sprintf(str, "brk(0x%lx) = 0x%lx", info->args[0], info->rval);
-}
-
-static void construct_sys_exit(char *str, syscall_info *info)
-{
-  str += sprintf(str, "%s(%ld) = ?", syscalls[info->nr], info->args[0]);
-}
-
-static void construct_sys_default(char *str, syscall_info *info)
-{
-  str +=
-      sprintf(str, "%s(0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx) = %ld",
-              syscalls[info->nr], info->args[0], info->args[1], info->args[2],
-              info->args[3], info->args[4], info->args[5], info->rval);
-}
-
-static void construct_sys_d_d(char *str, syscall_info *info)
-{
-  str += sprintf(str, "%s(%ld) = %ld", syscalls[info->nr], info->args[0],
-                 info->rval);
-}
-
-static void construct_sys_gettimeofday(char *str, tracee_state *t,
-                                       syscall_info *info)
-{
-  struct timeval *tv = (struct timeval *)t->read_snapshot_mem(
-      info->args[0], sizeof(struct timeval));
-  assert(tv);
-  str += sprintf(
-      str, "%s((struct timeval *){ .sec = %ld, .usec = %ld }, 0x%lx) = %ld",
-      syscalls[info->nr], tv->tv_sec, tv->tv_usec, info->args[1], info->rval);
-  free(tv);
-}
-
-static void construct_syscall_string(tracee_state *t)
-{
-  auto info = &t->si;
-  switch (info->nr)
-  {
-    case SYS_sendto:
-      construct_sys_sendto(printbuf, t, info);
-      break;
-    case SYS_recvfrom:
-      construct_sys_recvfrom(printbuf, t, info);
-      break;
-    case SYS_clock_nanosleep:
-      construct_sys_clock_nanosleep(printbuf, t, info);
-      break;
-    case SYS_brk:
-      construct_sys_brk(printbuf, info);
-      break;
-
-    case SYS_write:
-    case SYS_read:
-      construct_sys_d_s_d_d(printbuf, t, info);
-      break;
-
-    case SYS_exit_group:
-    case SYS_exit:
-      construct_sys_exit(printbuf, info);
-      break;
-
-    case SYS_sched_yield:
-    case SYS_close:
-      construct_sys_d_d(printbuf, info);
-      break;
-
-    case SYS_gettimeofday:
-      construct_sys_gettimeofday(printbuf, t, info);
-      break;
-      /*
-    case SYS_open:
-      contruct_sys_open(printbuf, t, info); break;
-      */
-
-    default:
-      construct_sys_default(printbuf, info);
-      break;
-  }
-}
-
-static void construct_syscall_string(hash_type ts_hash)
-{
-  tracee_state ts(ts_hash);
-  construct_syscall_string(&ts);
-}
-
-void tracee_state::show_syscall(syscall_info *info)
-{
-  construct_syscall_string(this);
-  printf("%s\n", printbuf);
 }
