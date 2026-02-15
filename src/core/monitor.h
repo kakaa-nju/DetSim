@@ -6,7 +6,7 @@
 #define __MONITOR_H
 
 #include "common.h"
-#include "engine.h"
+#include "types.h"
 #include "sockstate.h"
 #include "state.h"
 #include <string>

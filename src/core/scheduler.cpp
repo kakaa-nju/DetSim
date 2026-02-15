@@ -1,4 +1,4 @@
-#include "engine.h"
+#include "scheduler.h"
 #include "common.h"
 #include "debug.h"
 #include "emu.h"
@@ -462,8 +462,10 @@ static int check_state()
  * So, after every run, include cmd_cont, should set *
  * ptmc_state.sysstate_hash as the ending state. */
 
-static void load()
+void load(hash_type hash)
 {
+  (void)hash; /* TODO: use parameter instead of global */
+  
   /* load only if state hash is set */
   assert(ptmc_state.state == PTMC_PRELOAD);
 
@@ -507,7 +509,7 @@ int exec_store()
 
 int load_exec_store()
 {
-  load();
+  load(0); /* load from ptmc_state.sysstate_hash */
   return exec_store();
 }
 
