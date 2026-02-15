@@ -2,6 +2,7 @@
 #include "common.h"
 #include "debug.h"
 #include "emu.h"
+#include "fsstate.h"
 #include "guest.h"
 #include "monitor.h"
 #include "sockstate.h"

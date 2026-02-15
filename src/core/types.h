@@ -93,6 +93,20 @@ typedef uint8_t bytes;
 typedef uint32_t hash_type;
 
 /* ========================================================================
+ * Memory Mapping Item
+ * ======================================================================== */
+
+/* Represents a single entry from /proc/pid/maps */
+typedef struct
+{
+  uint64_t start, end;
+  char flags[5];
+  uint32_t offset;
+  int a, b, inode;
+  char name[512];
+} maps_item;
+
+/* ========================================================================
  * Feature Flags
  * ======================================================================== */
 

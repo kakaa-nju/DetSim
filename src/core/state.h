@@ -8,11 +8,6 @@
 #include <list>
 #include "sockstate.h"
 #include "fsstate.h"
-#include "guest.h"
-
-
-typedef uint32_t hash_type;
-#define HASH_FORMAT "%08x"
 
 /* exec state */
 

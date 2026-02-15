@@ -1,5 +1,6 @@
 #ifndef __GUEST_H
 #define __GUEST_H
+#include "types.h"
 #include "debug.h"
 #include "emu.h"
 #include <errno.h>
@@ -14,15 +15,6 @@
 extern const char *syscalls[450];
 extern const uintptr_t available_memory;
 extern int running_process;
-
-typedef struct
-{
-  uint64_t start, end;
-  char flags[5];
-  uint32_t offset;
-  int a, b, inode;
-  char name[512];
-} maps_item;
 
 void tracee_set_rax(int pid, uint64_t val);
 void tracee_set_orig_rax(int pid, uint64_t val);
@@ -70,15 +62,6 @@ void tracee_do_munmap(int pid, uint64_t start, uint64_t end);
 void *tracee_do_mmap(int pid, uint64_t start, uint64_t end);
 void *tracee_do_mmap_back(int pid, uint64_t start, uint64_t end);
 int tracee_do_open(int pid, const char *filename, uint64_t flags);
-
-/* --- VFS-based Syscall Handlers --- */
-long guest_do_vfs_openat(int dirfd, const char *path, int flags, mode_t mode);
-long guest_do_vfs_read(int fd, void *buf, size_t count);
-long guest_do_vfs_write(int fd, const void *buf, size_t count);
-long guest_do_vfs_close(int fd);
-long guest_do_vfs_lseek(int fd, off_t offset, int whence);
-long guest_do_vfs_stat(const char *path, struct stat *statbuf);
-long guest_do_vfs_fstat(int fd, struct stat *statbuf);
 
 void tracee_backtrace(int pid);
 void tracee_show_regs(int pid);
