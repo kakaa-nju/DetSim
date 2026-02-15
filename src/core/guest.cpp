@@ -164,15 +164,6 @@ int tracee_write_word(int pid, void *addr, long data)
   return ptrace_right(PTRACE_POKEDATA, pid, addr, data);
 }
 
-void apply_choose(const syscall_info &info, choose_out *out)
-{
-  for (int i = 0; i < 6; i++)
-  {
-    if (out->len[i])
-      memcpy_host2guest((void *)info.args[i], out->args[i], out->len[i]);
-  }
-}
-
 void tracee_switch_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
                            uint64_t rdx, uint64_t r10, uint64_t r8, uint64_t r9)
 {

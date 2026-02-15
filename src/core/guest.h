@@ -33,7 +33,6 @@ void tracee_read_mem(int pid, const void *addr, void *data, int len);
 void remove_vdso(int pid);
 
 void show_regs(struct user_regs_struct *regs);
-void apply_choose(const struct syscall_info &info, choose_out *out);
 void tracee_switch_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
                            uint64_t rdx, uint64_t r10, uint64_t r8,
                            uint64_t r9);

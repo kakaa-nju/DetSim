@@ -3,6 +3,9 @@
 #include "monitor.h"
 #include <sys/syscall.h>
 
+/* From scheduler.cpp */
+extern void apply_choose(const syscall_info &info, choose_out *out);
+
 choose_func choose_syswhat[450];
 int choose_many[450];
 

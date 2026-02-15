@@ -25,6 +25,16 @@
 #define PTRACE_TRAP_SIG (SIGTRAP | 0x80)
 extern FILE *log_fp;
 
+/* Apply user choice modifications to syscall arguments */
+void apply_choose(const syscall_info &info, choose_out *out)
+{
+  for (int i = 0; i < 6; i++)
+  {
+    if (out->len[i])
+      memcpy_host2guest((void *)info.args[i], out->args[i], out->len[i]);
+  }
+}
+
 /* prepare tracee for ptrace, and execve */
 static void start_tracee(int id)
 {
