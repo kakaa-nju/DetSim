@@ -1,14 +1,69 @@
+# Ignore everything by default
 *
 *.*
+
+# Source files
 !*.c
-!Makefile
 !*.cpp
 !*.h
-!.gitignore
-!tests/
-!/tests/*
-!cereal/
-!/cereal/**
+
+# Build system
+!Makefile
+!CMakeLists.txt
 !.clang-format
+
+# Git
+!.gitignore
+
+# Source directories
+!src/
+!src/core/
+!src/core/*
+!src/subsys/
+!src/subsys/*
+!src/utils/
+!src/utils/*
+
+# Third party
+!third_party/
+!third_party/cereal/
+!third_party/cereal/**
+
+# Tests
+!tests/
+!tests/*
+!tests/fs_root/
+!tests/fs_root/*
+!tests/raft/
+!tests/raft/**
+
+# Scripts
+!scripts/
+!scripts/*
+
+# Docs
 !docs/
-!/docs/**
+!docs/**
+
+# Build artifacts (ignored even with wildcards above)
+tracer
+*.o
+*.d
+*.so
+
+# Runtime directories
+build/
+mappings/
+memory/
+filesystem/
+tstate/
+sstate/
+
+# IDE
+.cache/
+.vscode/
+.idea/
+
+# Debug
+core.*
+*.log
