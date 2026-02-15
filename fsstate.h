@@ -12,8 +12,18 @@ struct VFSNode {
   // Complete file content. For directories, this is typically empty.
   std::vector<char> content;
 
-  // File metadata (permissions, size, timestamps, etc.).
+  // File metadata.
+  // When FSSTATE_DETAILED_METADATA is defined, full struct stat is stored.
+  // Otherwise, only minimal metadata (size, mode) is kept to reduce state space.
+#ifdef FSSTATE_DETAILED_METADATA
   struct stat metadata;
+#else
+  // Minimal metadata: only size and file type/mode
+  struct {
+    off_t st_size;
+    mode_t st_mode;
+  } metadata;
+#endif
 
   template <class Archive> void serialize(Archive &ar);
 };

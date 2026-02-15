@@ -877,15 +877,17 @@ static int cmd_stat(char *args)
     {
       found = true;
       const auto &node = pair.second;
-      const struct stat &st = node.metadata;
 
       printf("File: %s\n", pair.first.c_str());
-      printf("  Size: %-10ld Blocks: %-10ld IO Block: %-10ld\n", st.st_size,
-             st.st_blocks, st.st_blksize);
+      printf("  Size: %-10ld\n", node.metadata.st_size);
+      printf("  Access: (%04o)\n", (node.metadata.st_mode & 0777));
+
+#ifdef FSSTATE_DETAILED_METADATA
+      const struct stat &st = node.metadata;
+      printf("  Blocks: %-10ld IO Block: %-10ld\n", st.st_blocks, st.st_blksize);
       printf("  Device: %-8ld Inode: %-11ld Links: %-10ld\n", st.st_dev,
              st.st_ino, st.st_nlink);
-      printf("  Access: (%04o)  Uid: %-10d Gid: %-10d\n", (st.st_mode & 0777),
-             st.st_uid, st.st_gid);
+      printf("  Uid: %-10d Gid: %-10d\n", st.st_uid, st.st_gid);
 
       char buffer[80];
       struct tm *tm_info;
@@ -901,6 +903,7 @@ static int cmd_stat(char *args)
       tm_info = localtime(&st.st_ctime);
       strftime(buffer, 80, "%Y-%m-%d %H:%M:%S", tm_info);
       printf("  Change: %s\n", buffer);
+#endif
       printf("----------------------------------------\n");
     }
   }

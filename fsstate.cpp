@@ -18,6 +18,7 @@
 /* --- Serialization Implementations --- */
 
 template <class Archive> void VFSNode::serialize(Archive &ar) {
+#ifdef FSSTATE_DETAILED_METADATA
   ar(CEREAL_NVP(content), CEREAL_NVP(metadata.st_dev),
      CEREAL_NVP(metadata.st_ino), CEREAL_NVP(metadata.st_mode),
      CEREAL_NVP(metadata.st_nlink), CEREAL_NVP(metadata.st_uid),
@@ -25,6 +26,10 @@ template <class Archive> void VFSNode::serialize(Archive &ar) {
      CEREAL_NVP(metadata.st_size), CEREAL_NVP(metadata.st_blksize),
      CEREAL_NVP(metadata.st_blocks), CEREAL_NVP(metadata.st_atime),
      CEREAL_NVP(metadata.st_mtime), CEREAL_NVP(metadata.st_ctime));
+#else
+  ar(CEREAL_NVP(content), CEREAL_NVP(metadata.st_size),
+     CEREAL_NVP(metadata.st_mode));
+#endif
 }
 
 template <class Archive> void OpenFileDescription::serialize(Archive &ar) {
@@ -111,11 +116,13 @@ void FileSystemState::init_from_mappings(const std::vector<std::pair<std::string
 
         VFSNode node;
         node.content = std::move(content);
+#ifdef FSSTATE_DETAILED_METADATA
         memset(&node.metadata, 0, sizeof(struct stat));
-        node.metadata.st_mode = st.st_mode;
-        node.metadata.st_size = node.content.size();
         node.metadata.st_nlink = 1;
         node.metadata.st_mtime = st.st_mtime;
+#endif
+        node.metadata.st_mode = st.st_mode;
+        node.metadata.st_size = node.content.size();
         filesystem[target_p] = std::move(node);
       }
       closedir(cd);
@@ -207,14 +214,16 @@ int FileSystemState::do_open(const std::string &path, int flags, mode_t mode) {
     if (flags & O_CREAT) {
       // Create a new file node
       VFSNode newNode;
+#ifdef FSSTATE_DETAILED_METADATA
       memset(&newNode.metadata, 0, sizeof(struct stat));
-      newNode.metadata.st_mode = mode;
       newNode.metadata.st_nlink = 1;
-      newNode.metadata.st_size = 0;
       newNode.metadata.st_uid = getuid();
       newNode.metadata.st_gid = getgid();
       newNode.metadata.st_atime = newNode.metadata.st_mtime =
           newNode.metadata.st_ctime = time(NULL);
+#endif
+      newNode.metadata.st_mode = mode;
+      newNode.metadata.st_size = 0;
       filesystem[path] = newNode;
     } else {
       errno = ENOENT;
@@ -290,7 +299,9 @@ ssize_t FileSystemState::do_write(int fd, const void *buf, size_t count) {
   memcpy(node.content.data() + ofd.offset, buf, count);
   ofd.offset += count;
   node.metadata.st_size = node.content.size();
+#ifdef FSSTATE_DETAILED_METADATA
   node.metadata.st_mtime = time(NULL);
+#endif
 
   return count;
 }
@@ -345,7 +356,14 @@ int FileSystemState::do_stat(const std::string &path, struct stat *statbuf) {
     return -1;
   }
 
+#ifdef FSSTATE_DETAILED_METADATA
   memcpy(statbuf, &it->second.metadata, sizeof(struct stat));
+#else
+  // Minimal mode: only fill size and mode, zero out the rest
+  memset(statbuf, 0, sizeof(struct stat));
+  statbuf->st_size = it->second.metadata.st_size;
+  statbuf->st_mode = it->second.metadata.st_mode;
+#endif
   return 0;
 }
 
