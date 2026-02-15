@@ -415,11 +415,6 @@ int exec_once(syscall_info *info)
   LOG_DEBUG("exec_once from state " HASH_FORMAT ":" HASH_FORMAT, s.ss_hash,
             s.child[index].ts_hash);
 
-  /* Use local storage if caller doesn't need syscall info */
-  syscall_info local_info;
-  if (info == NULL)
-    info = &local_info;
-
   while (true)
   {
     int result = do_one_syscall(pid, info);

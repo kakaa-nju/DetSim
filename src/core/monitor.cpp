@@ -169,7 +169,34 @@ static int cmd_help(char *args)
 
 static int cmd_si(char *args)
 {
-  exec_once(NULL);
+  /* check cursor range */
+  int cursor = ptmc_state.cursor;
+  if (cursor < 0 || cursor >= NP)
+  {
+    printf("cursor = %d, out of range [0, %d). Please set again.\n", cursor,
+           NP);
+    return 0;
+  }
+
+  switch (ptmc_state.state)
+  {
+    case PTMC_LOADED:
+      exec_store();
+      break;
+    case PTMC_PRELOAD:
+      load_exec_store();
+      break;
+    default:
+      /* copy last state */
+      ptmc_state.source_state = ptmc_state.dest_state;
+      ptmc_state.sysstate_hash = ptmc_state.dest_state.ss_hash;
+      ptmc_state.state = PTMC_LOADED;
+      /* LOADED */
+      exec_store();
+  }
+  ptmc_state.dest_state.child[cursor].show_syscall(
+      &ptmc_state.dest_state.child[cursor].si);
+
   return 0;
 }
 
