@@ -13,12 +13,19 @@ LDFLAGS = -g -ldwarf -lreadline -lcjson -ldw -lzstd -rdynamic \
 
 # Source files with new directory structure
 SRCS = src/main.cpp \
-       src/core/scheduler.cpp src/core/guest.cpp src/core/monitor.cpp src/core/state.cpp src/core/config.cpp src/core/syscall_fmt.cpp \
+       src/core/scheduler.cpp src/core/guest.cpp src/core/monitor.cpp src/core/state.cpp src/core/config.cpp src/core/syscall_fmt.cpp src/core/dwarf.cpp \
        src/subsys/serialize.cpp src/subsys/sockstate.cpp src/subsys/fsstate.cpp src/subsys/emu.cpp \
-       src/utils/utils.cpp src/utils/expr.cpp src/utils/resolve.cpp src/utils/crc32.cpp
+       src/utils/utils.cpp src/utils/expr.cpp src/utils/expr_ast.cpp \
+       src/utils/expr_lexer.cpp src/utils/expr_parser.cpp \
+       src/utils/resolve.cpp src/utils/crc32.cpp
 
 OBJS = $(SRCS:.cpp=.o)
 DEPS = $(SRCS:.cpp=.d)
+
+# Lex/Yacc generated files
+LEX_SRC = src/utils/expr_lexer.cpp
+YACC_SRC = src/utils/expr_parser.cpp
+YACC_HDR = src/utils/expr_parser.hpp
 
 all: release
 
@@ -34,6 +41,12 @@ tracer: $(OBJS) nr2call.o
 
 nr2call.o: nr2call.c
 	gcc -c $< -O3 -g
+
+$(LEX_SRC): src/utils/expr_lexer.l $(YACC_HDR)
+	flex -o $@ $<
+
+$(YACC_SRC) $(YACC_HDR): src/utils/expr_parser.y
+	bison -d -o $(YACC_SRC) $<
 
 %.o: %.cpp
 	@if [ -z "$(NP)" ]; then \
@@ -57,3 +70,4 @@ clear:
 
 clean:
 	-/bin/rm -f $(OBJS) $(DEPS) nr2call.o tracer *.so
+	-/bin/rm -f $(LEX_SRC) $(YACC_SRC) $(YACC_HDR) src/utils/expr_parser.output

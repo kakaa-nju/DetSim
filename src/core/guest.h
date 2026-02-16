@@ -24,7 +24,7 @@ uint64_t tracee_get_rbp(int pid);
 uint64_t tracee_get_rsp(int pid);
 
 void print_call_stack();
-void tracee_get_freepage(int pid);
+void tracee_reserve_temp_page(int pid);
 uint64_t tracee_read_word(int pid, void *addr);
 uint8_t tracee_read_byte(int pid, void *addr);
 int tracee_write_word(int pid, void *addr, long data);
@@ -64,7 +64,6 @@ int tracee_do_open(int pid, const char *filename, uint64_t flags);
 
 void tracee_backtrace(int pid);
 void tracee_show_regs(int pid);
-void get_maps_item(std::vector<maps_item> &items, FILE *maps);
 uintptr_t get_var_addr(const char *varname);
 std::string get_var_type(const char *varname);
 void init_dwarf();

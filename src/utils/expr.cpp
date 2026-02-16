@@ -1,284 +1,178 @@
+/*
+ * expr.cpp - Expression evaluation using lex/yacc parser
+ * 
+ * This module provides expression evaluation for the debugger.
+ * It uses a lex/yacc-based parser to support complex C expressions.
+ */
+
 #include "common.h"
 #include "debug.h"
 #include "guest.h"
 #include "monitor.h"
-#include <assert.h>
-#include <regex.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
+#include "dwarf_info.h"
+#include "expr_ast.hpp"
+#include <cctype>
+#include <string>
+#include <vector>
+#include <memory>
+#include <sys/ptrace.h>
+#include <cerrno>
+#include <cstring>
 
-enum
-{
-  OBJ,
-  INT
-};
-typedef long op;
-op nullop;
-
-enum
-{
-  TK_NOTYPE = 254,
-  TK_OR,
-  TK_AND,
-  TK_NOT,
-  TK_EQ = 258,
-  TK_PLUS = 260,
-  TK_MINUS,
-  TK_MUL = 264,
-  TK_DIV,
-  TK_NEG,
-  TK_DEREF = 270,
-  TK_MEMBER,
-  TK_SYM,
-  TK_DEC = 280,
-  TK_VAR,
-  TK_LP,
-  TK_RP,
-};
-
-static struct rule
-{
-  const char *regex;
-  int token_type;
-} rules[] = {
-    {" +", TK_NOTYPE}, // spaces, no precedence
-    /* {"\\=", TK_ASSIGN}, // assignment */
-    {"\\|\\|", TK_OR},
-    {"&&", TK_AND},
-    {"!", TK_NOT},
-    {"==", TK_EQ},    // equal. last
-    {"\\+", TK_PLUS}, // plus
-    {"-", TK_MINUS},  // minus, and last go first (important)
-    {"\\*", TK_MUL},
-    {"/", TK_DIV},
-    {"\\.", TK_MEMBER},
-    {":", TK_SYM},
-    {"0|[1-9][0-9]*", TK_DEC},
-    {"[a-zA-Z_][a-zA-Z0-9_]*", TK_VAR},
-    {"\\(", TK_LP},
-    {"\\)", TK_RP},
-};
-
-#define ARRLEN(arr) (int)(sizeof(arr) / sizeof((arr)[0]))
-#define NR_REGEX ARRLEN(rules)
-static regex_t re[NR_REGEX] = {};
-
-void init_regex()
-{
-  int i;
-  char error_msg[128];
-  int ret;
-
-  for (i = 0; i < NR_REGEX; i++)
-  {
-    ret = regcomp(&re[i], rules[i].regex, REG_EXTENDED);
-    if (ret != 0)
-    {
-      regerror(ret, &re[i], error_msg, 128);
-      fprintf(stderr, "regex compilation failed: %s\n%s", error_msg,
-              rules[i].regex);
-      exit(EXIT_FAILURE);
+/* Initialize parser globals from system state */
+static void init_parser_globals() {
+    static bool initialized = false;
+    if (!initialized) {
+        g_num_processes = NP;
+        g_ptmc_state.pids = ptmc_state.pids;
+        initialized = true;
     }
-  }
 }
 
-typedef struct token
-{
-  int type;
-  char str[32];
-} Token;
+/* Get current process ID for expression evaluation */
+static int get_current_pid() {
+    int cursor = ptmc_state.cursor;
+    if (cursor < 0 || cursor >= NP) cursor = 0;
+    return ptmc_state.pids[cursor];
+}
 
-static Token tokens[1024] __attribute__((used)) = {};
-static int nr_token __attribute__((used)) = 0;
+/* Evaluate expression and return value
+ * Supports full C expressions including:
+ * - Variables: g_point, counter
+ * - Member access: g_point.x, ptr->field
+ * - Array index: arr[5], g_line.points[2]
+ * - Arithmetic: +, -, *, /, %
+ * - Comparison: ==, !=, <, >, <=, >=
+ * - Logical: &&, ||, !
+ * - Bitwise: &, |, ^, <<, >>
+ * - Address/deref: &var, *ptr
+ * - sizeof: sizeof(point), sizeof(int)
+ * - offsetof: offsetof(point, x)
+ * - Process qualified: tracee0(g_point.x)
+ */
+long expr(const char *e, bool *success) {
+    *success = false;
+    if (!e || !*e) return 0;
+    
+    init_parser_globals();
+    
+    ExprNode* ast = parse_expression(e);
+    if (!ast) {
+        fprintf(stderr, "Parse error: failed to parse expression '%s'\n", e);
+        return 0;
+    }
+    
+    int pid = get_current_pid();
+    bool ok = true;
+    EvalResult result = ast->eval(pid, ok);
+    
+    delete ast;
+    
+    if (!ok) {
+        fprintf(stderr, "Evaluation error: failed to evaluate expression '%s'\n", e);
+        return 0;
+    }
+    
+    *success = true;
+    return result.as_value();
+}
 
-static bool make_token(const char *e)
-{
-  int position = 0;
-  int i;
-  regmatch_t pmatch;
-
-  nr_token = 0;
-
-  while (e[position] != '\0')
-  {
-    /* Try all rules one by one. */
-    for (i = 0; i < NR_REGEX; i++)
-    {
-      if (regexec(&re[i], e + position, 1, &pmatch, 0) == 0 &&
-          pmatch.rm_so == 0)
-      {
-        const char *substr_start = e + position;
-        int substr_len = pmatch.rm_eo;
-
-        LOG_TRACE("match rules[%d] = \"%s\" at position %d with len %d:"
-                  "%.*s\n",
-                  i, rules[i].regex, position, substr_len, substr_len,
-                  substr_start);
-
-        position += substr_len;
-
-        switch (rules[i].token_type)
-        {
-          case TK_NOTYPE:
-            break;
-          case TK_MINUS:
-            if (nr_token == 0 || (tokens[nr_token - 1].type != TK_DEC &&
-                                  tokens[nr_token - 1].type != TK_VAR &&
-                                  tokens[nr_token - 1].type != TK_RP))
-              tokens[nr_token].type = TK_NEG;
-            else
-              tokens[nr_token].type = rules[i].token_type;
-            nr_token++;
-            break;
-          default:
-            tokens[nr_token].type = rules[i].token_type;
-            snprintf(tokens[nr_token].str, substr_len + 1, "%s", substr_start);
-            nr_token++;
-            break;
+/* Print expression result in GDB style
+ * For structs/arrays, prints detailed formatted output
+ */
+void expr_print(const char *e) {
+    if (!e || !*e) return;
+    
+    init_parser_globals();
+    
+    int pid = get_current_pid();
+    
+    ExprNode* ast = parse_expression(e);
+    if (!ast) {
+        printf("Error parsing expression: %s\n", e);
+        return;
+    }
+    
+    /* Try to get address and type for detailed printing */
+    bool ok = true;
+    EvalResult result = ast->eval_address(pid, ok);
+    
+    if (ok) {
+        /* We have an address - print with type info */
+        uint64_t addr = result.as_address();
+        const std::string& type_name = result.type_name;
+        
+        if (!type_name.empty()) {
+            /* Get type info for detailed printing */
+            type_info info = dwarf_get_type_info(type_name.c_str());
+            
+            if (info.is_struct) {
+                printf("%s = {\n", e);
+                for (const auto& m : info.members) {
+                    /* Read member value */
+                    uintptr_t maddr = addr + m.offset;
+                    long val = 0;
+                    errno = 0;
+                    val = ptrace(PTRACE_PEEKDATA, pid, maddr, nullptr);
+                    
+                    /* Truncate based on member size */
+                    if (m.size == 1) val = (int8_t)val;
+                    else if (m.size == 2) val = (int16_t)val;
+                    else if (m.size == 4) val = (int32_t)val;
+                    
+                    printf("  %s = %ld,\n", m.name.c_str(), val);
+                }
+                printf("}\n");
+                delete ast;
+                return;
+            } else if (info.is_array) {
+                /* Print array elements */
+                int elem_size = info.size / (info.array_elements > 0 ? info.array_elements : 1);
+                int print_count = info.array_elements > 10 ? 10 : info.array_elements;
+                
+                printf("%s = [", e);
+                for (int i = 0; i < print_count; i++) {
+                    uintptr_t eaddr = addr + i * elem_size;
+                    long val = ptrace(PTRACE_PEEKDATA, pid, eaddr, nullptr);
+                    if (i > 0) printf(", ");
+                    printf("%ld", val);
+                }
+                if (info.array_elements > 10) printf(", ...");
+                printf("]\n");
+                delete ast;
+                return;
+            } else if (info.is_pointer) {
+                /* Print pointer with dereference hint */
+                printf("(%s) 0x%lx\n", type_name.c_str(), (unsigned long)addr);
+                delete ast;
+                return;
+            }
         }
-        break;
-      }
+        
+        /* Default: print value at address */
+        long val = ptrace(PTRACE_PEEKDATA, pid, addr, nullptr);
+        /* Truncate based on type size */
+        if (!type_name.empty()) {
+            size_t type_size = dwarf_type_size(type_name.c_str());
+            if (type_size == 1) val = (int8_t)val;
+            else if (type_size == 2) val = (int16_t)val;
+            else if (type_size == 4) val = (int32_t)val;
+        }
+        printf("%ld\n", val);
+    } else {
+        /* Just a value */
+        result = ast->eval(pid, ok);
+        if (ok) {
+            printf("%ld\n", result.as_value());
+        } else {
+            printf("Error evaluating expression\n");
+        }
     }
-
-    if (i == NR_REGEX)
-    {
-      /* printf("no match at position %d\n%s\n%*.s^\n", position, e, position,
-       * ""); */
-      return false;
-    }
-  }
-  return true;
+    
+    delete ast;
 }
 
-bool check_parentheses(int p, int q)
-{
-  int cnt = 0;
-  for (int i = p; i < q; i++)
-  {
-    if (tokens[i].type == TK_LP)
-      cnt++;
-    if (tokens[i].type == TK_RP)
-      cnt--;
-    if (cnt < 1)
-      return false;
-  }
-  return cnt == 1 && tokens[p].type == TK_LP && tokens[q].type == TK_RP;
-}
-
-op eval(int p, int q, bool *success)
-{
-  if (p > q)
-  {
-    *success = false;
-    return nullop;
-  }
-  else if (p == q)
-  {
-    assert(tokens[p].type == TK_DEC || tokens[p].type == TK_VAR);
-    op ret;
-    switch (tokens[p].type)
-    {
-      case TK_DEC:
-        sscanf(tokens[p].str, "%ld", &ret);
-        return ret;
-      case TK_VAR:
-        assert(0);
-    }
-  }
-  else if (check_parentheses(p, q) == true)
-  {
-    return eval(p + 1, q - 1, success);
-  }
-  else
-  {
-    /* Main operator */
-    int tk_type = 300;
-    int n_operator = 0;
-    int cnt = 0;
-    for (int i = p; i <= q; i++)
-    {
-      if (tokens[i].type == TK_LP)
-        cnt++;
-      if (tokens[i].type == TK_RP)
-        cnt--;
-      if (cnt == 0 && ((tokens[i].type <= tk_type + 1 &&
-                        !(tk_type == TK_NEG && tokens[i].type == TK_NEG))))
-      {
-        tk_type = tokens[i].type;
-        n_operator = i;
-      }
-    }
-
-    op ret;
-    if (tk_type == TK_SYM)
-    {
-      assert(p == n_operator - 1);
-      assert(tokens[p].type == TK_VAR);
-      /* get node */
-      int tracee_index = -1;
-      sscanf(tokens[p].str, "tracee%d", &tracee_index);
-      assert(tracee_index >= 0 && tracee_index < NP);
-
-      tracee_state &ts = ptmc_state.dest_state.child[tracee_index];
-      uintptr_t addr = get_var_addr(tokens[q].str);
-      if (!addr)
-        LOG_CRIT("Get &%s = NULL", tokens[q].str);
-      void *mem = ts.read_snapshot_mem(addr, 8);
-
-      ret = *(long *)mem;
-      free(mem);
-      LOG_DEBUG("get %s:%s = %ld at addr 0x%lx", tokens[p].str, tokens[q].str,
-                ret, addr);
-
-      return ret;
-    }
-
-    op val1, val2;
-    if (tk_type != TK_NEG && tk_type != TK_NOT)
-    {
-      val1 = eval(p, n_operator - 1, success);
-    }
-    val2 = eval(n_operator + 1, q, success);
-    if (!*success)
-      return nullop;
-
-    switch (tk_type)
-    {
-      case TK_PLUS:
-        return val1 + val2;
-      case TK_MINUS:
-        return val1 - val2;
-      case TK_MUL:
-        return val1 * val2;
-      case TK_DIV:
-        return val1 / val2;
-      case TK_NEG:
-        return -val2;
-      case TK_OR:
-        return val1 || val2;
-      case TK_AND:
-        return val1 && val2;
-      case TK_NOT:
-        return !val1;
-      case TK_EQ:
-        return val1 == val2;
-      default:
-        *success = false;
-        fprintf(stderr, "unrecognized operator %d", tk_type);
-        exit(EXIT_FAILURE);
-    }
-  }
-  return nullop;
-}
-
-long expr(const char *e, bool *success)
-{
-  *success = true;
-  if (!make_token(e))
-  {
-    *success = false;
-    return nullop;
-  }
-  return eval(0, nr_token - 1, success);
+/* Dummy init function for compatibility */
+void init_regex() {
+    /* Nothing to do - parser is self-initializing */
 }

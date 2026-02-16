@@ -377,6 +377,79 @@ int FileSystemState::do_fstat(int fd, struct stat *statbuf) {
   return do_stat(it->second.path, statbuf);
 }
 
+/* ======================================================================
+ * Section: VFS-based Syscall Handlers
+ * These functions bridge between guest system calls and VFS operations.
+ * ====================================================================== */
+
+#include "monitor.h"
+
+// Helper to read a null-terminated string from guest memory.
+static std::string read_guest_string(uintptr_t guest_addr) {
+  std::string str;
+  char ch;
+  do {
+    memcpy_guest2host(&ch, (void*)(guest_addr + str.length()), 1);
+    if (ch != '\0') {
+      str += ch;
+    }
+  } while (ch != '\0');
+  return str;
+}
+
+long emu_vfs_openat(int dirfd, const char *path_ptr, int flags, mode_t mode) {
+  std::string path = read_guest_string((uintptr_t)path_ptr);
+  std::string resolved = ptmc_state.fs_states[ptmc_state.cursor].resolve_path(dirfd, path);
+  return ptmc_state.fs_states[ptmc_state.cursor].do_open(resolved, flags, mode);
+}
+
+long emu_vfs_read(int fd, void *buf, size_t count) {
+  std::vector<char> host_buf(count);
+  long bytes_read = ptmc_state.fs_states[ptmc_state.cursor].do_read(fd, host_buf.data(), count);
+
+  if (bytes_read > 0) {
+    memcpy_host2guest(buf, host_buf.data(), bytes_read);
+  }
+  return bytes_read;
+}
+
+long emu_vfs_write(int fd, const void *buf, size_t count) {
+  std::vector<char> host_buf(count);
+  memcpy_guest2host(host_buf.data(), buf, count);
+  
+  return ptmc_state.fs_states[ptmc_state.cursor].do_write(fd, host_buf.data(), count);
+}
+
+long emu_vfs_close(int fd) {
+  return ptmc_state.fs_states[ptmc_state.cursor].do_close(fd);
+}
+
+long emu_vfs_lseek(int fd, off_t offset, int whence) {
+  return ptmc_state.fs_states[ptmc_state.cursor].do_lseek(fd, offset, whence);
+}
+
+long emu_vfs_stat(const char *path_ptr, struct stat *statbuf) {
+  std::string path = read_guest_string((uintptr_t)path_ptr);
+  
+  struct stat host_statbuf;
+  long result = ptmc_state.fs_states[ptmc_state.cursor].do_stat(path, &host_statbuf);
+
+  if (result == 0) {
+    memcpy_host2guest(statbuf, &host_statbuf, sizeof(struct stat));
+  }
+  return result;
+}
+
+long emu_vfs_fstat(int fd, struct stat *statbuf) {
+  struct stat host_statbuf;
+  long result = ptmc_state.fs_states[ptmc_state.cursor].do_fstat(fd, &host_statbuf);
+
+  if (result == 0) {
+    memcpy_host2guest(statbuf, &host_statbuf, sizeof(struct stat));
+  }
+  return result;
+}
+
 template void VFSNode::serialize<cereal::BinaryInputArchive>(
     cereal::BinaryInputArchive &);
 template void VFSNode::serialize<cereal::BinaryOutputArchive>(

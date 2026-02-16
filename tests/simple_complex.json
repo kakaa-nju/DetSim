@@ -1,0 +1,8 @@
+{
+  "Loglevel": 0,
+  "Nodes": 1,
+  "Tracee": [
+    ["./tests/simple_complex"]
+  ],
+  "Assertions": []
+}

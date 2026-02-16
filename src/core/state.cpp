@@ -284,37 +284,38 @@ tracee_state::tracee_state(hash_type hash)
 }
 
 /* Recover memory mappings for brk */
-std::vector<maps_item> tracee_state::restore_memory_mappings()
+void tracee_state::restore_memory_mappings(std::vector<maps_item> &maps_out)
 {
-  std::vector<maps_item> maps_old, maps_new;
+  std::vector<maps_item> maps_old;
+  maps_out.clear();
 
   std::string current_path = fmt::format("/proc/{}/maps", pid);
   auto current_maps_fp = fileutils::open_cfile(current_path, "r");
   if (!current_maps_fp)
   {
     LOG_CRIT("Failed to open %s", current_path.c_str());
-    return {};
+    return;
   }
 
   auto origin_maps_fp = fileutils::open_map_file(ts_hash);
   if (!origin_maps_fp)
   {
     LOG_CRIT("Failed to open mapping file for hash %08x", ts_hash);
-    return {};
+    return;
   }
 
   get_maps_item(maps_old, current_maps_fp.get());
-  get_maps_item(maps_new, origin_maps_fp.get());
+  get_maps_item(maps_out, origin_maps_fp.get());
 
   for (auto &item_old : maps_old)
   {
-    if (!mapping_exists(item_old, maps_new))
+    if (!mapping_exists(item_old, maps_out))
     {
       tracee_do_munmap(pid, item_old.start, item_old.end);
     }
   }
 
-  for (auto &item_new : maps_new)
+  for (auto &item_new : maps_out)
   {
     if (!mapping_exists(item_new, maps_old))
     {
@@ -324,7 +325,6 @@ std::vector<maps_item> tracee_state::restore_memory_mappings()
 
   tracee_do_syscall(pid, SYS_brk, brk, 0, 0, 0, 0, 0);
   LOG_DEBUG("recovered brk = 0x%x", brk);
-  return maps_new;
 }
 
 /* Recover file descriptors */
@@ -392,7 +392,8 @@ void tracee_state::recover_proc_files()
 /* Main entry: recover running state for a process */
 void tracee_state::recover_running_state(int index)
 {
-  auto maps = restore_memory_mappings();
+  std::vector<maps_item> maps;
+  restore_memory_mappings(maps);
 
   /* Goes before file descriptors */
   recover_proc_files();
@@ -662,6 +663,18 @@ void *tracee_state::read_snapshot_mem(uint64_t addr, long size)
 /* ======================================================================
  * Section 10: Helper Functions
  * ====================================================================== */
+
+void get_maps_item(std::vector<maps_item> &items, FILE *maps)
+{
+  maps_item item;
+  char line[1024];
+  while (fgets(line, 1024, maps) != NULL)
+  {
+    sscanf(line, "%lx-%lx %s %x %d:%d %d %s", &item.start, &item.end,
+           item.flags, &item.offset, &item.a, &item.b, &item.inode, item.name);
+    items.emplace_back(item);
+  }
+}
 
 static bool maps_item_eq(maps_item &a, maps_item &b)
 {

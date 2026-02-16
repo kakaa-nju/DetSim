@@ -13,16 +13,15 @@ void *memcpy_guest2host(void *dest, const void *src, size_t n);
 
 /* --- VFS-based Syscall Handlers ---
  * These functions implement system calls using the virtual file system.
- * They are implemented in guest.cpp but declared here to centralize
- * file system related interfaces.
+ * They follow the naming convention of other emulated syscalls (emu_*).
  */
-long guest_do_vfs_openat(int dirfd, const char *path, int flags, mode_t mode);
-long guest_do_vfs_read(int fd, void *buf, size_t count);
-long guest_do_vfs_write(int fd, const void *buf, size_t count);
-long guest_do_vfs_close(int fd);
-long guest_do_vfs_lseek(int fd, off_t offset, int whence);
-long guest_do_vfs_stat(const char *path, struct stat *statbuf);
-long guest_do_vfs_fstat(int fd, struct stat *statbuf);
+long emu_vfs_openat(int dirfd, const char *path, int flags, mode_t mode);
+long emu_vfs_read(int fd, void *buf, size_t count);
+long emu_vfs_write(int fd, const void *buf, size_t count);
+long emu_vfs_close(int fd);
+long emu_vfs_lseek(int fd, off_t offset, int whence);
+long emu_vfs_stat(const char *path, struct stat *statbuf);
+long emu_vfs_fstat(int fd, struct stat *statbuf);
 
 // Represents a node in the virtual file system. Can be a file or a directory.
 struct VFSNode {

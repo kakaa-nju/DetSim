@@ -100,7 +100,7 @@ typedef struct tracee_state
   void recover_running_state(int index);
 
   /* Restore memory mappings for brk */
-  std::vector<maps_item> restore_memory_mappings();
+  void restore_memory_mappings(std::vector<maps_item> &maps_out);
 
   /* Recover file descriptors */
   void recover_file_descriptors(int index);
@@ -218,6 +218,7 @@ void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size);
  * Helper Functions
  * ====================================================================== */
 
+void get_maps_item(std::vector<maps_item> &items, FILE *maps);
 bool mapping_exists(maps_item &a, std::vector<maps_item> array);
 
 /* ======================================================================

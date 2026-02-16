@@ -21,13 +21,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <unordered_map>
+#include <vector>
 
 /* Defined in config.cpp */
 extern int auto_mode;
 
 /* Defined in expr.cpp */
 long expr(const char *e, bool *success);
+void expr_print(const char *e);
+
+/* Defined in dwarf.cpp */
+void dwarf_print_stack_trace(int pid);
+bool dwarf_set_frame(int frame_id);
+int dwarf_get_current_frame(void);
+void dwarf_print_local_vars(int pid);
 
 /* Defined in state.cpp */
 extern int choose_many[450];
@@ -44,6 +53,8 @@ static int cmd_batch(char *args);
 static int cmd_p(char *args);
 static int cmd_x(char *args);
 static int cmd_bt(char *args);
+static int cmd_frame(char *args);
+static int cmd_locals(char *args);
 static int cmd_ls(char *args);
 static int cmd_stat(char *args);
 static int cmd_hexdump(char *args);
@@ -65,7 +76,9 @@ static struct
     {"batch", "Read command list from file", cmd_batch},
     {"p", "Calculate expression", cmd_p},
     {"x", "Display tracee memory by byte", cmd_x},
-    {"bt", "Print backtrace", cmd_bt},
+    {"bt", "Print backtrace with arguments", cmd_bt},
+    {"frame", "Select stack frame", cmd_frame},
+    {"locals", "Show local variables in current frame", cmd_locals},
     {"ls", "List files in current node's filesystem", cmd_ls},
     {"stat", "Show stat of files matching pattern", cmd_stat},
     {"hexdump", "Hexdump of a file (c: continue, q: quit)", cmd_hexdump},
@@ -219,15 +232,47 @@ static int cmd_sw(char *args)
 }
 
 void load(hash_type hash);
+
 static int cmd_load(char *args)
 {
-  if (args == NULL)
+  char *arg = strtok(args, " ");
+  if (arg == NULL)
   {
-    printf("Usage: load <hash_prefix>\n");
-    return 0;
+    printf("No Arguments!\n");
+    return 1;
   }
-  hash_type hash = strtoul(args, NULL, 16);
-  load(hash);
+  /* match */
+  std::vector<hash_type> s;
+  DIR *dir = opendir("sstate");
+  assert(dir);
+  struct dirent *de;
+  while ((de = readdir(dir)) != NULL)
+  {
+    if (de->d_name[0] == '.')
+      continue;
+    if (strstr(de->d_name, arg) == de->d_name)
+    {
+      hash_type hash;
+      sscanf(de->d_name, "%x", &hash);
+      s.push_back(hash);
+    }
+  }
+  closedir(dir);
+
+  if (s.size() == 1)
+  {
+    ptmc_state.sysstate_hash = s[0];
+    ptmc_state.state = PTMC_PRELOAD;
+    load(s[0]);
+  }
+  else if (s.size() == 0)
+    printf("sys_state hash starts with %s has 0 candidates. Please specify "
+           "another\n",
+           arg);
+  else
+    printf("sys_state hash starts with %s has multiple candidates. Please "
+           "specify one\n",
+           arg);
   return 0;
 }
 
@@ -280,12 +325,7 @@ static int cmd_p(char *args)
     printf("Give an expression\n");
     return 1;
   }
-  bool success;
-  long val = expr(args, &success);
-  if (!success)
-    printf("Error at computing\n");
-  else
-    printf("%ld\n", val);
+  expr_print(args);
   return 0;
 }
 
@@ -313,7 +353,33 @@ static int cmd_x(char *args)
 
 static int cmd_bt(char *args)
 {
-  tracee_backtrace(ptmc_state.pids[ptmc_state.cursor]);
+  int pid = ptmc_state.pids[ptmc_state.cursor];
+  dwarf_print_stack_trace(pid);
+  return 0;
+}
+
+static int cmd_frame(char *args)
+{
+  if (!args || args[0] == '\0') {
+    /* Show current frame */
+    int frame = dwarf_get_current_frame();
+    printf("Current frame: #%d\n", frame);
+    return 0;
+  }
+  
+  int frame_id = atoi(args);
+  if (dwarf_set_frame(frame_id)) {
+    printf("Switched to frame #%d\n", frame_id);
+  } else {
+    printf("Invalid frame ID: %d\n", frame_id);
+  }
+  return 0;
+}
+
+static int cmd_locals(char *args)
+{
+  int pid = ptmc_state.pids[ptmc_state.cursor];
+  dwarf_print_local_vars(pid);
   return 0;
 }
 
@@ -456,11 +522,14 @@ static int cmd_hexdump(char *args)
 
 void ui_mainloop()
 {
+  printf("[DEBUG] ui_mainloop started, auto_mode=%d\n", is_auto_mode());
   char lastbuf[256], lastcmd[256];
   lastbuf[0] = lastcmd[0] = '\0';
   if (is_auto_mode())
   {
+    printf("[DEBUG] Running cmd_c\n");
     cmd_c(NULL);
+    printf("[DEBUG] cmd_c returned\n");
   }
 
   for (char *str; (str = rl_gets()) != NULL;)

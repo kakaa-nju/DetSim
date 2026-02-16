@@ -1,3 +1,5 @@
+#include <cstdio>
+
 void init_monitor(int argc, char *argv[]);
 void ui_mainloop();
 void init_state();
@@ -14,5 +16,7 @@ int main(int argc, char *argv[])
   /* analyze variable addresses */
   init_dwarf();
 
+  printf("[DEBUG] About to call ui_mainloop\n");
   ui_mainloop();
+  printf("[DEBUG] ui_mainloop returned\n");
 }

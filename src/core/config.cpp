@@ -140,11 +140,13 @@ void read_config(const char *cfg_file)
   if (assertions)
   {
     int assertions_cnt = cJSON_GetArraySize(assertions);
+    LOG_DEBUG("Loading %d assertions", assertions_cnt);
     for (int j = 0; j < assertions_cnt; j++)
     {
       cJSON *assertion = cJSON_GetArrayItem(assertions, j);
-      ptmc_state.assertions.emplace(
-          std::string(cJSON_GetStringValue(assertion)));
+      std::string assert_str = cJSON_GetStringValue(assertion);
+      LOG_DEBUG("  Assertion %d: %s", j, assert_str.c_str());
+      ptmc_state.assertions.emplace(assert_str);
     }
   }
 

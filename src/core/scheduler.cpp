@@ -280,42 +280,42 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
 
     /* VFS Handlers */
     case SYS_open:
-        ret = guest_do_vfs_openat(AT_FDCWD, (const char *)info->args[0], info->args[1], info->args[2]);
+        ret = emu_vfs_openat(AT_FDCWD, (const char *)info->args[0], info->args[1], info->args[2]);
         tracee_set_rax(pid, ret);
         info->rval = ret;
         return CKPT_YES;
     case SYS_openat:
-      ret = guest_do_vfs_openat(info->args[0], (const char *)info->args[1], info->args[2], info->args[3]);
+      ret = emu_vfs_openat(info->args[0], (const char *)info->args[1], info->args[2], info->args[3]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
       return CKPT_YES;
     case SYS_read:
-      ret = guest_do_vfs_read(info->args[0], (void *)info->args[1], info->args[2]);
+      ret = emu_vfs_read(info->args[0], (void *)info->args[1], info->args[2]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
       return CKPT_YES;
     case SYS_write:
-      ret = guest_do_vfs_write(info->args[0], (const void *)info->args[1], info->args[2]);
+      ret = emu_vfs_write(info->args[0], (const void *)info->args[1], info->args[2]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
       return CKPT_YES;
     case SYS_close:
-        ret = guest_do_vfs_close(info->args[0]);
+        ret = emu_vfs_close(info->args[0]);
         tracee_set_rax(pid, ret);
         info->rval = ret;
         return CKPT_YES;
     case SYS_lseek:
-        ret = guest_do_vfs_lseek(info->args[0], info->args[1], info->args[2]);
+        ret = emu_vfs_lseek(info->args[0], info->args[1], info->args[2]);
         tracee_set_rax(pid, ret);
         info->rval = ret;
         return CKPT_YES;
     case SYS_stat:
-        ret = guest_do_vfs_stat((const char *)info->args[0], (struct stat *)info->args[1]);
+        ret = emu_vfs_stat((const char *)info->args[0], (struct stat *)info->args[1]);
         tracee_set_rax(pid, ret);
         info->rval = ret;
         return CKPT_YES;
     case SYS_fstat:
-        ret = guest_do_vfs_fstat(info->args[0], (struct stat *)info->args[1]);
+        ret = emu_vfs_fstat(info->args[0], (struct stat *)info->args[1]);
         tracee_set_rax(pid, ret);
         info->rval = ret;
         return CKPT_YES;
@@ -409,7 +409,7 @@ static void init_tracee_state(int index)
 
   /* Preserve memory for parameters. Need recover registers *
    * for the original first syscall. */
-  tracee_get_freepage(pid);
+  tracee_reserve_temp_page(pid);
 }
 
 /* loaded, exec 1 STEP, not stored. Save Last syscall into `info` *
@@ -453,6 +453,8 @@ static int check_state()
   {
     bool success;
     long val = expr(assertion.c_str(), &success);
+    LOG_DEBUG("Assertion \"%s\" = %ld (success=%d)", 
+              assertion.c_str(), val, success);
     if (!success)
       LOG_ERROR("Failed to evaluate expression \"%s\"", assertion.c_str());
     if (val == false)
@@ -474,12 +476,16 @@ static int check_state()
 
 void load(hash_type hash)
 {
-  (void)hash; /* TODO: use parameter instead of global */
-  
   /* load only if state hash is set */
   assert(ptmc_state.state == PTMC_PRELOAD);
 
   ptmc_state.state = PTMC_LOADED;
+  
+  /* Use provided hash if non-zero, otherwise fall back to global */
+  if (hash != 0) {
+    ptmc_state.sysstate_hash = hash;
+  }
+  
   ptmc_state.source_state = sys_state(ptmc_state.sysstate_hash);
   for (int i = 0; i < NP; i++)
     ptmc_state.exited[i] = ptmc_state.source_state.exited[i];
