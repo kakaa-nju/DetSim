@@ -498,7 +498,15 @@ int exec_store()
   ptmc_state.state = PTMC_RUNNING;
   ptmc_state.choose = -1;
   int index = ptmc_state.cursor;
+  
+  /* Initialize syscall_info array to ensure deterministic state creation.
+   * Only the current process's info will be updated by exec_once,
+   * others should be copied from source_state to maintain consistency. */
   syscall_info info[NP];
+  for (int i = 0; i < NP; i++)
+  {
+    info[i] = ptmc_state.source_state.child[i].si;
+  }
 
   int ret = exec_once(info + index);
   if (ret == -1)
@@ -575,9 +583,10 @@ int exec_cont()
       s.recover_running_state();
       ptmc_state.cursor = i;
 
+      /* Initialize syscall_info from source_state for all processes
+       * to ensure deterministic state creation */
       for (int j = 0; j < NP; j++)
-        if (j != i && ptmc_state.exited[j] != true)
-          syscall_info[j] = s.child[j].si;
+        syscall_info[j] = s.child[j].si;
 
       int ckpt = exec_once(syscall_info + i);
 
