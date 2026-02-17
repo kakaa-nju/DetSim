@@ -645,7 +645,19 @@ std::string AssignNode::to_string() const {
 
 /* CastNode */
 EvalResult CastNode::eval(int pid, bool& success) const {
-    return operand_->eval(pid, success);
+    /* Get the target type name from the type node */
+    std::string target_type = type_->to_string();
+    
+    /* Evaluate the operand */
+    EvalResult result = operand_->eval(pid, success);
+    if (!success) return EvalResult(0L);
+    
+    /* For pointer/struct casts, we just change the type annotation.
+     * The underlying value (address) remains the same.
+     * This allows subsequent member access (->) to work correctly.
+     */
+    result.type_name = target_type;
+    return result;
 }
 
 std::string CastNode::to_string() const {

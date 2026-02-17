@@ -140,6 +140,11 @@ type_name:
         free($2);
         $$ = new TypeNode(type_str);
     }
+    | type_name '*' {
+        std::string type_str = static_cast<TypeNode*>($1)->get_type() + " *";
+        delete $1;
+        $$ = new TypeNode(type_str);
+    }
     ;
 
 type_specifier:
