@@ -60,32 +60,33 @@ extern int yydebug;
     TRACEE_N = 261,                /* TRACEE_N  */
     KW_SIZEOF = 262,               /* KW_SIZEOF  */
     KW_OFFSETOF = 263,             /* KW_OFFSETOF  */
-    KW_STRUCT = 264,               /* KW_STRUCT  */
-    KW_UNION = 265,                /* KW_UNION  */
-    KW_ENUM = 266,                 /* KW_ENUM  */
-    KW_INT = 267,                  /* KW_INT  */
-    KW_CHAR = 268,                 /* KW_CHAR  */
-    KW_SHORT = 269,                /* KW_SHORT  */
-    KW_LONG = 270,                 /* KW_LONG  */
-    KW_FLOAT = 271,                /* KW_FLOAT  */
-    KW_DOUBLE = 272,               /* KW_DOUBLE  */
-    KW_VOID = 273,                 /* KW_VOID  */
-    KW_UNSIGNED = 274,             /* KW_UNSIGNED  */
-    KW_SIGNED = 275,               /* KW_SIGNED  */
-    KW_CONST = 276,                /* KW_CONST  */
-    KW_STATIC = 277,               /* KW_STATIC  */
-    ARROW = 278,                   /* ARROW  */
-    EQ = 279,                      /* EQ  */
-    NE = 280,                      /* NE  */
-    LE = 281,                      /* LE  */
-    GE = 282,                      /* GE  */
-    AND = 283,                     /* AND  */
-    OR = 284,                      /* OR  */
-    SHL = 285,                     /* SHL  */
-    SHR = 286,                     /* SHR  */
-    INC = 287,                     /* INC  */
-    DEC = 288,                     /* DEC  */
-    INVALID = 289                  /* INVALID  */
+    KW_TYPEOF = 264,               /* KW_TYPEOF  */
+    KW_STRUCT = 265,               /* KW_STRUCT  */
+    KW_UNION = 266,                /* KW_UNION  */
+    KW_ENUM = 267,                 /* KW_ENUM  */
+    KW_INT = 268,                  /* KW_INT  */
+    KW_CHAR = 269,                 /* KW_CHAR  */
+    KW_SHORT = 270,                /* KW_SHORT  */
+    KW_LONG = 271,                 /* KW_LONG  */
+    KW_FLOAT = 272,                /* KW_FLOAT  */
+    KW_DOUBLE = 273,               /* KW_DOUBLE  */
+    KW_VOID = 274,                 /* KW_VOID  */
+    KW_UNSIGNED = 275,             /* KW_UNSIGNED  */
+    KW_SIGNED = 276,               /* KW_SIGNED  */
+    KW_CONST = 277,                /* KW_CONST  */
+    KW_STATIC = 278,               /* KW_STATIC  */
+    ARROW = 279,                   /* ARROW  */
+    EQ = 280,                      /* EQ  */
+    NE = 281,                      /* NE  */
+    LE = 282,                      /* LE  */
+    GE = 283,                      /* GE  */
+    AND = 284,                     /* AND  */
+    OR = 285,                      /* OR  */
+    SHL = 286,                     /* SHL  */
+    SHR = 287,                     /* SHR  */
+    INC = 288,                     /* INC  */
+    DEC = 289,                     /* DEC  */
+    INVALID = 290                  /* INVALID  */
   };
   typedef enum yytokentype yytoken_kind_t;
 #endif
@@ -94,13 +95,13 @@ extern int yydebug;
 #if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
-#line 15 "src/utils/expr_parser.y"
+#line 18 "src/utils/expr_parser.y"
 
     long int_val;
     char* str_val;
     ExprNode* node_val;
 
-#line 104 "src/utils/expr_parser.hpp"
+#line 105 "src/utils/expr_parser.hpp"
 
 };
 typedef union YYSTYPE YYSTYPE;

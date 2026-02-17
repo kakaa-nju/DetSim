@@ -286,54 +286,41 @@ std::string PostfixOpNode::to_string() const {
 
 /* MemberAccessNode */
 EvalResult MemberAccessNode::eval(int pid, bool& success) const {
-    /* First get the base object type (parent type) */
-    std::string parent_type;
-    bool dummy;
-    EvalResult obj_res = object_->eval(pid, dummy);
-    if (!obj_res.type_name.empty()) {
-        parent_type = obj_res.type_name;
-        /* For pointer, get the pointed-to type */
-        type_info info = dwarf_get_type_info(parent_type.c_str());
-        if (info.is_pointer && !info.element_type.empty()) {
-            parent_type = info.element_type;
-        }
-    }
-    
+    /* Get the member address and type */
     EvalResult addr_res = eval_address(pid, success);
     if (!success) return EvalResult(0L);
     
     uint64_t addr = addr_res.as_address();
     std::string member_type = addr_res.type_name;
     
-    /* Use parent_type to find member size for correct truncation */
-    if (!parent_type.empty()) {
-        type_info info = dwarf_get_type_info(parent_type.c_str());
-        
-        for (const auto& m : info.members) {
-            if (m.name == member_) {
-                type_info member_info = dwarf_get_type_info(m.type_name.c_str());
-                if (member_info.is_struct || member_info.is_array) {
-                    EvalResult res(addr);
-                    res.type_name = m.type_name;
-                    return res;
-                }
-                
-                long val = read_memory_long(pid, addr, success);
-                /* Truncate based on actual member size */
-                if (m.size == 1) val = static_cast<int8_t>(val);
-                else if (m.size == 2) val = static_cast<int16_t>(val);
-                else if (m.size == 4) val = static_cast<int32_t>(val);
-                
-                EvalResult res(val);
-                res.type_name = m.type_name;
-                return res;
-            }
+    /* Check if member is a struct or array - return address with type */
+    if (!member_type.empty()) {
+        type_info member_info = dwarf_get_type_info(member_type.c_str());
+        if (member_info.is_struct || member_info.is_array) {
+            EvalResult res(addr);
+            res.type_name = member_type;
+            return res;
         }
     }
     
-    /* Fallback: just read value */
+    /* For basic types, read the value */
     long val = read_memory_long(pid, addr, success);
-    return EvalResult(val);
+    if (!success) return EvalResult(0L);
+    
+    /* Truncate based on member size if we have type info */
+    if (!member_type.empty()) {
+        type_info member_info = dwarf_get_type_info(member_type.c_str());
+        size_t size = member_info.size;
+        if (size == 0) size = 4; /* default */
+        
+        if (size == 1) val = static_cast<int8_t>(val);
+        else if (size == 2) val = static_cast<int16_t>(val);
+        else if (size == 4) val = static_cast<int32_t>(val);
+    }
+    
+    EvalResult res(val);
+    res.type_name = member_type;
+    return res;
 }
 
 EvalResult MemberAccessNode::eval_address(int pid, bool& success) const {
@@ -344,12 +331,22 @@ EvalResult MemberAccessNode::eval_address(int pid, bool& success) const {
     
     EvalResult base_res;
     std::string base_type;
+    uint64_t base_addr = 0;
     
     if (op_ == MemberOp::ARROW) {
+        /* For -> operator: object is a pointer
+         * First try eval() - for value expressions like g_container.rects[0],
+         * this returns the pointer value directly.
+         * For variables like g_tree_root.container, this also works if the 
+         * VariableNode::eval correctly reads the pointer value.
+         */
         base_res = object_->eval(pid, success);
         if (!success) return EvalResult(0L);
+        
+        base_addr = base_res.as_address();
         base_type = base_res.type_name;
         
+        /* The type should be a pointer, extract the element type */
         if (!base_type.empty()) {
             type_info info = dwarf_get_type_info(base_type.c_str());
             if (info.is_pointer && !info.element_type.empty()) {
@@ -357,20 +354,32 @@ EvalResult MemberAccessNode::eval_address(int pid, bool& success) const {
             }
         }
     } else {
+        /* For . operator: get the address of the object */
         base_res = object_->eval_address(pid, success);
         if (!success) return EvalResult(0L);
+        base_addr = base_res.as_address();
         base_type = base_res.type_name;
     }
-    
-    uint64_t base_addr = base_res.is_address ? base_res.as_address() : 
-                                               static_cast<uint64_t>(base_res.as_value());
     
     if (base_type.empty()) {
         success = false;
         return EvalResult(0L);
     }
     
-    ptrdiff_t offset = dwarf_member_offset(base_type.c_str(), member_.c_str());
+    /* Get type info for the base type */
+    type_info base_info = dwarf_get_type_info(base_type.c_str());
+    
+    /* Find member by name */
+    ptrdiff_t offset = -1;
+    std::string member_type;
+    for (const auto& m : base_info.members) {
+        if (m.name == member_) {
+            offset = m.offset;
+            member_type = m.type_name;  /* This includes [] for arrays, * for pointers */
+            break;
+        }
+    }
+    
     if (offset < 0) {
         success = false;
         return EvalResult(0L);
@@ -378,13 +387,7 @@ EvalResult MemberAccessNode::eval_address(int pid, bool& success) const {
     
     success = true;
     EvalResult res(base_addr + offset);
-    
-    std::string member_type;
-    size_t member_size;
-    if (dwarf_member_info(base_type.c_str(), member_.c_str(), &offset, &member_size, &member_type)) {
-        res.type_name = member_type;
-    }
-    
+    res.type_name = member_type;  /* Preserve full type name like "point[]" */
     return res;
 }
 
@@ -403,12 +406,23 @@ EvalResult ArrayIndexNode::eval(int pid, bool& success) const {
     if (!elem_type.empty()) {
         type_info info = dwarf_get_type_info(elem_type.c_str());
         
+        /* For struct or array types, return address without dereferencing */
         if (info.is_struct || info.is_array) {
             EvalResult res(addr);
             res.type_name = elem_type;
             return res;
         }
         
+        /* For pointer types, read the pointer value from memory */
+        if (info.is_pointer) {
+            long val = read_memory_long(pid, addr, success);
+            if (!success) return EvalResult(0L);
+            EvalResult res(val);
+            res.type_name = elem_type;
+            return res;
+        }
+        
+        /* For basic types, read the value from memory */
         long val = read_memory_long(pid, addr, success);
         int size = get_type_size(info);
         if (size == 1) val = static_cast<int8_t>(val);
@@ -425,11 +439,18 @@ EvalResult ArrayIndexNode::eval(int pid, bool& success) const {
 }
 
 EvalResult ArrayIndexNode::eval_address(int pid, bool& success) const {
-    EvalResult base_res = array_->eval(pid, success);
-    if (!success) return EvalResult(0L);
+    /* Get the array base address and type */
+    EvalResult base_res = array_->eval_address(pid, success);
+    bool is_array_variable = success;  // true if array_ is a variable (has storage address)
     
-    uint64_t base_addr = base_res.is_address ? base_res.as_address() : 
-                                               static_cast<uint64_t>(base_res.as_value());
+    if (!success) {
+        /* Try evaluating as value (for pointer arithmetic) */
+        base_res = array_->eval(pid, success);
+        if (!success) return EvalResult(0L);
+    }
+    
+    uint64_t base_storage_addr = base_res.as_address();
+    std::string array_type = base_res.type_name;
     
     EvalResult idx_res = index_->eval(pid, success);
     if (!success) return EvalResult(0L);
@@ -438,18 +459,47 @@ EvalResult ArrayIndexNode::eval_address(int pid, bool& success) const {
     
     int elem_size = 8;
     std::string elem_type;
+    bool is_pointer_base = false;
     
-    if (!base_res.type_name.empty()) {
-        type_info info = dwarf_get_type_info(base_res.type_name.c_str());
-        if (info.is_array && !info.element_type.empty()) {
-            elem_type = info.element_type;
+    if (!array_type.empty()) {
+        /* Check if base is a pointer type */
+        type_info base_info = dwarf_get_type_info(array_type.c_str());
+        if (base_info.is_pointer) {
+            is_pointer_base = true;
+        }
+        
+        /* Use DWARF to get element type after one level of indexing */
+        elem_type = dwarf_get_element_type(array_type.c_str());
+        
+        if (!elem_type.empty()) {
             type_info elem_info = dwarf_get_type_info(elem_type.c_str());
             elem_size = get_type_size(elem_info);
         }
     }
     
+    uint64_t elem_addr;
+    
+    if (is_pointer_base && is_array_variable) {
+        /* For pointer variable (e.g., rects[0] where rects is rect**):
+         * 1. Read the pointer value from storage
+         * 2. Add offset to get element address
+         */
+        bool read_ok;
+        uint64_t ptr_value = static_cast<uint64_t>(read_memory_long(pid, base_storage_addr, read_ok));
+        if (!read_ok) {
+            success = false;
+            return EvalResult(0L);
+        }
+        elem_addr = ptr_value + index * elem_size;
+    } else {
+        /* For array variable or value expression: 
+         * base_storage_addr is already the base address
+         */
+        elem_addr = base_storage_addr + index * elem_size;
+    }
+    
     success = true;
-    EvalResult res(base_addr + index * elem_size);
+    EvalResult res(elem_addr);
     res.type_name = elem_type;
     return res;
 }
@@ -460,7 +510,12 @@ std::string ArrayIndexNode::to_string() const {
 
 /* AddressOfNode */
 EvalResult AddressOfNode::eval(int pid, bool& success) const {
-    return operand_->eval_address(pid, success);
+    EvalResult res = operand_->eval_address(pid, success);
+    if (success && !res.type_name.empty()) {
+        /* Add pointer to type name */
+        res.type_name = res.type_name + " *";
+    }
+    return res;
 }
 
 std::string AddressOfNode::to_string() const {
@@ -472,27 +527,42 @@ EvalResult DereferenceNode::eval(int pid, bool& success) const {
     EvalResult ptr_res = operand_->eval(pid, success);
     if (!success) return EvalResult(0L);
     
-    uint64_t addr = ptr_res.is_address ? ptr_res.as_address() : 
-                                         static_cast<uint64_t>(ptr_res.as_value());
+    /* 
+     * VariableNode::eval() for pointer types reads memory to get the pointer's value.
+     * So ptr_res contains the address stored in the pointer variable.
+     * For int*: ptr_res = target address (e.g., 0x404040)
+     * For int**: ptr_res = address of int* variable (e.g., 0x404088)
+     */
+    uint64_t ptr_value = ptr_res.is_address ? ptr_res.as_address() : 
+                                              static_cast<uint64_t>(ptr_res.as_value());
     
+    /* Get inner type by removing one level of pointer */
     std::string inner_type;
     if (!ptr_res.type_name.empty()) {
-        type_info info = dwarf_get_type_info(ptr_res.type_name.c_str());
-        if (info.is_pointer && !info.element_type.empty()) {
-            inner_type = info.element_type;
-        }
+        inner_type = dwarf_get_element_type(ptr_res.type_name.c_str());
     }
     
     if (!inner_type.empty()) {
         type_info info = dwarf_get_type_info(inner_type.c_str());
         
-        if (info.is_struct || info.is_array) {
-            EvalResult res(addr);
+        /* 
+         * For struct, array, or pointer types (e.g., int*), we need to read 
+         * memory at ptr_value to get the actual target address.
+         */
+        if (info.is_struct || info.is_array || info.is_pointer) {
+            uint64_t target_addr = static_cast<uint64_t>(read_memory_long(pid, ptr_value, success));
+            if (!success) return EvalResult(0L);
+            
+            EvalResult res(target_addr);
             res.type_name = inner_type;
             return res;
         }
         
-        long val = read_memory_long(pid, addr, success);
+        /* 
+         * For basic types (e.g., int), ptr_value IS the target address.
+         * VariableNode::eval() for int* already gave us the target address.
+         */
+        long val = read_memory_long(pid, ptr_value, success);
         int size = get_type_size(info);
         if (size == 1) val = static_cast<int8_t>(val);
         else if (size == 2) val = static_cast<int16_t>(val);
@@ -503,27 +573,27 @@ EvalResult DereferenceNode::eval(int pid, bool& success) const {
         return res;
     }
     
-    long val = read_memory_long(pid, addr, success);
+    /* No type info, assume ptr_value is the target address */
+    long val = read_memory_long(pid, ptr_value, success);
     return EvalResult(val);
 }
 
 EvalResult DereferenceNode::eval_address(int pid, bool& success) const {
+    /* Evaluate operand to get the pointer value */
     EvalResult ptr_res = operand_->eval(pid, success);
     if (!success) return EvalResult(0L);
     
-    uint64_t addr = ptr_res.is_address ? ptr_res.as_address() : 
-                                         static_cast<uint64_t>(ptr_res.as_value());
+    /* The pointer value IS the target address (no additional read needed) */
+    uint64_t target_addr = static_cast<uint64_t>(ptr_res.as_value());
     
+    /* Get inner type by removing one level of pointer */
     std::string inner_type;
     if (!ptr_res.type_name.empty()) {
-        type_info info = dwarf_get_type_info(ptr_res.type_name.c_str());
-        if (info.is_pointer && !info.element_type.empty()) {
-            inner_type = info.element_type;
-        }
+        inner_type = dwarf_get_element_type(ptr_res.type_name.c_str());
     }
     
     success = true;
-    EvalResult res(addr);
+    EvalResult res(target_addr);
     res.type_name = inner_type;
     return res;
 }
@@ -584,13 +654,25 @@ std::string CastNode::to_string() const {
 
 /* SizeofExprNode */
 EvalResult SizeofExprNode::eval(int pid, bool& success) const {
+    /* Try to get type from eval_address first (for variables) */
     bool dummy;
-    EvalResult op_res = operand_->eval(pid, dummy);
+    EvalResult op_res = operand_->eval_address(pid, dummy);
     
-    int size = 8;
+    int size = 0;
     if (!op_res.type_name.empty()) {
         size = dwarf_type_size(op_res.type_name.c_str());
     }
+    
+    /* Fallback: try eval */
+    if (size == 0) {
+        op_res = operand_->eval(pid, dummy);
+        if (!op_res.type_name.empty()) {
+            size = dwarf_type_size(op_res.type_name.c_str());
+        }
+    }
+    
+    /* Default to pointer size */
+    if (size == 0) size = 8;
     
     success = true;
     return EvalResult(static_cast<long>(size));
@@ -603,6 +685,20 @@ std::string SizeofExprNode::to_string() const {
 /* SizeofTypeNode */
 EvalResult SizeofTypeNode::eval(int pid, bool& success) const {
     int size = dwarf_type_size(type_name_.c_str());
+    
+    /* If type not found, try evaluating as expression */
+    if (size == 0) {
+        ExprNode* expr = parse_expression(type_name_.c_str());
+        if (expr) {
+            bool dummy;
+            EvalResult op_res = expr->eval_address(pid, dummy);
+            if (!op_res.type_name.empty()) {
+                size = dwarf_type_size(op_res.type_name.c_str());
+            }
+            delete expr;
+        }
+    }
+    
     success = true;
     return EvalResult(static_cast<long>(size));
 }
@@ -624,6 +720,27 @@ EvalResult OffsetofNode::eval(int pid, bool& success) const {
 
 std::string OffsetofNode::to_string() const {
     return "offsetof(" + type_name_ + ", " + member_ + ")";
+}
+
+/* TypeofNode */
+EvalResult TypeofNode::eval(int pid, bool& success) const {
+    bool dummy;
+    EvalResult op_res = operand_->eval(pid, dummy);
+    
+    /* Return the type name as a value - we encode it as a pointer to a static string */
+    /* For now, just return success and let the caller extract the type name */
+    success = true;
+    EvalResult res(0L);
+    res.type_name = op_res.type_name;
+    return res;
+}
+
+std::string TypeofNode::to_string() const {
+    return "typeof(" + operand_->to_string() + ")";
+}
+
+std::string TypeofNode::get_type_name() const {
+    return operand_->to_string();
 }
 
 /* ProcessQualifiedNode */

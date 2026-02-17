@@ -2,6 +2,9 @@
 %{
 #include <string>
 #include <cstring>
+
+/* Include AST before parser to ensure ExprNode is defined */
+#include "expr_ast.hpp"
 #include "expr_parser.hpp"
 
 extern YYSTYPE yylval;
@@ -24,6 +27,7 @@ HEX_NUMBER  0[xX]{HEX_DIGIT}+
 
 "sizeof"              { return KW_SIZEOF; }
 "offsetof"            { return KW_OFFSETOF; }
+"typeof"              { return KW_TYPEOF; }
 "struct"              { return KW_STRUCT; }
 "union"               { return KW_UNION; }
 "enum"                { return KW_ENUM; }

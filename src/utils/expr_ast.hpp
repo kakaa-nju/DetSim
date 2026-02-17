@@ -40,6 +40,11 @@ public:
     virtual EvalResult eval(int pid, bool& success) const = 0;
     virtual EvalResult eval_address(int pid, bool& success) const;
     virtual std::string to_string() const = 0;
+    
+    /* Get target process ID for process-qualified expressions (traceeN())
+     * Returns -1 if not a process-qualified expression
+     */
+    virtual int get_target_pid() const { return -1; }
 };
 
 using ExprPtr = std::unique_ptr<ExprNode>;
@@ -234,6 +239,16 @@ public:
     std::string to_string() const override;
 };
 
+/* typeof */
+class TypeofNode : public ExprNode {
+    ExprPtr operand_;
+public:
+    explicit TypeofNode(ExprNode* opnd) : operand_(opnd) {}
+    EvalResult eval(int pid, bool& success) const override;
+    std::string to_string() const override;
+    std::string get_type_name() const;
+};
+
 /* Process-qualified: traceeN(expr) */
 class ProcessQualifiedNode : public ExprNode {
     int proc_id_;
@@ -241,7 +256,7 @@ class ProcessQualifiedNode : public ExprNode {
 public:
     ProcessQualifiedNode(int pid, ExprNode* e) : proc_id_(pid), expr_(e) {}
     int get_proc_id() const { return proc_id_; }
-    int get_target_pid() const;
+    int get_target_pid() const override;
     EvalResult eval(int pid, bool& success) const override;
     EvalResult eval_address(int pid, bool& success) const override;
     std::string to_string() const override;

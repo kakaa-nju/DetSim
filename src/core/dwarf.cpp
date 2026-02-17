@@ -641,15 +641,132 @@ std::string dwarf_get_global_type(const char *varname)
   return "";
 }
 
+/* Parse a type name to extract base type and modifiers (array, pointer) */
+static void parse_type_name(const std::string& type_name, std::string& base_type, 
+                            bool& is_array, bool& is_pointer, std::string& array_size)
+{
+  base_type = type_name;
+  is_array = false;
+  is_pointer = false;
+  array_size = "";
+  
+  /* Check for array notation: type[N] or type[] */
+  size_t bracket_pos = base_type.find('[');
+  if (bracket_pos != std::string::npos) {
+    is_array = true;
+    size_t close_bracket = base_type.find(']', bracket_pos);
+    if (close_bracket != std::string::npos && close_bracket > bracket_pos + 1) {
+      array_size = base_type.substr(bracket_pos + 1, close_bracket - bracket_pos - 1);
+    }
+    base_type = base_type.substr(0, bracket_pos);
+    /* Trim whitespace */
+    while (!base_type.empty() && isspace(base_type.back())) base_type.pop_back();
+    return;
+  }
+  
+  /* Check for pointer: type * or type* */
+  size_t star_pos = base_type.find('*');
+  if (star_pos != std::string::npos) {
+    is_pointer = true;
+    /* Extract just the first base type before any * */
+    std::string first_base = base_type.substr(0, star_pos);
+    while (!first_base.empty() && isspace(first_base.back())) first_base.pop_back();
+    base_type = first_base;
+    return;
+  }
+}
+
+/* Get element type after one level of array/pointer indexing
+ * e.g., "rect * *" -> "rect *", "point[]" -> "point", "int*" -> "int"
+ */
+std::string dwarf_get_element_type(const char *type_name)
+{
+  if (!type_name || !*type_name) return "";
+  
+  std::string name_str(type_name);
+  
+  /* Handle array: type[] -> type */
+  size_t bracket_pos = name_str.find('[');
+  if (bracket_pos != std::string::npos) {
+    std::string elem_type = name_str.substr(0, bracket_pos);
+    while (!elem_type.empty() && isspace(elem_type.back())) elem_type.pop_back();
+    return elem_type;
+  }
+  
+  /* Handle pointer: remove one level of pointer
+   * e.g., "rect * *" -> "rect *", "int *" -> "int"
+   */
+  size_t last_star = name_str.rfind('*');
+  if (last_star != std::string::npos) {
+    std::string elem_type = name_str.substr(0, last_star);
+    /* Trim trailing whitespace */
+    while (!elem_type.empty() && isspace(elem_type.back())) elem_type.pop_back();
+    return elem_type;
+  }
+  
+  return "";
+}
+
 type_info dwarf_get_type_info(const char *type_name)
 {
+  if (!type_name || !*type_name) {
+    return {};
+  }
+  
+  std::string name_str(type_name);
+  std::string base_type;
+  bool is_array = false, is_pointer = false;
+  std::string array_size;
+  
+  parse_type_name(name_str, base_type, is_array, is_pointer, array_size);
+  
+  /* Handle array type name like "point[]" - construct a synthetic type_info */
+  if (is_array) {
+    type_info elem_info = dwarf_get_type_info(base_type.c_str());
+    type_info array_info;
+    array_info.name = type_name;
+    array_info.is_array = true;
+    array_info.element_type = base_type;
+    array_info.size = elem_info.size * (array_size.empty() ? 10 : std::stoi(array_size));
+    array_info.array_elements = array_size.empty() ? 10 : std::stoi(array_size);
+    return array_info;
+  }
+  
+  /* Handle pointer type - construct a synthetic type_info */
+  if (is_pointer) {
+    type_info ptr_info;
+    ptr_info.name = type_name;
+    ptr_info.is_pointer = true;
+    ptr_info.element_type = base_type;
+    ptr_info.size = 8;
+    ptr_info.is_struct = false;
+    ptr_info.is_array = false;
+    return ptr_info;
+  }
+  
+  /* First try the original type name */
   auto it = type_cache.find(type_name);
   if (it != type_cache.end()) {
     return it->second;
   }
   
-  /* Try to find and cache */
+  /* Try base type name */
+  it = type_cache.find(base_type);
+  if (it != type_cache.end()) {
+    return it->second;
+  }
+  
+  /* Try to find and cache base type */
   if (dbg) {
+    cache_type_by_name(dbg, base_type.c_str());
+    it = type_cache.find(base_type);
+    if (it != type_cache.end()) {
+      return it->second;
+    }
+  }
+  
+  /* Last resort: try the original name directly */
+  if (dbg && strcmp(type_name, base_type.c_str()) != 0) {
     cache_type_by_name(dbg, type_name);
     it = type_cache.find(type_name);
     if (it != type_cache.end()) {

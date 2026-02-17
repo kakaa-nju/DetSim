@@ -1,0 +1,30 @@
+{
+  "Loglevel": 0,
+  "Nodes": 1,
+  "Tracee": [
+    [
+      "./tests/expr_test",
+      "0"
+    ]
+  ],
+  "Addr": [
+    "192.168.0.1"
+  ],
+  "Assertions": [
+    "tracee0(g_int == 42)",
+    "tracee0(g_long == 123456789)",
+    "tracee0(g_char == 'A')",
+    "tracee0(g_int_arr[2] == 30)",
+    "tracee0(g_str[0] == 'H')",
+    "tracee0(*g_int_ptr == 42)",
+    "tracee0(g_basic.x == 100)",
+    "tracee0(g_basic.y == 200)",
+    "tracee0(g_basic_arr[1].y == 4)",
+    "tracee0(g_outer.in.value == 888)",
+    "tracee0(g_outer.in.name[0] == 'n')",
+    "tracee0(g_basic_ptr->x == 100)",
+    "tracee0(g_rect_ptr->br.x == 100)",
+    "tracee0(g_head->next->data == 2)",
+    "tracee0(g_head->next->next->data == 3)"
+  ]
+}

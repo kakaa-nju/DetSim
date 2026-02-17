@@ -2,6 +2,9 @@
 %{
 #define _GNU_SOURCE
 #include <cstring>
+#include <cstdio>
+
+/* Need full definition for %union */
 #include "expr_ast.hpp"
 
 int yylex(void);
@@ -21,7 +24,7 @@ extern const char* g_input_string;
 %token <int_val> NUMBER CHAR_LITERAL
 %token <str_val> IDENTIFIER TRACEE_N
 
-%token KW_SIZEOF KW_OFFSETOF KW_STRUCT KW_UNION KW_ENUM
+%token KW_SIZEOF KW_OFFSETOF KW_TYPEOF KW_STRUCT KW_UNION KW_ENUM
 %token KW_INT KW_CHAR KW_SHORT KW_LONG KW_FLOAT KW_DOUBLE KW_VOID
 %token KW_UNSIGNED KW_SIGNED KW_CONST KW_STATIC
 
@@ -171,6 +174,9 @@ unary_expr:
         delete $3;
         free($5);
     }
+    | KW_TYPEOF '(' expression ')' {
+        $$ = new TypeofNode($3);
+    }
     ;
 
 postfix_expr:
@@ -207,3 +213,6 @@ void yyerror(const char *s) {
 int yywrap() {
     return 1;
 }
+
+/* Include AST definitions after union declaration */
+#include "expr_ast.hpp"
