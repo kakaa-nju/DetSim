@@ -1056,6 +1056,15 @@ static int cmd_diff(char *args)
   sys_state state_a(hash_a);
   sys_state state_b(hash_b);
   
+  /* Load tracee_state for each process (sys_state only has ts_hash, not child data) */
+  for (int i = 0; i < NP; i++)
+  {
+    if (state_a.ts_hash[i] != 0)
+      state_a.child[i] = tracee_state(state_a.ts_hash[i]);
+    if (state_b.ts_hash[i] != 0)
+      state_b.child[i] = tracee_state(state_b.ts_hash[i]);
+  }
+  
   /* Print header */
   printf("\n=== State Diff: %s vs %s ===\n\n", 
          format_hash(hash_a).c_str(), format_hash(hash_b).c_str());
