@@ -50,6 +50,7 @@ void tcp_buffer::load(Archive &ar)
 {
   std::string s;
   ar(s);
+  ss.str("");  // Clear existing content
   ss << s;
 }
 

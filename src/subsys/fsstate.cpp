@@ -385,10 +385,18 @@ int FileSystemState::do_fstat(int fd, struct stat *statbuf) {
 #include "monitor.h"
 
 // Helper to read a null-terminated string from guest memory.
+// Returns empty string if guest_addr is 0 or string exceeds max length.
 static std::string read_guest_string(uintptr_t guest_addr) {
+  if (guest_addr == 0)
+    return "";
+  
   std::string str;
+  str.reserve(256);
   char ch;
+  size_t max_len = 4096; // Reasonable limit for path strings
   do {
+    if (str.length() >= max_len)
+      break;
     memcpy_guest2host(&ch, (void*)(guest_addr + str.length()), 1);
     if (ch != '\0') {
       str += ch;
@@ -398,6 +406,8 @@ static std::string read_guest_string(uintptr_t guest_addr) {
 }
 
 long emu_vfs_openat(int dirfd, const char *path_ptr, int flags, mode_t mode) {
+  if (!path_ptr)
+    return -EFAULT;
   std::string path = read_guest_string((uintptr_t)path_ptr);
   std::string resolved = ptmc_state.fs_states[ptmc_state.cursor].resolve_path(dirfd, path);
   return ptmc_state.fs_states[ptmc_state.cursor].do_open(resolved, flags, mode);
@@ -429,6 +439,8 @@ long emu_vfs_lseek(int fd, off_t offset, int whence) {
 }
 
 long emu_vfs_stat(const char *path_ptr, struct stat *statbuf) {
+  if (!path_ptr)
+    return -EFAULT;
   std::string path = read_guest_string((uintptr_t)path_ptr);
   
   struct stat host_statbuf;

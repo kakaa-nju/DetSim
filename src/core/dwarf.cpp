@@ -1084,6 +1084,14 @@ static uintptr_t eval_postfix(const std::vector<expr_token> &tokens,
       std::string member_name = tokens[pos].str;
       pos++;
       
+      /* Check if we have valid type info with members */
+      if (current_type.members.empty()) {
+        LOG_ERROR("Member '%s' accessed on non-struct type", 
+                  member_name.c_str());
+        success = false;
+        return 0;
+      }
+      
       /* Find member offset */
       ptrdiff_t offset = -1;
       for (const auto &m : current_type.members) {

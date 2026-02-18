@@ -30,8 +30,8 @@ struct type_info {
   /* For structs */
   struct member {
     std::string name;
-    size_t offset;
-    size_t size;
+    size_t offset = 0;
+    size_t size = 0;
     std::string type_name;
   };
   std::vector<member> members;
@@ -48,10 +48,10 @@ struct type_info {
 struct var_info {
   std::string name;
   std::string type_name;
-  uintptr_t address;      /* For global variables */
-  int stack_offset;       /* For local variables (from $rbp) */
-  bool is_global;
-  bool is_local;
+  uintptr_t address = 0;      /* For global variables */
+  int stack_offset = 0;       /* For local variables (from $rbp) */
+  bool is_global = false;
+  bool is_local = false;
 };
 
 /* ======================================================================

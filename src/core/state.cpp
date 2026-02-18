@@ -63,6 +63,7 @@ static void format_syscall_for_history(char *buf, hash_type ts_hash)
 {
   tracee_state ts(ts_hash);
   syscall_fmt::format(buf, &ts, &ts.si);
+  buf[1023] = '\0';  /* Ensure null termination */
 }
 
 void show_syscall_history()
@@ -292,7 +293,7 @@ void tracee_state::restore_memory_mappings(std::vector<maps_item> &maps_out)
             maps_item item = {};
             memset(&item, 0, sizeof(item));
             uint32_t offset, a, b, inode;
-            if (sscanf(line.c_str(), "%lx-%lx %s %x %d:%d %d %s",
+            if (sscanf(line.c_str(), "%lx-%lx %4s %x %d:%d %d %511s",
                        &item.start, &item.end, item.flags, &offset, &a, &b, &inode, item.name) >= 7) {
               maps_saved.push_back(item);
             }
@@ -524,7 +525,7 @@ void tracee_state::capture_memory_state()
     uint32_t offset;
     int a, b, inode;
     char name[64] = {};
-    sscanf(line, "%lx-%lx %s %x %d:%d %d %s", &start, &end, flags, &offset, &a,
+    sscanf(line, "%lx-%lx %4s %x %d:%d %d %63s", &start, &end, flags, &offset, &a,
            &b, &inode, name);
 
     if (flags[1] != 'w')
@@ -802,14 +803,16 @@ void *tracee_state::read_snapshot_mem(uint64_t addr, long size)
 
 void get_maps_item(std::vector<maps_item> &items, FILE *maps)
 {
-  maps_item item = {};
+  maps_item item;
   char line[1024];
-  while (fgets(line, 1024, maps) != NULL)
+  while (fgets(line, sizeof(line), maps) != NULL)
   {
     memset(&item, 0, sizeof(item));
-    sscanf(line, "%lx-%lx %s %x %d:%d %d %s", &item.start, &item.end,
-           item.flags, &item.offset, &item.a, &item.b, &item.inode, item.name);
-    items.emplace_back(item);
+    /* Use width-limited format specifiers to prevent buffer overflow */
+    if (sscanf(line, "%lx-%lx %4s %x %d:%d %d %511s", &item.start, &item.end,
+           item.flags, &item.offset, &item.a, &item.b, &item.inode, item.name) >= 7) {
+      items.emplace_back(item);
+    }
   }
 }
 

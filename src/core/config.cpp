@@ -51,7 +51,8 @@ void read_config(const char *cfg_file)
   FILE *cfg_fp = fopen(cfg_file, "r");
   Assert(cfg_fp, "Can not open '%s'", cfg_file);
 
-  fread(cfg_str, 4096, 1, cfg_fp);
+  size_t nread = fread(cfg_str, 1, sizeof(cfg_str) - 1, cfg_fp);
+  cfg_str[nread] = '\0';  /* Ensure null termination */
   fclose(cfg_fp);
   cJSON *cfg = cJSON_Parse(cfg_str);
   cJSON *Loglevel = cJSON_GetObjectItem(cfg, "Loglevel");
@@ -237,7 +238,7 @@ void read_config(const char *cfg_file)
     LOG_INFO("Done");
   }
 
-  free(cfg);
+  // cJSON_Delete(cfg);
 }
 
 int auto_mode = 0;

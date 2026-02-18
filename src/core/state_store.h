@@ -30,7 +30,7 @@ using hash_type = uint32_t;
  * ====================================================================== */
 
 struct StateEntry {
-    hash_type hash;
+    hash_type hash{0};  // Explicitly initialized
     
     // Uncompressed data (hot)
     std::vector<uint8_t> raw_data;
@@ -48,7 +48,7 @@ struct StateEntry {
     };
     std::atomic<State> state{State::RAW};
     
-    // For LRU
+    // For LRU - explicitly initialized
     std::atomic<uint64_t> last_access{0};
     
     // For async notification
@@ -56,7 +56,7 @@ struct StateEntry {
     std::mutex mutex;
     
     StateEntry() = default;
-    explicit StateEntry(hash_type h) : hash(h) {}
+    explicit StateEntry(hash_type h) : hash(h), state(State::RAW), last_access(0) {}
 };
 
 using StateEntryPtr = std::shared_ptr<StateEntry>;
@@ -115,7 +115,7 @@ private:
     std::unordered_map<hash_type, std::list<hash_type>::iterator> lru_index_;
     std::mutex lru_mutex_;
     
-    size_t current_memory_usage_{0};
+    std::atomic<size_t> current_memory_usage_{0};
     std::atomic<uint64_t> access_counter_{0};
     
     // Background I/O

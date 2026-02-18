@@ -255,7 +255,10 @@ static int cmd_load(char *args)
   /* match */
   std::vector<hash_type> s;
   DIR *dir = opendir("sstate");
-  assert(dir);
+  if (!dir) {
+    printf("Error: Cannot open sstate directory: %s\n", strerror(errno));
+    return 1;
+  }
   struct dirent *de;
   while ((de = readdir(dir)) != NULL)
   {
@@ -264,8 +267,9 @@ static int cmd_load(char *args)
     if (strstr(de->d_name, arg) == de->d_name)
     {
       hash_type hash;
-      sscanf(de->d_name, "%x", &hash);
-      s.push_back(hash);
+      if (sscanf(de->d_name, "%x", &hash) == 1) {
+        s.push_back(hash);
+      }
     }
   }
   closedir(dir);
@@ -308,17 +312,33 @@ static int cmd_batch(char *args)
 
   if (args == NULL)
   {
-    printf("No arguments!");
+    printf("No arguments!\n");
+    in_call = 0;
     return 1;
   }
-  if (access(args, R_OK))
+  
+  FILE *fp = fopen(args, "r");
+  if (!fp)
   {
-    printf("Please provide a filename\n");
+    printf("Cannot open file: %s\n", args);
+    in_call = 0;
     return 1;
   }
+  fclose(fp);
 
   int saved_fd = dup(fileno(stdin));
-  freopen(args, "r", stdin);
+  if (saved_fd < 0) {
+    printf("Failed to dup stdin\n");
+    in_call = 0;
+    return 1;
+  }
+  
+  if (!freopen(args, "r", stdin)) {
+    printf("Failed to reopen stdin with file: %s\n", args);
+    close(saved_fd);
+    in_call = 0;
+    return 1;
+  }
 
   ui_mainloop();
 
@@ -539,6 +559,8 @@ static int cmd_hexdump(char *args)
 static std::vector<hash_type> find_states_by_prefix(const char *prefix)
 {
   std::vector<hash_type> matches;
+  if (!prefix) return matches;
+  
   DIR *dir = opendir("sstate");
   if (!dir) return matches;
   
@@ -549,8 +571,9 @@ static std::vector<hash_type> find_states_by_prefix(const char *prefix)
     if (strstr(de->d_name, prefix) == de->d_name)
     {
       hash_type hash;
-      sscanf(de->d_name, "%x", &hash);
-      matches.push_back(hash);
+      if (sscanf(de->d_name, "%x", &hash) == 1) {
+        matches.push_back(hash);
+      }
     }
   }
   closedir(dir);
@@ -640,6 +663,11 @@ static void diff_tracee_state(const tracee_state &a, const tracee_state &b, int 
 /* Helper: Read registers from memory dump using StateStore */
 static bool read_regs_from_dump(hash_type ts_hash, struct user_regs_struct *regs)
 {
+  if (!regs) {
+    LOG_ERROR("Null regs pointer passed to read_regs_from_dump");
+    return false;
+  }
+  
   // Load state data from StateStore
   std::vector<uint8_t> data;
   ssize_t data_size = StateStore::instance().load(ts_hash, data);
@@ -655,7 +683,13 @@ static bool read_regs_from_dump(hash_type ts_hash, struct user_regs_struct *regs
     return false;
   }
   
-  StateDataHeader* header = (StateDataHeader*)data.data();
+  // Ensure proper alignment for header access
+  if (reinterpret_cast<uintptr_t>(data.data()) % alignof(StateDataHeader) != 0) {
+    LOG_ERROR("Misaligned state data for hash %08x", ts_hash);
+    return false;
+  }
+  
+  StateDataHeader* header = reinterpret_cast<StateDataHeader*>(data.data());
   if (header->magic != 0x4453544D) {
     LOG_ERROR("Invalid state data format for hash %08x: bad magic", ts_hash);
     return false;
@@ -668,12 +702,13 @@ static bool read_regs_from_dump(hash_type ts_hash, struct user_regs_struct *regs
   }
   
   // Read registers from the offset specified in header
-  if (header->regs_offset + sizeof(struct user_regs_struct) > data.size()) {
+  if (header->regs_offset > data.size() || 
+      header->regs_offset + sizeof(struct user_regs_struct) > data.size()) {
     LOG_ERROR("Invalid register offset in state data for hash %08x", ts_hash);
     return false;
   }
   
-  memcpy(regs, data.data() + header->regs_offset, sizeof(*regs));
+  memcpy(regs, data.data() + header->regs_offset, sizeof(struct user_regs_struct));
   return true;
 }
 
@@ -770,11 +805,22 @@ static bool load_state_data(hash_type ts_hash, std::vector<uint8_t> &data,
   
   if (data.size() < sizeof(StateDataHeader)) return false;
   
-  header = (StateDataHeader*)data.data();
+  // Ensure proper alignment
+  if (reinterpret_cast<uintptr_t>(data.data()) % alignof(StateDataHeader) != 0) {
+    return false;
+  }
+  
+  header = reinterpret_cast<StateDataHeader*>(data.data());
   if (header->magic != 0x4453544D) return false;
   if (header->version < 1 || header->version > 3) return false;
   
-  regions = (RegionInfo*)(data.data() + sizeof(StateDataHeader));
+  // Validate num_regions to prevent overflow
+  if (header->num_regions > 10000) return false;  // Sanity check
+  
+  size_t regions_size = static_cast<size_t>(header->num_regions) * sizeof(RegionInfo);
+  if (sizeof(StateDataHeader) + regions_size > data.size()) return false;
+  
+  regions = reinterpret_cast<RegionInfo*>(data.data() + sizeof(StateDataHeader));
   return true;
 }
 
@@ -911,23 +957,36 @@ static bool load_maps_from_state(hash_type ts_hash, std::vector<maps_item> &maps
             ts_hash, size, data.size());
   
   if (size > 0 && data.size() >= sizeof(StateDataHeader)) {
-    StateDataHeader* header = (StateDataHeader*)data.data();
+    // Ensure proper alignment for header access
+    if (reinterpret_cast<uintptr_t>(data.data()) % alignof(StateDataHeader) != 0) {
+      LOG_ERROR("Misaligned state data for hash %08x", ts_hash);
+      return false;
+    }
+    
+    StateDataHeader* header = reinterpret_cast<StateDataHeader*>(data.data());
     LOG_TRACE("  header: magic=%08x, version=%u, maps_offset=%lu, maps_size=%lu",
               header->magic, header->version, header->maps_offset, header->maps_size);
     
     if (header->magic == 0x4453544D && header->version >= 3 && header->maps_size > 0) {
       /* Extract maps from integrated data */
-      if (header->maps_offset + header->maps_size <= data.size()) {
-        const char* maps_text = (const char*)data.data() + header->maps_offset;
+      if (header->maps_offset <= data.size() && 
+          header->maps_offset + header->maps_size <= data.size()) {
+        const char* maps_text = reinterpret_cast<const char*>(data.data() + header->maps_offset);
         /* Parse the maps text */
         std::istringstream iss(std::string(maps_text, header->maps_size));
         std::string line;
         int parsed = 0;
         while (std::getline(iss, line)) {
-          maps_item item;
-          uint32_t offset, a, b, inode;
-          if (sscanf(line.c_str(), "%lx-%lx %s %x %d:%d %d %s",
+          maps_item item = {};  // Zero-initialize all fields
+          uint32_t offset = 0, a = 0, b = 0;
+          int inode = 0;
+          // Use %4s for flags (max 4 chars + null) and limit name to 511 chars
+          if (sscanf(line.c_str(), "%lx-%lx %4s %x %u:%u %d %511[^\n]",
                      &item.start, &item.end, item.flags, &offset, &a, &b, &inode, item.name) >= 7) {
+            item.offset = offset;
+            item.a = static_cast<int>(a);
+            item.b = static_cast<int>(b);
+            item.inode = inode;
             maps.push_back(item);
             parsed++;
           }
@@ -1294,8 +1353,8 @@ static int cmd_diff(char *args)
 void ui_mainloop()
 {
   printf("[DEBUG] ui_mainloop started, auto_mode=%d\n", is_auto_mode());
-  char lastbuf[256], lastcmd[256];
-  lastbuf[0] = lastcmd[0] = '\0';
+  char lastbuf[256] = {0};
+  char lastcmd[256] = {0};
   if (is_auto_mode())
   {
     printf("[DEBUG] Running cmd_c\n");
@@ -1306,14 +1365,19 @@ void ui_mainloop()
   for (char *str; (str = rl_gets()) != NULL;)
   {
     if (str[0] != 0)
-      strcpy(lastbuf, str);
+      strncpy(lastbuf, str, sizeof(lastbuf) - 1);
+    lastbuf[sizeof(lastbuf) - 1] = '\0';
+    
     char *str_end = str + strlen(str);
     /* extract the first token as the command */
     char *cmd = strtok(str, " ");
     if (cmd == NULL)
     {
-      strcpy(str, lastcmd);
-      cmd = strtok(str, " ");
+      // Copy lastcmd to str buffer safely for strtok
+      if (strlen(lastcmd) < 256) {
+        strcpy(str, lastcmd);
+        cmd = strtok(str, " ");
+      }
       if (cmd == NULL)
       {
         lastbuf[0] = lastcmd[0] = '\0';
@@ -1341,6 +1405,7 @@ void ui_mainloop()
 
     if (i == NR_CMD)
       printf("Unknown command '%s'\n", cmd);
-    strcpy(lastcmd, lastbuf);
+    strncpy(lastcmd, lastbuf, sizeof(lastcmd) - 1);
+    lastcmd[sizeof(lastcmd) - 1] = '\0';
   }
 }

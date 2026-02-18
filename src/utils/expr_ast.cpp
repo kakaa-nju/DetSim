@@ -329,7 +329,7 @@ EvalResult MemberAccessNode::eval_address(int pid, bool& success) const {
         return EvalResult(0L);
     }
     
-    EvalResult base_res;
+    EvalResult base_res(0L);
     std::string base_type;
     uint64_t base_addr = 0;
     

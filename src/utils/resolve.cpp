@@ -23,6 +23,7 @@ int resolve_rip_func(const char *exefile, uintptr_t rip)
   if (!dwfl_report_offline(dwfl, "", exefile, -1))
   {
     fprintf(stderr, "dwfl_report_offline failed: %s\n", dwfl_errmsg(-1));
+    dwfl_end(dwfl);
     return 1;
   }
 
@@ -32,6 +33,7 @@ int resolve_rip_func(const char *exefile, uintptr_t rip)
   if (!mod)
   {
     printf("\n");
+    dwfl_end(dwfl);
     return 1;
   }
 

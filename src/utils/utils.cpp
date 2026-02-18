@@ -29,7 +29,10 @@ namespace fs = std::filesystem;
 
 FILE *create_anonymous_tmp(const char *id, const char *mode)
 {
-  return fdopen(syscall(SYS_memfd_create, id, 0), mode);
+  int fd = syscall(SYS_memfd_create, id, 0);
+  if (fd < 0)
+    return NULL;
+  return fdopen(fd, mode);
 }
 
 hash_type crc32(FILE *fp);
@@ -48,6 +51,8 @@ hash_type compress_tmp_file(FILE *fin, const char *out_path, int level)
   if (!in_buf || !out_buf)
   {
     fprintf(stderr, "Memory allocation failed\n");
+    free(in_buf);
+    free(out_buf);
     return 1;
   }
 
@@ -94,6 +99,10 @@ FILE *decompress_file_tmp(const char *in_path)
   if (!in_buf || !out_buf)
   {
     fprintf(stderr, "Memory allocation failed\n");
+    free(in_buf);
+    free(out_buf);
+    fclose(fin);
+    fclose(fout);
     return NULL;
   }
 
@@ -185,9 +194,10 @@ int mkdir_p(const char *path)
   char *p = NULL;
   size_t len;
 
+  if (!path) return -1;
   snprintf(tmp, sizeof(tmp), "%s", path);
   len = strlen(tmp);
-  if (tmp[len - 1] == '/')
+  if (len > 0 && tmp[len - 1] == '/')
     tmp[len - 1] = '\0';
 
   for (p = tmp + 1; *p; p++)

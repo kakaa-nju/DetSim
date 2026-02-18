@@ -79,21 +79,37 @@ void format_fd_only(char *buf, syscall_info *info)
 /* Format: sendto */
 void format_sendto(char *buf, tracee_state *t, syscall_info *info)
 {
-  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
-  assert(mem);
+  /* Limit buffer size to prevent overflow - cap at 4KB for display */
+  size_t data_len = info->args[2];
+  if (data_len > 4096)
+    data_len = 4096;
+  
+  char *mem = (char *)t->read_snapshot_mem(info->args[1], data_len);
+  if (!mem) {
+    sprintf(buf, "%s(%ld, <error reading buffer>, %ld, %ld, <addr>, %ld) = %ld",
+            syscalls[info->nr], info->args[0], info->args[2], info->args[3],
+            info->args[5], info->rval);
+    return;
+  }
 
   int pos = sprintf(buf, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
 
-  pos += format_mem_content(buf + pos, mem, info->args[2]);
+  pos += format_mem_content(buf + pos, mem, data_len);
+
+  if (info->args[2] > 4096)
+    pos += sprintf(buf + pos, "...(%ld more bytes)", info->args[2] - 4096);
 
   pos += sprintf(buf + pos, "\", %ld, %ld, ", info->args[2], info->args[3]);
   free(mem);
 
   struct sockaddr_in *addr =
       (struct sockaddr_in *)t->read_snapshot_mem(info->args[4], info->args[5]);
-
-  pos += format_sockaddr(buf + pos, addr);
-  free(addr);
+  if (addr) {
+    pos += format_sockaddr(buf + pos, addr);
+    free(addr);
+  } else {
+    pos += sprintf(buf + pos, "<invalid addr>");
+  }
 
   sprintf(buf + pos, ", %ld) = %ld", info->args[5], info->rval);
 }
@@ -101,26 +117,49 @@ void format_sendto(char *buf, tracee_state *t, syscall_info *info)
 /* Format: recvfrom */
 void format_recvfrom(char *buf, tracee_state *t, syscall_info *info)
 {
-  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
-  assert(mem);
+  /* Limit displayed bytes to prevent buffer overflow - use return value if valid */
+  size_t display_len = info->rval;
+  if (display_len <= 0 || display_len > 4096)
+    display_len = (info->args[2] > 4096) ? 4096 : info->args[2];
+  
+  char *mem = (char *)t->read_snapshot_mem(info->args[1], display_len);
+  if (!mem) {
+    sprintf(buf, "%s(%ld, <error reading buffer>, %ld, %ld, <addr>, [%d]) = %ld",
+            syscalls[info->nr], info->args[0], info->args[2], info->args[3],
+            sizeof(socklen_t), info->rval);
+    return;
+  }
 
   int pos = sprintf(buf, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
 
-  pos += format_mem_content(buf + pos, mem, info->rval);
+  pos += format_mem_content(buf + pos, mem, display_len);
+
+  if (info->rval > 4096)
+    pos += sprintf(buf + pos, "...(%ld more bytes)", info->rval - 4096);
 
   pos += sprintf(buf + pos, "\", %ld, %ld, ", info->args[2], info->args[3]);
   free(mem);
 
   socklen_t *plen = (socklen_t *)t->read_snapshot_mem(info->args[5], sizeof(socklen_t));
+  if (!plen) {
+    pos += sprintf(buf + pos, "<invalid addrlen>, [?]) = %ld", info->rval);
+    return;
+  }
+  
   socklen_t addrlen = *plen;
 
   struct sockaddr_in *addr =
       (struct sockaddr_in *)t->read_snapshot_mem(info->args[4], addrlen);
 
-  pos += format_sockaddr(buf + pos, addr);
-  free(addr);
+  if (addr) {
+    pos += format_sockaddr(buf + pos, addr);
+    free(addr);
+  } else {
+    pos += sprintf(buf + pos, "<invalid addr>");
+  }
 
   sprintf(buf + pos, ", [%d]) = %ld", addrlen, info->rval);
+  free(plen);
 }
 
 /* Format: void *addr (brk/mmap style) */
@@ -139,8 +178,19 @@ void format_exit(char *buf, syscall_info *info)
 /* Format: openat */
 void format_openat(char *buf, tracee_state *t, syscall_info *info)
 {
-  char *path = (char *)t->read_snapshot_mem(info->args[1], 256);
-  assert(path);
+  /* Use a reasonable size for path display - protect against huge paths */
+  size_t path_len = 256;
+  char *path = (char *)t->read_snapshot_mem(info->args[1], path_len);
+  if (!path) {
+    sprintf(buf, "openat(%ld, <error reading path>, %ld, %ld) = %ld",
+            info->args[0], info->args[2], info->args[3], info->rval);
+    return;
+  }
+  
+  /* Ensure null termination within our buffer */
+  path[path_len - 1] = '\0';
+  /* Find actual string length if shorter */
+  size_t actual_len = strnlen(path, path_len);
 
   const char *flag_str = "";
   int flags = info->args[2];
@@ -161,7 +211,12 @@ void format_gettimeofday(char *buf, tracee_state *t, syscall_info *info)
 {
   struct timeval *tv = (struct timeval *)t->read_snapshot_mem(
       info->args[0], sizeof(struct timeval));
-  assert(tv);
+  if (!tv) {
+    sprintf(buf, "%s(%p, %p) = %ld <error reading timeval>",
+            syscalls[info->nr], (void *)info->args[0],
+            (void *)info->args[1], info->rval);
+    return;
+  }
 
   sprintf(buf, "%s({tv_sec=%ld, tv_usec=%ld}, %p) = %ld",
           syscalls[info->nr], tv->tv_sec, tv->tv_usec,
@@ -174,7 +229,12 @@ void format_clock_nanosleep(char *buf, tracee_state *t, syscall_info *info)
 {
   struct timespec *ts = (struct timespec *)t->read_snapshot_mem(
       info->args[2], sizeof(struct timespec));
-  assert(ts);
+  if (!ts) {
+    sprintf(buf, "clock_nanosleep(%ld, %ld, %p, %p) = %ld <error reading timespec>",
+            info->args[0], info->args[1], (void *)info->args[2],
+            (void *)info->args[3], info->rval);
+    return;
+  }
 
   sprintf(buf, "clock_nanosleep(%ld, %ld, {tv_sec=%ld, tv_nsec=%ld}, %p) = %ld",
           info->args[0], info->args[1], ts->tv_sec, ts->tv_nsec,

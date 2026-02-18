@@ -105,19 +105,38 @@ void remove_vdso(int pid)
   int zeroCount;
   long val;
 
+  errno = 0;
   pos = (size_t)ptrace(PTRACE_PEEKUSER, pid, sizeof(long) * RSP, NULL);
+  if (errno != 0) {
+    LOG_ERROR("remove_vdso: PTRACE_PEEKUSER failed for pid %d: %s", 
+              pid, strerror(errno));
+    return;
+  }
 
   /* skip to auxiliary vector */
   zeroCount = 0;
   while (zeroCount < 2)
   {
+    errno = 0;
     val = ptrace(PTRACE_PEEKDATA, pid, pos += 8, NULL);
+    if (errno != 0) {
+      LOG_ERROR("remove_vdso: PTRACE_PEEKDATA failed at %p: %s",
+                (void*)pos, strerror(errno));
+      return;
+    }
     if (val == 0)
       zeroCount++;
   }
 
   /* search the auxiliary vector for AT_SYSINFO_EHDR... */
+  errno = 0;
   val = ptrace(PTRACE_PEEKDATA, pid, pos += 8, NULL);
+  if (errno != 0) {
+    LOG_ERROR("remove_vdso: PTRACE_PEEKDATA failed at %p: %s",
+              (void*)pos, strerror(errno));
+    return;
+  }
+  
   while (1)
   {
     if (val == AT_NULL)
@@ -125,10 +144,22 @@ void remove_vdso(int pid)
     if (val == AT_SYSINFO_EHDR)
     {
       /* ... and overwrite it */
+      errno = 0;
       ptrace(PTRACE_POKEDATA, pid, pos, AT_IGNORE);
+      if (errno != 0) {
+        LOG_ERROR("remove_vdso: PTRACE_POKEDATA failed at %p: %s",
+                  (void*)pos, strerror(errno));
+      }
       break;
     }
-    val = ptrace(PTRACE_PEEKDATA, pid, pos += 16, NULL);
+    pos += 16;
+    errno = 0;
+    val = ptrace(PTRACE_PEEKDATA, pid, pos, NULL);
+    if (errno != 0) {
+      LOG_ERROR("remove_vdso: PTRACE_PEEKDATA failed at %p: %s",
+                (void*)pos, strerror(errno));
+      return;
+    }
   }
 }
 

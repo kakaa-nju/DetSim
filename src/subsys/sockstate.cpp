@@ -118,7 +118,7 @@ static int addr_to_node(const struct sockaddr_in *addr, socklen_t len)
       return i;
   }
   char addr_str[32];
-  inet_ntop(AF_INET, &addr->sin_addr, addr_str, len);
+  inet_ntop(AF_INET, &addr->sin_addr, addr_str, sizeof(addr_str));
   LOG_ERROR("Addr %s not found", addr_str);
   return -1;
 }

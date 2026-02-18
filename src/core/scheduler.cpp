@@ -75,7 +75,7 @@ syscall_info extract_one_syscall(pid_t pid)
    * distinguish normal traps from those caused by a system call. */
   int wstatus = 0;
   struct ptrace_syscall_info info;
-  syscall_info ret;
+  syscall_info ret = {};  /* Zero-initialize all fields */
 
   /* entry */
   ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);

@@ -6,8 +6,8 @@
 /* From scheduler.cpp */
 extern void apply_choose(const syscall_info &info, choose_out *out);
 
-choose_func choose_syswhat[450];
-int choose_many[450];
+choose_func choose_syswhat[450] = {};
+int choose_many[450] = {};
 
 int emu_gettimeofday(struct timeval *tv, struct timezone *tz)
 {
