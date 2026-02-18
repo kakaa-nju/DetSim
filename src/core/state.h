@@ -15,6 +15,27 @@
 #include "fsstate.h"
 
 /* ======================================================================
+ * State Data Format (shared with StateStore)
+ * ====================================================================== */
+
+struct StateDataHeader {
+    uint32_t magic;           // 'DSTM' = 0x4453544D
+    uint32_t version;         // 3 (updated for integrated mappings)
+    uint32_t num_regions;     // number of memory regions
+    uint64_t tstate_offset;   // offset to serialized tracee_state
+    uint64_t tstate_size;     // size of serialized tracee_state
+    uint64_t maps_offset;     // offset to mappings data (text format)
+    uint64_t maps_size;       // size of mappings data
+    uint64_t regs_offset;     // offset to register data
+};
+
+struct RegionInfo {
+    uint64_t start;
+    uint64_t end;
+    uint64_t offset;  // offset in data buffer
+};
+
+/* ======================================================================
  * Syscall Info Structure
  * ====================================================================== */
 
@@ -219,7 +240,7 @@ void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size);
  * ====================================================================== */
 
 void get_maps_item(std::vector<maps_item> &items, FILE *maps);
-bool mapping_exists(maps_item &a, std::vector<maps_item> array);
+bool mapping_exists(maps_item &a, std::vector<maps_item> &array);
 
 /* ======================================================================
  * Statistics

@@ -40,6 +40,7 @@ std::unique_ptr<FILE, file_closer> open_cfile(const std::string &path,
                                               const char *mode);
 std::string format_hash_filename(const std::string &dir, const std::string &ext,
                                  uint32_t hash);
+void ensure_directory_for_file(const std::string &path);
 std::unique_ptr<FILE, file_closer> open_map_file(hash_type hash,
                                                  const char *mode = "r");
 std::unique_ptr<FILE, file_closer> open_mem_file(hash_type hash,

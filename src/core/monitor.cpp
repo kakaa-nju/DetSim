@@ -13,6 +13,7 @@
 #include "guest.h"
 #include "scheduler.h"
 #include "utils.h"
+#include "state_store.h"
 #include <cjson/cJSON.h>
 #include <csignal>
 #include <dirent.h>
@@ -116,6 +117,9 @@ void init_monitor(int argc, char *argv[])
   init_regex();
 
   read_config(cfg_file);
+  
+  /* Initialize state store */
+  StateStore::instance().init();
 
   handle_sigint();
 
@@ -633,30 +637,44 @@ static void diff_tracee_state(const tracee_state &a, const tracee_state &b, int 
   if (syscall_diff) has_diff = true;
 }
 
-/* Helper: Read registers from memory dump */
+/* Helper: Read registers from memory dump using StateStore */
 static bool read_regs_from_dump(hash_type ts_hash, struct user_regs_struct *regs)
 {
-  auto mem_fp = fileutils::open_mem_file(ts_hash);
-  if (!mem_fp) return false;
+  // Load state data from StateStore
+  std::vector<uint8_t> data;
+  ssize_t data_size = StateStore::instance().load(ts_hash, data);
   
-  auto map_fp = fileutils::open_map_file(ts_hash);
-  if (!map_fp) return false;
-  
-  std::vector<maps_item> maps;
-  get_maps_item(maps, map_fp.get());
-  
-  /* Skip all memory regions to get to registers at the end */
-  for (auto &item : maps)
-  {
-    if (item.flags[1] == 'w' && item.start != available_memory)
-    {
-      fseek(mem_fp.get(), item.end - item.start, SEEK_CUR);
-    }
+  if (data_size < 0) {
+    LOG_ERROR("Cannot load state for hash %08x in read_regs_from_dump", ts_hash);
+    return false;
   }
   
-  /* Read registers */
-  size_t n = fread(regs, sizeof(*regs), 1, mem_fp.get());
-  return n == 1;
+  // Parse header
+  if (data.size() < sizeof(StateDataHeader)) {
+    LOG_ERROR("Invalid state data for hash %08x: too small", ts_hash);
+    return false;
+  }
+  
+  StateDataHeader* header = (StateDataHeader*)data.data();
+  if (header->magic != 0x4453544D) {
+    LOG_ERROR("Invalid state data format for hash %08x: bad magic", ts_hash);
+    return false;
+  }
+  
+  // Support versions 1, 2, and 3
+  if (header->version < 1 || header->version > 3) {
+    LOG_ERROR("Unsupported state data version %u for hash %08x", header->version, ts_hash);
+    return false;
+  }
+  
+  // Read registers from the offset specified in header
+  if (header->regs_offset + sizeof(struct user_regs_struct) > data.size()) {
+    LOG_ERROR("Invalid register offset in state data for hash %08x", ts_hash);
+    return false;
+  }
+  
+  memcpy(regs, data.data() + header->regs_offset, sizeof(*regs));
+  return true;
 }
 
 /* Helper: Compare registers */
@@ -743,67 +761,113 @@ static void hexdump_line(const unsigned char *data, size_t len, size_t offset,
   }
 }
 
-/* Helper: Compare memory content */
+/* Helper: Load state data and extract region info from StateStore */
+static bool load_state_data(hash_type ts_hash, std::vector<uint8_t> &data, 
+                            StateDataHeader* &header, RegionInfo* &regions)
+{
+  ssize_t size = StateStore::instance().load(ts_hash, data);
+  if (size < 0) return false;
+  
+  if (data.size() < sizeof(StateDataHeader)) return false;
+  
+  header = (StateDataHeader*)data.data();
+  if (header->magic != 0x4453544D) return false;
+  if (header->version < 1 || header->version > 3) return false;
+  
+  regions = (RegionInfo*)(data.data() + sizeof(StateDataHeader));
+  return true;
+}
+
+/* Helper: Get pointer to region data in loaded state */
+static const uint8_t* get_region_ptr(const std::vector<uint8_t> &data, 
+                                     StateDataHeader* header, RegionInfo* regions,
+                                     uint32_t region_idx)
+{
+  if (region_idx >= header->num_regions) return nullptr;
+  uint64_t offset = regions[region_idx].offset;
+  if (offset >= data.size()) return nullptr;
+  return data.data() + offset;
+}
+
+/* Helper: Find region index by start address */
+static int find_region_by_start(StateDataHeader* header, RegionInfo* regions, uint64_t start)
+{
+  for (uint32_t i = 0; i < header->num_regions; i++) {
+    if (regions[i].start == start) return i;
+  }
+  return -1;
+}
+
+/* Helper: Compare memory content using StateStore */
 static void diff_memory_content(hash_type ts_a, hash_type ts_b, 
                                  const maps_item &map_a, const maps_item &map_b,
                                  int proc_id, int max_diff, bool &has_diff)
 {
-  auto mem_a = fileutils::open_mem_file(ts_a);
-  auto mem_b = fileutils::open_mem_file(ts_b);
-  if (!mem_a || !mem_b) return;
+  /* Load state data from StateStore */
+  std::vector<uint8_t> data_a, data_b;
+  StateDataHeader *header_a = nullptr, *header_b = nullptr;
+  RegionInfo *regions_a = nullptr, *regions_b = nullptr;
   
-  /* Seek to this region in both files */
-  auto map_a_fp = fileutils::open_map_file(ts_a);
-  auto map_b_fp = fileutils::open_map_file(ts_b);
-  if (!map_a_fp || !map_b_fp) return;
-  
-  std::vector<maps_item> maps_a, maps_b;
-  get_maps_item(maps_a, map_a_fp.get());
-  get_maps_item(maps_b, map_b_fp.get());
-  
-  /* Calculate offset in memory file */
-  size_t offset_a = 0, offset_b = 0;
-  for (auto &m : maps_a)
-  {
-    if (m.start == map_a.start) break;
-    if (m.flags[1] == 'w' && m.start != available_memory)
-      offset_a += m.end - m.start;
+  if (!load_state_data(ts_a, data_a, header_a, regions_a)) {
+    LOG_ERROR("Failed to load state A for hash %08x", ts_a);
+    return;
   }
-  for (auto &m : maps_b)
-  {
-    if (m.start == map_b.start) break;
-    if (m.flags[1] == 'w' && m.start != available_memory)
-      offset_b += m.end - m.start;
+  if (!load_state_data(ts_b, data_b, header_b, regions_b)) {
+    LOG_ERROR("Failed to load state B for hash %08x", ts_b);
+    return;
   }
   
-  fseek(mem_a.get(), offset_a, SEEK_SET);
-  fseek(mem_b.get(), offset_b, SEEK_SET);
+  /* Find regions */
+  int idx_a = find_region_by_start(header_a, regions_a, map_a.start);
+  int idx_b = find_region_by_start(header_b, regions_b, map_b.start);
+  if (idx_a < 0 || idx_b < 0) {
+    LOG_TRACE("Region not found: map_a.start=%lx, map_b.start=%lx", map_a.start, map_b.start);
+    return;
+  }
+  
+  /* Get region data pointers */
+  const uint8_t* ptr_a = get_region_ptr(data_a, header_a, regions_a, idx_a);
+  const uint8_t* ptr_b = get_region_ptr(data_b, header_b, regions_b, idx_b);
+  if (!ptr_a || !ptr_b) {
+    LOG_ERROR("Failed to get region pointer");
+    return;
+  }
+  
+  /* Calculate region sizes */
+  size_t size_a = regions_a[idx_a].end - regions_a[idx_a].start;
+  size_t size_b = regions_b[idx_b].end - regions_b[idx_b].start;
+  size_t size = std::min(size_a, size_b);
+  
+  LOG_TRACE("Comparing region %lx-%lx, size_a=%zu, size_b=%zu", 
+            map_a.start, map_a.end, size_a, size_b);
   
   /* Compare content */
-  size_t size = std::min(map_a.end - map_a.start, map_b.end - map_b.start);
   size_t chunk_size = 4096;
   std::vector<unsigned char> buf_a(chunk_size), buf_b(chunk_size);
   
   int diff_count = 0;
   bool header_printed = false;
+  int total_diff_in_region = 0;
   
   for (size_t pos = 0; pos < size && diff_count < max_diff; pos += chunk_size)
   {
     size_t to_read = std::min(chunk_size, size - pos);
-    size_t n_a = fread(buf_a.data(), 1, to_read, mem_a.get());
-    size_t n_b = fread(buf_b.data(), 1, to_read, mem_b.get());
     
-    if (n_a != n_b) break;
+    memcpy(buf_a.data(), ptr_a + pos, to_read);
+    memcpy(buf_b.data(), ptr_b + pos, to_read);
     
-    for (size_t i = 0; i < n_a && diff_count < max_diff; i += 16)
+    for (size_t i = 0; i < to_read && diff_count < max_diff; i += 16)
     {
-      size_t line_len = std::min((size_t)16, n_a - i);
+      size_t line_len = std::min((size_t)16, to_read - i);
       if (memcmp(buf_a.data() + i, buf_b.data() + i, line_len) != 0)
       {
+        total_diff_in_region++;
+        
         if (!header_printed)
         {
           printf("  [Process %d - Memory: %s 0x%lx-0x%lx]\n", 
-                 proc_id, map_a.name, map_a.start, map_a.end);
+                 proc_id, map_a.name[0] ? map_a.name : "[anonymous]", 
+                 map_a.start, map_a.end);
           header_printed = true;
           has_diff = true;
         }
@@ -822,23 +886,89 @@ static void diff_memory_content(hash_type ts_a, hash_type ts_b,
     }
   }
   
-  if (diff_count >= max_diff && header_printed)
+  if (header_printed)
   {
-    printf("    ... (showing first %d differences, use --max-diff=N to show more)\n", max_diff);
+    if (diff_count >= max_diff)
+    {
+      printf("    ... (showing first %d of %d differences, use --max-diff=N to show more)\n", 
+             max_diff, total_diff_in_region);
+    }
+    else if (total_diff_in_region > 0)
+    {
+      printf("    (total %d differences in this region)\n", total_diff_in_region);
+    }
   }
+}
+
+/* Helper: Load maps from StateStore (version 3 with integrated maps) or fallback to file */
+static bool load_maps_from_state(hash_type ts_hash, std::vector<maps_item> &maps)
+{
+  /* Try to load from StateStore */
+  std::vector<uint8_t> data;
+  ssize_t size = StateStore::instance().load(ts_hash, data);
+  
+  LOG_TRACE("load_maps_from_state: hash=%08x, size=%zd, data.size=%zu", 
+            ts_hash, size, data.size());
+  
+  if (size > 0 && data.size() >= sizeof(StateDataHeader)) {
+    StateDataHeader* header = (StateDataHeader*)data.data();
+    LOG_TRACE("  header: magic=%08x, version=%u, maps_offset=%lu, maps_size=%lu",
+              header->magic, header->version, header->maps_offset, header->maps_size);
+    
+    if (header->magic == 0x4453544D && header->version >= 3 && header->maps_size > 0) {
+      /* Extract maps from integrated data */
+      if (header->maps_offset + header->maps_size <= data.size()) {
+        const char* maps_text = (const char*)data.data() + header->maps_offset;
+        /* Parse the maps text */
+        std::istringstream iss(std::string(maps_text, header->maps_size));
+        std::string line;
+        int parsed = 0;
+        while (std::getline(iss, line)) {
+          maps_item item;
+          uint32_t offset, a, b, inode;
+          if (sscanf(line.c_str(), "%lx-%lx %s %x %d:%d %d %s",
+                     &item.start, &item.end, item.flags, &offset, &a, &b, &inode, item.name) >= 7) {
+            maps.push_back(item);
+            parsed++;
+          }
+        }
+        LOG_TRACE("  Parsed %d maps entries from integrated data", parsed);
+        return !maps.empty();
+      } else {
+        LOG_ERROR("  maps_offset(%lu) + maps_size(%lu) > data.size(%zu)",
+                  header->maps_offset, header->maps_size, data.size());
+      }
+    } else {
+      LOG_TRACE("  Not version 3 or no maps: magic=%08x, version=%u, maps_size=%lu",
+                header->magic, header->version, header->maps_size);
+    }
+  }
+  
+  /* Fallback to .maps file for legacy compatibility */
+  LOG_TRACE("  Falling back to .maps file for hash %08x", ts_hash);
+  auto map_fp = fileutils::open_map_file(ts_hash);
+  if (map_fp) {
+    get_maps_item(maps, map_fp.get());
+    LOG_TRACE("  Loaded %zu maps from file", maps.size());
+    return !maps.empty();
+  }
+  
+  LOG_ERROR("  Failed to load maps for hash %08x", ts_hash);
+  return false;
 }
 
 /* Helper: Compare memory mappings */
 static void diff_memory(hash_type ts_a, hash_type ts_b, int proc_id, 
                         int max_diff, bool &has_diff)
 {
-  auto map_a = fileutils::open_map_file(ts_a);
-  auto map_b = fileutils::open_map_file(ts_b);
-  if (!map_a || !map_b) return;
-  
+  /* Load maps from StateStore or file */
+  LOG_TRACE("diff_memory of tshash %x/%x, has_diff = %s",
+      ts_a, ts_b, has_diff ? "true" : "false");
   std::vector<maps_item> maps_a, maps_b;
-  get_maps_item(maps_a, map_a.get());
-  get_maps_item(maps_b, map_b.get());
+  if (!load_maps_from_state(ts_a, maps_a) || !load_maps_from_state(ts_b, maps_b)) {
+  assert(0);
+    return;
+  }
   
   /* Find mapping differences */
   std::set<uint64_t> starts_a, starts_b;
@@ -896,14 +1026,26 @@ static void diff_memory(hash_type ts_a, hash_type ts_b, int proc_id,
   }
   
   /* Compare content of common mappings */
+  int regions_compared = 0;
+  int regions_with_diff = 0;
+  
   for (auto start : starts_a)
   {
     if (starts_b.find(start) != starts_b.end())
     {
+      regions_compared++;
+      bool region_has_diff = false;
       diff_memory_content(ts_a, ts_b, map_a_by_start[start], map_b_by_start[start],
-                          proc_id, max_diff, has_diff);
+                          proc_id, max_diff, region_has_diff);
+      if (region_has_diff) {
+        regions_with_diff++;
+        has_diff = true;
+      }
     }
   }
+  
+  LOG_TRACE("Process %d: compared %d regions, %d with differences", 
+            proc_id, regions_compared, regions_with_diff);
 }
 
 /* Helper: Compare FileSystemState */
@@ -1085,7 +1227,7 @@ static int cmd_diff(char *args)
     bool ts_same = state_a.ts_hash[i] == state_b.ts_hash[i];
     bool exited_same = state_a.exited[i] == state_b.exited[i];
     
-    printf("  Process %d: ts_hash %s %s, exited=%s/%s %s\n",
+    printf("  Process %d: ts_hash %s/%s %s, exited=%s/%s %s\n",
            i,
            format_hash(state_a.ts_hash[i]).c_str(),
            format_hash(state_b.ts_hash[i]).c_str(),

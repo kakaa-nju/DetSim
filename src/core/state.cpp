@@ -1,23 +1,16 @@
 /*
  * state.cpp - State management
- *
- * This module handles:
- * - Global state variables (state tree, queue, set)
- * - State creation from running processes
- * - State persistence (save/load to disk)
- * - State recovery (restore running process from snapshot)
- * - Memory operations for state capture/restore
  */
 
 #include "state.h"
 #include "syscall_fmt.h"
 #include "cereal/archives/binary.hpp"
-#include "common.h"
 #include "debug.h"
 #include "fsstate.h"
 #include "guest.h"
 #include "monitor.h"
 #include "utils.h"
+#include "state_store.h"
 #include <assert.h>
 #include <ctime>
 #include <dirent.h>
@@ -192,167 +185,223 @@ int sys_state::save_metadata()
   return 0;
 }
 
-/* Load sys_state from disk by hash */
-sys_state::sys_state(hash_type hash)
-{
-  ss_hash = hash;
-  std::string path = fileutils::format_hash_filename("sstate", ".ss", ss_hash);
-
-  auto ifs_opt = fileutils::open_ifstream(path);
-  if (!ifs_opt)
-  {
-    LOG_CRIT("Cannot read metadata from %s", path.c_str());
-  }
-
-  cereal::BinaryInputArchive inputArchive(*ifs_opt);
-  inputArchive(*this);
-}
-
-/* Serialize to stream (for memory dump) */
-void tracee_state::serialize_to_stream(FILE *fp)
-{
-  std::stringstream ofs;
-  cereal::BinaryOutputArchive outputArchive(ofs);
-  outputArchive(*this);
-  fwrite(ofs.str().c_str(), ofs.str().length(), 1, fp);
-}
-
-/* Serialize to disk file */
 void tracee_state::serialize_to_disk()
 {
-  std::string path = fileutils::format_hash_filename("tstate", ".ts", ts_hash);
-  auto ofs_opt = fileutils::open_ofstream(path);
-  if (!ofs_opt)
-  {
-    LOG_CRIT("failed to open tstate file for ts_hash = %08x", ts_hash);
-    return;
-  }
-  cereal::BinaryOutputArchive outputArchive(*ofs_opt);
-  outputArchive(*this);
+  // Now integrated into capture_memory_state, no separate file needed
+  // This function is kept for compatibility but does nothing
 }
 
 /* ======================================================================
  * Section 5: State Recovery (restore running process from snapshot)
  * ====================================================================== */
 
-void sys_state::recover_shared_files()
-{
-  for (auto &shared_file : ptmc_state.shared_files)
-  {
-    auto sfs_filename =
-        fileutils::format_hash_filename("filesystem", ".sfs/", ss_hash) +
-        shared_file;
-    fileutils::copy_file(sfs_filename, shared_file);
-  }
-}
-
-void sys_state::recover_running_state()
-{
-  recover_shared_files();
-  for (int i = 0; i < NP; i++)
-  {
-    child[i] = tracee_state(ts_hash[i]);
-
-    if (exited[i] == 1)
-      continue;
-
-    child[i].recover_running_state(i);
-  }
-}
-
-/* Load tracee_state from disk */
+/* Load tracee_state from integrated StateStore data */
 tracee_state::tracee_state(hash_type hash)
 {
-  ts_hash = hash;
-  LOG_DEBUG("restore tracee_state = " HASH_FORMAT, hash);
-
-  std::string path = fileutils::format_hash_filename("tstate", ".ts", hash);
-  auto ifs_opt = fileutils::open_ifstream(path);
-
-  if (!ifs_opt)
-  {
-    LOG_CRIT("Open traceeState file failed");
-    exit(errno);
+  // Load integrated data from StateStore
+  std::vector<uint8_t> data;
+  ssize_t data_size = StateStore::instance().load(hash, data);
+  
+  if (data_size < 0) {
+    LOG_CRIT("Cannot load tracee_state for hash %08x", hash);
+    return;
   }
-  cereal::BinaryInputArchive inputArchive(*ifs_opt);
-  inputArchive(*this);
+  
+  // Parse header
+  if (data.size() < sizeof(StateDataHeader)) {
+    LOG_CRIT("Invalid state data for hash %08x: too small", hash);
+    return;
+  }
+  
+  StateDataHeader* header = (StateDataHeader*)data.data();
+  if (header->magic != 0x4453544D) {
+    LOG_CRIT("Invalid state data for hash %08x: bad magic", hash);
+    return;
+  }
+  
+  // Deserialize tracee_state from integrated data
+  if (header->version >= 2 && header->tstate_size > 0) {
+    if (header->tstate_offset + header->tstate_size <= data.size()) {
+      std::istringstream iss(std::string(
+        (char*)data.data() + header->tstate_offset, header->tstate_size));
+      try {
+        cereal::BinaryInputArchive ar(iss);
+        ar(*this);
+      } catch (...) {
+        LOG_ERROR("Failed to deserialize tracee_state for hash %08x", hash);
+      }
+    }
+  } else {
+    // Fallback: load from separate .ts file (legacy)
+    std::string path = fileutils::format_hash_filename("tstate", ".ts", hash);
+    auto ifs_opt = fileutils::open_ifstream(path);
+    if (ifs_opt) {
+      try {
+        cereal::BinaryInputArchive inputArchive(*ifs_opt);
+        inputArchive(*this);
+      } catch (...) {
+        LOG_ERROR("Failed to load tracee_state from legacy file %s", path.c_str());
+      }
+    }
+  }
+  
+  ts_hash = hash;  // Set the hash explicitly
+}
 
-  LOG_DEBUG("Deserialize: %d buffers", udp_buffer_list.size());
-  for (auto &b : udp_buffer_list)
-  {
-    LOG_DEBUG("Deserialize: %d messages", b.second.size());
+/* Load sys_state from disk by hash */
+sys_state::sys_state(hash_type hash)
+{
+  ss_hash = hash;
+  std::string path = fileutils::format_hash_filename("sstate", ".ss", hash);
+  auto ifs_opt = fileutils::open_ifstream(path);
+  
+  if (ifs_opt) {
+    try {
+      cereal::BinaryInputArchive inputArchive(*ifs_opt);
+      inputArchive(*this);
+    } catch (...) {
+      LOG_CRIT("Failed to load sys_state from %s", path.c_str());
+    }
+  }
+  
+  // Load child states from integrated data
+  for (int i = 0; i < NP; i++) {
+    if (!exited[i]) {
+      child[i] = tracee_state(ts_hash[i]);
+    }
   }
 }
 
-/* Recover memory mappings for brk */
 void tracee_state::restore_memory_mappings(std::vector<maps_item> &maps_out)
 {
+  /* Load saved mappings from StateStore */
+  std::vector<maps_item> maps_saved;
+  {
+    std::vector<uint8_t> data;
+    ssize_t size = StateStore::instance().load(ts_hash, data);
+    
+    if (size > 0 && data.size() >= sizeof(StateDataHeader)) {
+      StateDataHeader* header = (StateDataHeader*)data.data();
+      /* Try to read from integrated maps text (version 3+) */
+      if (header->magic == 0x4453544D && header->version >= 3 && header->maps_size > 0) {
+        if (header->maps_offset + header->maps_size <= data.size()) {
+          const char* maps_text = (const char*)data.data() + header->maps_offset;
+          std::istringstream iss(std::string(maps_text, header->maps_size));
+          std::string line;
+          while (std::getline(iss, line)) {
+            maps_item item = {};
+            memset(&item, 0, sizeof(item));
+            uint32_t offset, a, b, inode;
+            if (sscanf(line.c_str(), "%lx-%lx %s %x %d:%d %d %s",
+                       &item.start, &item.end, item.flags, &offset, &a, &b, &inode, item.name) >= 7) {
+              maps_saved.push_back(item);
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  if (maps_saved.empty()) {
+    /* Fallback: load from separate .maps file */
+    LOG_WARN("StateStore includes no mappings for tshash = %x", ts_hash);
+    std::string maps_path = fileutils::format_hash_filename("mappings", ".maps", ts_hash);
+    auto maps_fp = fileutils::open_cfile(maps_path, "r");
+    if (maps_fp) {
+      get_maps_item(maps_saved, maps_fp.get());
+    }
+  }
+  
+  /* Get current mappings */
+  std::string maps_path = fmt::format("/proc/{}/maps", pid);
+  auto maps_fp = fileutils::open_cfile(maps_path, "r");
   std::vector<maps_item> maps_old;
-  maps_out.clear();
-
-  std::string current_path = fmt::format("/proc/{}/maps", pid);
-  auto current_maps_fp = fileutils::open_cfile(current_path, "r");
-  if (!current_maps_fp)
-  {
-    LOG_CRIT("Failed to open %s", current_path.c_str());
-    return;
+  if (maps_fp) {
+    get_maps_item(maps_old, maps_fp.get());
   }
-
-  auto origin_maps_fp = fileutils::open_map_file(ts_hash);
-  if (!origin_maps_fp)
-  {
-    LOG_CRIT("Failed to open mapping file for hash %08x", ts_hash);
-    return;
-  }
-
-  get_maps_item(maps_old, current_maps_fp.get());
-  get_maps_item(maps_out, origin_maps_fp.get());
-
+  
+  LOG_DEBUG("new maps has %d and old maps has %d items", maps_saved.size(), maps_old.size());
+  
+  /* Unmap regions that exist in current but not in saved */
   for (auto &item_old : maps_old)
   {
-    if (!mapping_exists(item_old, maps_out))
+    LOG_TRACE("old item: [%lx-%lx] %s", item_old.start, item_old.end, item_old.name);
+    if (!mapping_exists(item_old, maps_saved))
     {
       tracee_do_munmap(pid, item_old.start, item_old.end);
     }
   }
-
-  for (auto &item_new : maps_out)
+  
+  /* Map regions that exist in saved but not in current */
+  for (auto &item_new : maps_saved)
   {
+    LOG_TRACE("new item: [%lx-%lx] %s", item_new.start, item_new.end, item_new.name);
     if (!mapping_exists(item_new, maps_old))
     {
       tracee_do_mmap(pid, item_new.start, item_new.end);
     }
   }
-
-  tracee_do_syscall(pid, SYS_brk, brk, 0, 0, 0, 0, 0);
-  LOG_DEBUG("recovered brk = 0x%x", brk);
+  
+  /* Return saved mappings for further processing */
+  maps_out = maps_saved;
 }
 
-/* Recover file descriptors */
 void tracee_state::recover_file_descriptors(int index)
 {
-  return;
+  // TODO
 }
 
-/* Recover memory and registers from snapshot */
+/* Recover memory and registers from snapshot using StateStore */
 void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps)
 {
-  auto dump_fp = fileutils::open_mem_file(ts_hash);
-  if (!dump_fp)
-  {
-    LOG_CRIT("Cannot open dump memory for %08x", ts_hash);
+  // Load integrated data from StateStore
+  std::vector<uint8_t> data;
+  ssize_t data_size = StateStore::instance().load(ts_hash, data);
+  
+  if (data_size < 0) {
+    LOG_CRIT("Cannot load state for hash %08x", ts_hash);
     return;
   }
-
+  
+  // Parse header
+  if (data.size() < sizeof(StateDataHeader)) {
+    LOG_CRIT("Invalid state data for hash %08x: too small", ts_hash);
+    return;
+  }
+  
+  StateDataHeader* header = (StateDataHeader*)data.data();
+  if (header->magic != 0x4453544D) {
+    LOG_CRIT("Invalid state data format for hash %08x", ts_hash);
+    return;
+  }
+  
+  RegionInfo* regions = (RegionInfo*)(data.data() + sizeof(StateDataHeader));
+  
   /* Read current rseq structure to preserve it */
   void *rseq = malloc(rseq_len[pid]);
   tracee_read_mem(pid, rseq_struct[pid], rseq, rseq_len[pid]);
 
-  for (auto &item : maps)
-  {
-    if (item.flags[1] != 'w' || item.start == available_memory)
+  // Restore each region using the header info
+  for (uint32_t i = 0; i < header->num_regions; i++) {
+    uint64_t start = regions[i].start;
+    uint64_t end = regions[i].end;
+    uint64_t offset = regions[i].offset;
+    ssize_t size = end - start;
+    
+    if (size <= 0) continue;
+    
+    // Check if this region is still valid in current maps
+    bool valid = false;
+    for (auto &item : maps) {
+      if (item.start <= start && end <= item.end && item.flags[1] == 'w') {
+        valid = true;
+        break;
+      }
+    }
+    if (!valid) {
+      LOG_WARN("Region %lx-%lx not found in current maps, skipping", start, end);
       continue;
-    ssize_t size = item.end - item.start;
+    }
 
     if (size > membufsz)
     {
@@ -361,19 +410,28 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps)
       membuf = (bytes *)malloc(membufsz);
     }
 
-    fread(membuf, 1, size, dump_fp.get());
-    tracee_write_mem(pid, (void *)item.start, membuf, size);
+    // Read from loaded data
+    if (offset + size <= (ssize_t)data.size()) {
+      memcpy(membuf, data.data() + offset, size);
+      tracee_write_mem(pid, (void *)start, membuf, size);
+    }
 
-    LOG_TRACE("Restore mem %p-%p", (void *)item.start, (void *)item.end);
+    LOG_TRACE("Restore mem %p-%p", (void *)start, (void *)end);
   }
 
   /* Restore the preserved rseq structure */
   tracee_write_mem(pid, rseq_struct[pid], rseq, rseq_len[pid]);
   free(rseq);
 
-  struct user_regs_struct regs;
-  fread(&regs, sizeof(regs), 1, dump_fp.get());
-  ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+  // Read registers from data
+  if (header->regs_offset + sizeof(struct user_regs_struct) <= data.size()) {
+    struct user_regs_struct regs;
+    memcpy(&regs, data.data() + header->regs_offset, sizeof(regs));
+    ptrace(PTRACE_SETREGS, pid, NULL, &regs);
+    LOG_TRACE("Restored registers for hash %08x", ts_hash);
+  } else {
+    LOG_ERROR("Invalid register offset in state data for hash %08x", ts_hash);
+  }
 }
 
 void tracee_state::recover_proc_files()
@@ -386,6 +444,10 @@ void tracee_state::recover_running_state(int index)
 {
   std::vector<maps_item> maps;
   restore_memory_mappings(maps);
+
+  /* Restore brk (heap) - must be done before restoring memory content */
+  tracee_do_syscall(pid, SYS_brk, brk, 0, 0, 0, 0, 0);
+  LOG_DEBUG("restored brk = 0x%x", brk);
 
   /* Goes before file descriptors */
   recover_proc_files();
@@ -438,7 +500,7 @@ void state_tree_add(sys_state *s, sys_state *t, int which, int choose)
 
 uint64_t crc32(FILE *fp);
 
-/* Capture memory and registers, create snapshot */
+/* Capture memory, registers, and tracee_state, store via StateStore */
 void tracee_state::capture_memory_state()
 {
   std::string maps_path = fmt::format("/proc/{}/maps", pid);
@@ -450,9 +512,10 @@ void tracee_state::capture_memory_state()
     exit(1);
   }
 
-  FILE *dump = create_anonymous_tmp("dump", "r+b");
-  assert(dump);
-
+  // First pass: collect region info
+  std::vector<RegionInfo> regions;
+  std::vector<std::vector<uint8_t>> region_data;
+  
   char line[1024];
   while (fgets(line, sizeof(line), maps_fp.get()))
   {
@@ -491,42 +554,121 @@ void tracee_state::capture_memory_state()
     if ((uintptr_t)rseq_struct[pid] >= start &&
         (uintptr_t)rseq_struct[pid] < end)
     {
-      uintptr_t offset = (uintptr_t)rseq_struct[pid] - start;
-      memset(membuf + offset, 0x55, rseq_len[pid]);
+      uintptr_t rseq_offset = (uintptr_t)rseq_struct[pid] - start;
+      memset(membuf + rseq_offset, 0x55, rseq_len[pid]);
     }
 
-    fwrite(membuf, region_size, 1, dump);
+    RegionInfo info;
+    info.start = start;
+    info.end = end;
+    regions.push_back(info);
+    
+    std::vector<uint8_t> data(region_size);
+    memcpy(data.data(), membuf, region_size);
+    region_data.push_back(std::move(data));
+    
     LOG_TRACE("dump %lx-%lx, %s", start, end, name);
   }
 
+  // Serialize tracee_state (without ts_hash - will be set after save)
+  std::vector<uint8_t> tstate_data;
+  {
+    std::ostringstream oss;
+    {
+      cereal::BinaryOutputArchive ar(oss);
+      ar(*this);
+    }
+    std::string str = oss.str();
+    tstate_data.assign(str.begin(), str.end());
+  }
+  
+  // Read mappings data from /proc/PID/maps
+  // Note: procfs files don't support fseek/ftell, must read until EOF
+  std::vector<uint8_t> maps_data;
+  {
+    std::string maps_path = fmt::format("/proc/{}/maps", pid);
+    LOG_TRACE("Reading maps from %s", maps_path.c_str());
+    FILE* maps_fp = fopen(maps_path.c_str(), "r");
+    if (maps_fp) {
+      char buffer[4096];
+      size_t total_read = 0;
+      while (!feof(maps_fp)) {
+        size_t n = fread(buffer, 1, sizeof(buffer), maps_fp);
+        if (n > 0) {
+          maps_data.insert(maps_data.end(), buffer, buffer + n);
+          total_read += n;
+        }
+        if (ferror(maps_fp) && !feof(maps_fp)) {
+          LOG_ERROR("Error reading maps file");
+          break;
+        }
+      }
+      fclose(maps_fp);
+      LOG_TRACE("Maps data read: %zu bytes, data size: %zu", total_read, maps_data.size());
+    } else {
+      LOG_ERROR("Failed to open %s", maps_path.c_str());
+    }
+  }
+  
+  // Get registers
   struct user_regs_struct regs;
   ptrace(PTRACE_GETREGS, pid, NULL, &regs);
-  fwrite(&regs, sizeof(regs), 1, dump);
-
-  serialize_to_stream(dump);
-
-  int footprint = rand();
-  std::string tmp_name = fmt::format("/tmp/{:08x}.mem.zstd", footprint);
-  hash_type hash = compress_tmp_file(dump, tmp_name.c_str(), 1);
-  fclose(dump);
-
-  while (true)
-  {
-    std::string dest =
-        fileutils::format_hash_filename("memory", ".mem.zstd", hash);
-    if (!fileutils::file_exists(dest))
-      break;
-    if (!filecmp(dest.c_str(), tmp_name.c_str()))
-      goto done;
-    hash++;
+  
+  // Build final buffer with header
+  size_t header_size = sizeof(StateDataHeader);
+  size_t regions_size = regions.size() * sizeof(RegionInfo);
+  size_t tstate_size = tstate_data.size();
+  size_t maps_size = maps_data.size();
+  size_t data_size = 0;
+  for (auto& rd : region_data) {
+    data_size += rd.size();
   }
+  
+  size_t total_size = header_size + regions_size + tstate_size + maps_size + data_size + sizeof(regs);
+  std::vector<uint8_t> all_data(total_size);
+  
+  // Fill header
+  StateDataHeader* header = (StateDataHeader*)all_data.data();
+  header->magic = 0x4453544D;  // 'DSTM'
+  header->version = 3;          // Version 3 with integrated mappings
+  header->num_regions = regions.size();
+  header->tstate_offset = header_size + regions_size;
+  header->tstate_size = tstate_size;
+  header->maps_offset = header_size + regions_size + tstate_size;
+  header->maps_size = maps_size;
+  header->regs_offset = header_size + regions_size + tstate_size + maps_size + data_size;
+  
+  // Fill region info
+  RegionInfo* region_infos = (RegionInfo*)(all_data.data() + header_size);
+  size_t current_offset = header_size + regions_size + tstate_size + maps_size;
+  for (size_t i = 0; i < regions.size(); i++) {
+    region_infos[i].start = regions[i].start;
+    region_infos[i].end = regions[i].end;
+    region_infos[i].offset = current_offset;
+    
+    // Copy region data
+    memcpy(all_data.data() + current_offset, region_data[i].data(), region_data[i].size());
+    current_offset += region_data[i].size();
+  }
+  
+  // Copy tstate data
+  memcpy(all_data.data() + header->tstate_offset, tstate_data.data(), tstate_size);
+  
+  // Copy maps data
+  if (maps_size > 0) {
+    memcpy(all_data.data() + header->maps_offset, maps_data.data(), maps_size);
+    LOG_TRACE("Copied maps data: offset=%lu, size=%zu", header->maps_offset, maps_size);
+  }
+  
+  // Copy registers
+  memcpy(all_data.data() + header->regs_offset, &regs, sizeof(regs));
 
-  fileutils::copy_file(
-      tmp_name, fileutils::format_hash_filename("memory", ".mem.zstd", hash));
-
-done:
-  fileutils::remove_file(tmp_name);
-  ts_hash = hash;
+  // Store via StateStore - returns immediately with hash
+  // Background thread handles compression and disk write
+  ts_hash = StateStore::instance().save(all_data.data(), all_data.size());
+  
+  LOG_DEBUG("StateStore saved hash %08x, size=%zu, regions=%zu, tstate=%zu, maps=%zu", 
+            ts_hash, all_data.size(), regions.size(), tstate_size, maps_size);
 }
 
 /* ======================================================================
@@ -539,9 +681,7 @@ tracee_state::tracee_state(int which, struct syscall_info *info)
   /* Save syscall info */
   si = *info;
   pid = ptmc_state.pids[which];
-
-  /* Save file descriptors */
-  get_file_descriptors();
+  LOG_TRACE("tracee_state constructor: which=%d, pid=%d", which, pid);
 
   /* Save subsystems */
   sock_list = ptmc_state.sock_lists[which];
@@ -560,11 +700,9 @@ void tracee_state::get_file_descriptors()
 
 void tracee_state::save_mappings()
 {
-  std::string src = fmt::format("/proc/{}/maps", pid);
-  std::string dest =
-      fileutils::format_hash_filename("mappings", ".maps", ts_hash);
-
-  fileutils::copy_file(src, dest);
+  // Mappings are now integrated into the main state data by capture_memory_state()
+  // This function is kept for API compatibility but does nothing
+  LOG_TRACE("Mappings already integrated into state data for hash %08x", ts_hash);
 }
 
 void tracee_state::save_proc_files()
@@ -579,13 +717,13 @@ void tracee_state::save_full_state()
   brk = tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
   LOG_DEBUG("recorded brk = 0x%x", brk);
 
-  /* Capture memory state */
+  /* Capture memory state (includes tstate) */
   capture_memory_state();
 
-  /* Save mappings */
+  /* Save mappings via StateStore */
   save_mappings();
 
-  /* Serialize structure */
+  /* Serialize structure - now integrated into capture_memory_state */
   serialize_to_disk();
 
   /* Save files */
@@ -596,52 +734,60 @@ void tracee_state::save_full_state()
  * Section 9: Memory Operations
  * ====================================================================== */
 
-/* Read memory from snapshot by hash */
+/* Read memory from snapshot by hash using StateStore */
 void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size)
 {
   bytes *ret = (bytes *)malloc(size + 1);
   ret[size] = 0;
 
-  auto maps_fp = fileutils::open_map_file(ts_hash);
-  if (!maps_fp)
-  {
-    LOG_CRIT("Cannot open map file for hash %08x", ts_hash);
-    return nullptr;
+  // Load state data from StateStore
+  std::vector<uint8_t> data;
+  ssize_t data_size = StateStore::instance().load(ts_hash, data);
+  
+  if (data_size < 0) {
+    LOG_CRIT("Cannot load state for hash %08x in read_mem", ts_hash);
+    // Fallback: try reading from live process
+    tracee_read_mem(pid, (void *)addr, ret, size);
+    return ret;
   }
-  std::vector<maps_item> items;
-  get_maps_item(items, maps_fp.get());
-
-  auto mem_fp = fileutils::open_mem_file(ts_hash);
-  if (!mem_fp)
-  {
-    LOG_CRIT("Cannot open memory dump file for hash %08x", ts_hash);
-    return nullptr;
+  
+  // Parse header
+  if (data.size() < sizeof(StateDataHeader)) {
+    LOG_CRIT("Invalid state data for hash %08x", ts_hash);
+    tracee_read_mem(pid, (void *)addr, ret, size);
+    return ret;
   }
-
-  for (auto &item : items)
-  {
-    if (item.start > addr || addr >= item.end)
-    {
-      if (item.flags[1] == 'w' && item.start != available_memory)
-        fseek(mem_fp.get(), item.end - item.start, SEEK_CUR);
-      continue;
-    }
-
-    if (item.flags[1] == 'w' && item.start != available_memory)
-    {
-      fseek(mem_fp.get(), addr - item.start, SEEK_CUR);
-      fread(ret, 1, size, mem_fp.get());
-      LOG_TRACE("read addr %p from memory dump", (void *)addr);
-    }
-    else
-    {
-      /* Use process_vm_readv instead of /proc/pid/mem */
-      tracee_read_mem(pid, (void *)addr, ret, size);
-      LOG_TRACE("read addr %p from process_vm_readv", (void *)addr);
-    }
-    break;
+  
+  StateDataHeader* header = (StateDataHeader*)data.data();
+  if (header->magic != 0x4453544D) {
+    LOG_CRIT("Invalid state data format for hash %08x", ts_hash);
+    tracee_read_mem(pid, (void *)addr, ret, size);
+    return ret;
   }
-
+  
+  RegionInfo* regions = (RegionInfo*)(data.data() + sizeof(StateDataHeader));
+  
+  // Find region containing addr
+  for (uint32_t i = 0; i < header->num_regions; i++) {
+    if (regions[i].start <= addr && addr < regions[i].end) {
+      uint64_t offset_in_region = addr - regions[i].start;
+      uint64_t data_offset = regions[i].offset + offset_in_region;
+      size_t bytes_available = regions[i].end - addr;
+      size_t bytes_to_copy = std::min((size_t)size, bytes_available);
+      
+      if (data_offset + bytes_to_copy <= data.size()) {
+        memcpy(ret, data.data() + data_offset, bytes_to_copy);
+        LOG_TRACE("read addr %p from state data (region %u)", (void *)addr, i);
+      } else {
+        LOG_ERROR("Data offset out of bounds for addr %p", (void *)addr);
+      }
+      return ret;
+    }
+  }
+  
+  // Region not found in saved state, try live process
+  LOG_TRACE("addr %p not in saved state, reading from live process", (void *)addr);
+  tracee_read_mem(pid, (void *)addr, ret, size);
   return ret;
 }
 
@@ -656,10 +802,11 @@ void *tracee_state::read_snapshot_mem(uint64_t addr, long size)
 
 void get_maps_item(std::vector<maps_item> &items, FILE *maps)
 {
-  maps_item item;
+  maps_item item = {};
   char line[1024];
   while (fgets(line, 1024, maps) != NULL)
   {
+    memset(&item, 0, sizeof(item));
     sscanf(line, "%lx-%lx %s %x %d:%d %d %s", &item.start, &item.end,
            item.flags, &item.offset, &item.a, &item.b, &item.inode, item.name);
     items.emplace_back(item);
@@ -671,7 +818,7 @@ static bool maps_item_eq(maps_item &a, maps_item &b)
   return a.start == b.start && a.end == b.end;
 }
 
-bool mapping_exists(maps_item &a, std::vector<maps_item> array)
+bool mapping_exists(maps_item &a, std::vector<maps_item> &array)
 {
   /* heap is managed by SYS_brk */
   if (!strcmp(a.name, "[heap]"))
@@ -686,23 +833,30 @@ bool mapping_exists(maps_item &a, std::vector<maps_item> array)
 }
 
 /* ======================================================================
- * Section 11: Statistics
+ * Section 12: Statistics
  * ====================================================================== */
 
-void state_stats_print()
+void show_state_stats()
 {
-  printf("=== State Statistics ===\n");
-  printf("Queue size:   %zu\n", state_queue.size());
-  printf("Tree nodes:   %zu\n", state_tree.size());
-  printf("States found: %zu\n", state_set.size());
-  printf("=======================\n");
+  printf("State set size: %zu\n", state_set.size());
+  printf("Queue size:     %zu\n", state_queue.size());
 }
 
 /* ======================================================================
- * Initialization
+ * Section 11: sys_state Recovery
  * ====================================================================== */
 
-__attribute__((constructor)) void init_membuf()
+void sys_state::recover_shared_files()
 {
-  membuf = (bytes *)malloc(membufsz);
+  // TODO
+}
+
+void sys_state::recover_running_state()
+{
+  for (int i = 0; i < NP; i++) {
+    if (!exited[i]) {
+      child[i].recover_running_state(i);
+    }
+  }
+  recover_shared_files();
 }

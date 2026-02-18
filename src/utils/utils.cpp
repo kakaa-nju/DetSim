@@ -24,7 +24,7 @@
 
 namespace fs = std::filesystem;
 
-#define CHUNK_SIZE 16 KiB
+#define CHUNK_SIZE 128 KiB
 #define BUFFER_SIZE 8 KiB
 
 FILE *create_anonymous_tmp(const char *id, const char *mode)
@@ -425,6 +425,17 @@ std::unique_ptr<FILE, file_closer> open_state_file(hash_type hash,
 {
   std::string filename = format_hash_filename(prefix, ext, hash);
   return open_cfile(filename, "rb");
+}
+
+void ensure_directory_for_file(const std::string &path)
+{
+  size_t last_slash = path.find_last_of('/');
+  if (last_slash != std::string::npos) {
+    std::string dir = path.substr(0, last_slash);
+    if (!fs::exists(dir)) {
+      fs::create_directories(dir);
+    }
+  }
 }
 
 } // namespace fileutils
