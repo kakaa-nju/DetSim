@@ -3,7 +3,7 @@
  *
  * This module provides direct interaction with tracee processes via ptrace:
  * - Register read/write
- * - Memory read/write (via /proc/pid/mem)
+ * - Memory read/write (via process_vm_readv/process_vm_writev)
  * - System call injection
  * - Memory mapping operations
  * - Stack backtrace (libunwind)
@@ -133,39 +133,39 @@ void remove_vdso(int pid)
 }
 
 /* ======================================================================
- * Section 4: Memory Access (via /proc/pid/mem)
+ * Section 4: Memory Access (via process_vm_readv/process_vm_writev)
  * ====================================================================== */
+
+#include <sys/uio.h>
+#include <sys/syscall.h>
+
+static inline struct iovec make_iovec(void *base, size_t len)
+{
+  struct iovec iov = { base, len };
+  return iov;
+}
 
 void tracee_write_mem(int pid, void *addr, const void *data, int len)
 {
-  std::string path = fmt::format("/proc/{}/mem", pid);
-  auto mem_fp = fileutils::open_cfile(path, "w");
-  if (!mem_fp)
-  {
-    LOG_CRIT("Cannot open %s for read", path.c_str());
-    return;
-  }
+  struct iovec local = make_iovec((void *)data, len);
+  struct iovec remote = make_iovec(addr, len);
 
-  fseek(mem_fp.get(), (uintptr_t)addr, SEEK_SET);
-  int size = fwrite(data, 1, len, mem_fp.get());
-  assert(size == len);
+  ssize_t n = syscall(SYS_process_vm_writev, pid, &local, 1, &remote, 1, 0);
+  if (n != len)
+  {
+    LOG_CRIT("process_vm_writev failed for pid %d at %p: %s", pid, addr, strerror(errno));
+  }
 }
 
-__attribute__((unused)) void tracee_read_mem(int pid, const void *addr,
-                                             void *data, int len)
+void tracee_read_mem(int pid, const void *addr, void *data, int len)
 {
-  std::string path = fmt::format("/proc/{}/mem", pid);
-  auto mem_fp = fileutils::open_cfile(path, "r");
-  if (!mem_fp)
-  {
-    LOG_CRIT("Cannot open %s for read", path.c_str());
-    return;
-  }
+  struct iovec local = make_iovec(data, len);
+  struct iovec remote = make_iovec((void *)addr, len);
 
-  fseek(mem_fp.get(), (uintptr_t)addr, SEEK_SET);
-  int size = fread(data, 1, len, mem_fp.get());
-  if (size != len) {
-    LOG_ERROR("Failed to read memory at %p: expected %d bytes, got %d", addr, len, size);
+  ssize_t n = syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0);
+  if (n != len)
+  {
+    LOG_ERROR("process_vm_readv failed for pid %d at %p: %s", pid, addr, strerror(errno));
     memset(data, 0, len);
   }
 }

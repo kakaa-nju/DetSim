@@ -29,6 +29,7 @@
 #include <string.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 #include <sys/user.h>
 
 /* ======================================================================
@@ -343,17 +344,9 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps)
     return;
   }
 
-  std::string mem_path = fmt::format("/proc/{}/mem", pid);
-  auto mem_fp = fileutils::open_cfile(mem_path, "r+");
-  if (!mem_fp)
-  {
-    LOG_CRIT("Cannot open /proc/%d/mem for write", pid);
-    return;
-  }
-
+  /* Read current rseq structure to preserve it */
   void *rseq = malloc(rseq_len[pid]);
-  fseek(mem_fp.get(), (uintptr_t)rseq_struct[pid], SEEK_SET);
-  fread(rseq, rseq_len[pid], 1, mem_fp.get());
+  tracee_read_mem(pid, rseq_struct[pid], rseq, rseq_len[pid]);
 
   for (auto &item : maps)
   {
@@ -369,14 +362,13 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps)
     }
 
     fread(membuf, 1, size, dump_fp.get());
-    fseek(mem_fp.get(), item.start, SEEK_SET);
-    fwrite(membuf, 1, size, mem_fp.get());
+    tracee_write_mem(pid, (void *)item.start, membuf, size);
 
     LOG_TRACE("Restore mem %p-%p", (void *)item.start, (void *)item.end);
   }
 
-  fseek(mem_fp.get(), (uintptr_t)rseq_struct[pid], SEEK_SET);
-  fwrite(rseq, rseq_len[pid], 1, mem_fp.get());
+  /* Restore the preserved rseq structure */
+  tracee_write_mem(pid, rseq_struct[pid], rseq, rseq_len[pid]);
   free(rseq);
 
   struct user_regs_struct regs;
@@ -450,13 +442,11 @@ uint64_t crc32(FILE *fp);
 void tracee_state::capture_memory_state()
 {
   std::string maps_path = fmt::format("/proc/{}/maps", pid);
-  std::string mem_path = fmt::format("/proc/{}/mem", pid);
 
   auto maps_fp = fileutils::open_cfile(maps_path, "r");
-  auto mem_fp = fileutils::open_cfile(mem_path, "r");
-  if (!maps_fp || !mem_fp)
+  if (!maps_fp)
   {
-    LOG_CRIT("Failed to open /proc/{}/maps or mem", pid);
+    LOG_CRIT("Failed to open /proc/{}/maps", pid);
     exit(1);
   }
 
@@ -487,8 +477,16 @@ void tracee_state::capture_memory_state()
       membuf = (bytes *)malloc(membufsz);
     }
 
-    fseek(mem_fp.get(), start, SEEK_SET);
-    fread(membuf, region_size, 1, mem_fp.get());
+    /* Use process_vm_readv instead of /proc/pid/mem */
+    struct iovec local = { membuf, region_size };
+    struct iovec remote = { (void *)start, region_size };
+    ssize_t n = syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0);
+    if ((size_t)n != region_size)
+    {
+      LOG_ERROR("process_vm_readv failed for region %p-%p: %s", 
+                (void *)start, (void *)end, strerror(errno));
+      memset(membuf, 0, region_size);
+    }
 
     if ((uintptr_t)rseq_struct[pid] >= start &&
         (uintptr_t)rseq_struct[pid] < end)
@@ -637,17 +635,9 @@ void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size)
     }
     else
     {
-      std::string proc_path = fmt::format("/proc/{}/mem", pid);
-      auto proc_fp = fileutils::open_cfile(proc_path, "r");
-      if (!proc_fp)
-      {
-        LOG_CRIT("Failed to open %s", proc_path.c_str());
-        free(ret);
-        return nullptr;
-      }
-      fseek(proc_fp.get(), addr, SEEK_SET);
-      fread(ret, 1, size, proc_fp.get());
-      LOG_TRACE("read addr %p from procfs", (void *)addr);
+      /* Use process_vm_readv instead of /proc/pid/mem */
+      tracee_read_mem(pid, (void *)addr, ret, size);
+      LOG_TRACE("read addr %p from process_vm_readv", (void *)addr);
     }
     break;
   }
