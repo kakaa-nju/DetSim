@@ -64,10 +64,7 @@ typedef struct tracee_state
   uintptr_t brk;
   struct timeval tv;
   FileSystemState fs_state;
-  std::list<ptmc_sock> sock_list;
-
-  std::unordered_map<int, tcp_buffer> tcp_buffer_list;
-  std::unordered_map<int, udp_buffer> udp_buffer_list;
+  SockState sock_state;
 
   /* ---------------------------------------------------------
    * Constructors

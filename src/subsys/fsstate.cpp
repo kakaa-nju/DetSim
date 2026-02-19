@@ -5,6 +5,7 @@
 #include "cereal/types/string.hpp"
 #include "cereal/types/vector.hpp"
 #include "debug.h"
+#include "monitor.h"
 #include <fcntl.h>
 #include <string.h>
 #include <time.h>
@@ -37,16 +38,18 @@ template <class Archive> void OpenFileDescription::serialize(Archive &ar) {
 }
 
 template <class Archive> void FileSystemState::serialize(Archive &ar) {
-  ar(CEREAL_NVP(filesystem), CEREAL_NVP(open_files), CEREAL_NVP(next_fd));
+  /* Note: fd_manager_ is shared and not serialized per instance */
+  ar(filesystem, open_files);
 }
 
 /* --- FileSystemState Method Implementations --- */
 
 int FileSystemState::get_new_fd() {
-  while (open_files.count(next_fd)) {
-    next_fd++;
+  if (!fd_manager_) {
+    LOG_ERROR("FdManager not set!");
+    return -1;
   }
-  return next_fd;
+  return fd_manager_->allocate_fd(FdType::FILE);
 }
 
 static std::string join_paths(const std::string &base, const std::string &rel) {

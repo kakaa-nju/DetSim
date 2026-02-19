@@ -206,6 +206,7 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
                          (socklen_t *)info->args[5]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
+      return CKPT_YES;
       if (ret >= 0) /* for willemt/raft, a `poll_msg` cycle will recv() until
                        nothing can be received */
       {
@@ -228,17 +229,15 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
       info->rval = ret;
       return CKPT_YES;
     case SYS_socket:
-      ret = tracee_do_open(pid, "/dev/null", O_RDWR);
+      ret = emu_socket(info->args[0], info->args[1], info->args[2]);
       tracee_set_rax(pid, ret);
-      tracee_set_orig_rax(pid, ret);
       info->rval = ret;
-      emu_socket(ret, info->args[0], info->args[1], info->args[2]);
       return CKPT_YES;
     case SYS_listen:
       ret = emu_listen(info->args[0], info->args[1]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_bind:
       ret = emu_bind(info->args[0], (const struct sockaddr *)info->args[1],
                      info->args[2]);
@@ -248,10 +247,9 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
     case SYS_connect:
       ret = emu_connect(info->args[0], (const struct sockaddr *)info->args[1],
                         info->args[2]);
-      tracee_do_open(pid, "/dev/null", O_RDWR);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
 
     case SYS_chdir: {
       // Read the path string from the tracee memory and update cwd on success
@@ -694,6 +692,14 @@ void init_state()
     start_tracee(NP - 1);
 
   printf("Instance #pid = %d\n", getpid());
+
+  /* Initialize FdManagers and link to states */
+  for (int i = 0; i < NP; i++)
+  {
+    ptmc_state.fd_managers[i] = std::make_shared<FdManager>();
+    ptmc_state.fs_states[i].set_fd_manager(ptmc_state.fd_managers[i]);
+    ptmc_state.sock_states[i].set_fd_manager(ptmc_state.fd_managers[i]);
+  }
 
   /* here goes to first state */
   /* initialize tracees' state */

@@ -1,115 +1,232 @@
+/*
+ * sockstate.h - Socket state management for detsim
+ */
+
 #ifndef __SOCKSTATE_H
 #define __SOCKSTATE_H
 
-#include <arpa/inet.h>
+#include "common.h"
+#include "fd_manager.h"
 #include <deque>
+#include <map>
+#include <memory>
+#include <netinet/in.h>
 #include <sstream>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
-// #include "utils.h"
 #include <string>
+#include <sys/socket.h>
+#include <unordered_map>
+#include <vector>
 
-/* System global. Always in tracer so can be very big */
-#define MAXADDR 128
-#define MAXCHAN 128
+/* Guest memory operations - defined in guest.cpp */
+extern void *memcpy_host2guest(void *dest, const void *src, size_t n);
+extern void *memcpy_guest2host(void *dest, const void *src, size_t n);
 
-/* design goal: support unix socket, udp and tcp:
- * AF_UNIX; AF_INET/SOCK_DGRAM & SOCK_STREAM
+/* ==============================================================================
+ * Socket Address Utilities
+ * ============================================================================== */
 
- * Valid socket types in the UNIX domain are: SOCK_STREAM, for a
- * stream-oriented socket; SOCK_DGRAM, for a datagram-oriented
- * socket that preserves message boundaries (as on most UNIX
- * implementations, UNIX domain datagram sockets are always reliable
- * and don't reorder datagrams) */
+/* Convert sockaddr_in to display string: "ip:port" */
+std::string format_sockaddr(const struct sockaddr_in &addr);
 
-/* For AF_UNIX, sockaddr_un may easily exceed tens of bytes.
- * It's so susceptible.
- * Maybe need to manage all sockaddr in one place.
- * That comes with another problem: is this socket new created? */
+/* Parse address string to sockaddr_in */
+bool parse_sockaddr(const std::string &str, struct sockaddr_in &addr);
 
-/* length variable */
-typedef std::string ptmc_addr;
+/* ==============================================================================
+ * Socket State Structures
+ * ============================================================================== */
 
-enum
-{
-  TCP_TYPE = 1,
-  UDP_TYPE
+/* Represents a single socket */
+struct Socket {
+    int fd;                     // File descriptor (allocated by FdManager)
+    int domain;                 // AF_INET, AF_UNIX, etc.
+    int type;                   // SOCK_STREAM, SOCK_DGRAM
+    int protocol;               // Protocol number (usually 0)
+    
+    // Binding state
+    bool bound;
+    struct sockaddr_in local_addr;
+    
+    // Connection state (for TCP)
+    bool connected;
+    bool listening;
+    struct sockaddr_in peer_addr;
+    
+    // For TCP listen: backlog queue
+    int backlog;
+    std::deque<int> pending_connections;  // FDs of incoming connections
+    
+    Socket() : fd(-1), domain(0), type(0), protocol(0), 
+               bound(false), connected(false), listening(false), 
+               backlog(0) {}
+    
+    template <class Archive>
+    void serialize(Archive &ar);
 };
 
-struct tcp_buffer
-{
-  std::stringstream ss;
-
-  template <class Archive>
-  void save(Archive &ar) const;
-  template <class Archive>
-  void load(Archive &ar);
-
-  tcp_buffer() {}
-
-  tcp_buffer(const tcp_buffer &b) { ss << b.ss.str(); }
-  tcp_buffer &operator=(const tcp_buffer &b)
-  {
-    ss << b.ss.str();
-    return *this;
-  }
+/* UDP datagram structure */
+struct UdpDatagram {
+    std::string content;        // Payload
+    struct sockaddr_in from;    // Source address
+    
+    template <class Archive>
+    void serialize(Archive &ar);
 };
 
-struct ptmc_datagram
-{
-  std::string content;
-  ptmc_addr from;
-
-  template <class Archive>
-  void serialize(Archive &ar);
+/* TCP connection state */
+struct TcpConnection {
+    int local_fd;               // Local socket fd
+    int peer_fd;                // Peer socket fd (in other process)
+    int peer_pid;               // Peer process ID
+    
+    struct sockaddr_in local_addr;
+    struct sockaddr_in peer_addr;
+    
+    // Data buffers
+    std::deque<std::string> send_buffer;  // Data to be sent
+    std::deque<std::string> recv_buffer;  // Data received
+    
+    template <class Archive>
+    void serialize(Archive &ar);
 };
 
-typedef std::deque<ptmc_datagram> udp_buffer;
+/* ==============================================================================
+ * SockState - Main Socket State Manager
+ * ============================================================================== */
 
-/* TODO: udp not sequential */
+class SockState {
+public:
+    SockState() = default;
+    explicit SockState(FdManagerPtr fd_mgr) : fd_manager_(fd_mgr) {}
+    
+    /* Set the fd manager (must be called before using allocate_fd) */
+    void set_fd_manager(FdManagerPtr fd_mgr) { fd_manager_ = fd_mgr; }
+    
+    /* --------------------------------------------------------------------------
+     * Syscall Implementations
+     * -------------------------------------------------------------------------- */
+    
+    /* socket(domain, type, protocol) -> fd or -errno */
+    int do_socket(int domain, int type, int protocol);
+    
+    /* bind(fd, addr, addrlen) -> 0 or -errno */
+    int do_bind(int fd, const struct sockaddr *addr, socklen_t addrlen);
+    
+    /* listen(fd, backlog) -> 0 or -errno */
+    int do_listen(int fd, int backlog);
+    
+    /* connect(fd, addr, addrlen) -> 0 or -errno (TCP only) */
+    int do_connect(int fd, const struct sockaddr *addr, socklen_t addrlen);
+    
+    /* accept(fd, addr, addrlen) -> new_fd or -errno (TCP only) */
+    int do_accept(int fd, struct sockaddr *addr, socklen_t *addrlen);
+    
+    /* sendto(fd, buf, len, flags, dest_addr, addrlen) -> bytes_sent or -errno */
+    ssize_t do_sendto(int fd, const void *buf, size_t len, int flags,
+                      const struct sockaddr *dest_addr, socklen_t addrlen);
+    
+    /* recvfrom(fd, buf, len, flags, src_addr, addrlen) -> bytes_recv or -errno */
+    ssize_t do_recvfrom(int fd, void *buf, size_t len, int flags,
+                        struct sockaddr *src_addr, socklen_t *addrlen);
+    
+    /* close(fd) -> 0 or -errno */
+    int do_close(int fd);
+    
+    /* getsockname(fd, addr, addrlen) -> 0 or -errno */
+    int do_getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen);
+    
+    /* getpeername(fd, addr, addrlen) -> 0 or -errno */
+    int do_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen);
+    
+    /* --------------------------------------------------------------------------
+     * Cross-Process Message Delivery (for UDP)
+     * -------------------------------------------------------------------------- */
+    
+    /* Deliver a UDP datagram to this process's receive buffer */
+    void deliver_udp_datagram(int recv_fd, const UdpDatagram &dg);
+    
+    /* Check if a socket fd is valid */
+    bool is_valid_socket(int fd) const;
+    
+    /* Get socket info (for debugging) */
+    const Socket *get_socket(int fd) const;
+    
+    /* Get UDP buffer size for a fd */
+    size_t get_udp_buffer_size(int fd) const;
+    
+    /* Access all sockets (for serialization/debug) */
+    const std::unordered_map<int, Socket> &sockets() const { return sockets_; }
+    std::unordered_map<int, Socket> &sockets() { return sockets_; }
+    
+    /* Add a socket with specific fd (used by emu_socket) */
+    void add_socket(const Socket &sock) { sockets_[sock.fd] = sock; }
+    
+    /* Access UDP receive buffers (for cross-process delivery) */
+    const std::unordered_map<int, std::deque<UdpDatagram>> &udp_recv_buffers() const { 
+        return udp_recv_buffers_; 
+    }
+    std::unordered_map<int, std::deque<UdpDatagram>> &udp_recv_buffers() { 
+        return udp_recv_buffers_; 
+    }
+    
+    /* Access TCP connections */
+    const std::unordered_map<int, TcpConnection> &tcp_connections() const { 
+        return tcp_connections_; 
+    }
+    
+    /* --------------------------------------------------------------------------
+     * Serialization
+     * -------------------------------------------------------------------------- */
+    template <class Archive>
+    void serialize(Archive &ar);
 
-/* A connection is created, accompanied with two sockets */
-typedef struct Conn
-{
-  ptmc_addr addr[2];
-} Conn; /* Equivalent */
+    /* --------------------------------------------------------------------------
+     * Debug/Info
+     * -------------------------------------------------------------------------- */
+    void dump_state() const;
 
-typedef struct ptmc_sock
-{
-  int fd;
-  int domain;
-  int type;
-  int protocol;
+private:
+    FdManagerPtr fd_manager_;
+    
+    /* All sockets indexed by fd */
+    std::unordered_map<int, Socket> sockets_;
+    
+    /* UDP receive buffers: fd -> queue of datagrams */
+    std::unordered_map<int, std::deque<UdpDatagram>> udp_recv_buffers_;
+    
+    /* TCP connections: local_fd -> connection state */
+    std::unordered_map<int, TcpConnection> tcp_connections_;
+    
+    /* Helper: allocate new fd via FdManager */
+    int allocate_fd();
+    
+    /* Helper: release fd */
+    void release_fd(int fd);
+    
+    /* Helper: get socket by fd (non-const) */
+    Socket *get_socket_mutable(int fd);
+    
+    /* Helper: find socket by local address (for UDP routing) */
+    int find_socket_by_local_addr(const struct sockaddr_in &addr) const;
+    
+    /* Helper: find socket by bound port (for UDP routing) */
+    int find_socket_by_port(uint16_t port) const;
+};
 
-  /* If LISTENED */
-  int backlog;
-  /* TODO: pending connect queue */
-
-  ptmc_addr addr;
-  ptmc_addr dest;
-
-  template <class Archive>
-  void serialize(Archive &ar);
-} ptmc_sock;
-
-int emu_socket(int sockfd, int domain, int type, int protocol);
-
-/* connetion based */
-int emu_listen(int sockfd, int backlog);
-
-int emu_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+/* ==============================================================================
+ * Legacy C-style API (implemented in sockstate.cpp)
+ * These functions delegate to SockState methods
+ * ============================================================================== */
 
 int emu_bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
-
 ssize_t emu_recvfrom(int sockfd, void *buf, size_t len, int flags,
                      struct sockaddr *src_addr, socklen_t *addrlen);
-
 ssize_t emu_sendto(int sockfd, const void *buf, size_t len, int flags,
                    struct sockaddr *dest_addr, socklen_t addrlen);
+int emu_socket(int domain, int type, int protocol);
+int emu_listen(int sockfd, int backlog);
+int emu_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 
-/* connection based, return a socket file descriptor */
-int emu_accept4(int sockfd, struct sockaddr *src_addr, socklen_t *addrlen,
-                int flags);
+/* For compatibility with code that uses these types */
+typedef std::deque<UdpDatagram> udp_buffer;
 
 #endif /* __SOCKSTATE_H */

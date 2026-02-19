@@ -15,6 +15,7 @@
 #include "utils.h"
 #include "state_store.h"
 #include "sockstate.h"
+#include <arpa/inet.h>
 #include <fmt/format.h>
 #include <cjson/cJSON.h>
 #include <csignal>
@@ -293,16 +294,12 @@ static int cmd_load(char *args)
   return 0;
 }
 
-/* Helper: Format sockaddr for display */
-static std::string format_addr_short(const ptmc_addr &addr)
+/* Helper: Format sockaddr_in for display */
+static std::string format_addr_short(const struct sockaddr_in &addr)
 {
-  if (addr.size() < sizeof(struct sockaddr_in))
-    return "<invalid>";
-  
-  struct sockaddr_in *sin = (struct sockaddr_in *)addr.c_str();
   char ip[INET_ADDRSTRLEN];
-  inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
-  return fmt::format("{}:{}", ip, ntohs(sin->sin_port));
+  inet_ntop(AF_INET, &addr.sin_addr, ip, sizeof(ip));
+  return fmt::format("{}:{}", ip, ntohs(addr.sin_port));
 }
 
 /* Helper: Display UDP buffer state */
@@ -312,7 +309,7 @@ static void show_udp_buffers()
   
   for (int i = 0; i < NP; i++)
   {
-    const auto &udp_map = ptmc_state.udp_buffer_lists[i];
+    const auto &udp_map = ptmc_state.sock_states[i].udp_recv_buffers();
     
     if (udp_map.empty())
     {
@@ -325,7 +322,7 @@ static void show_udp_buffers()
     for (const auto &kv : udp_map)
     {
       int fd = kv.first;
-      const udp_buffer &buf = kv.second;
+      const auto &buf = kv.second;
       
       printf("    fd=%d: ", fd);
       
@@ -1253,7 +1250,8 @@ static void diff_fs_state(const FileSystemState &a, const FileSystemState &b,
 }
 
 /* Helper: Compare socket lists */
-static void diff_sock_list(const std::list<ptmc_sock> &a, const std::list<ptmc_sock> &b,
+static void diff_sock_list(const std::unordered_map<int, Socket> &a, 
+                           const std::unordered_map<int, Socket> &b,
                            int proc_id, bool &has_diff)
 {
   if (a.size() != b.size())
@@ -1265,8 +1263,8 @@ static void diff_sock_list(const std::list<ptmc_sock> &a, const std::list<ptmc_s
 }
 
 /* Helper: Compare UDP buffers */
-static void diff_udp_buffers(const std::unordered_map<int, udp_buffer> &a,
-                             const std::unordered_map<int, udp_buffer> &b,
+static void diff_udp_buffers(const std::unordered_map<int, std::deque<UdpDatagram>> &a,
+                             const std::unordered_map<int, std::deque<UdpDatagram>> &b,
                              int proc_id, bool &has_diff)
 {
   /* Check if maps have same keys */
@@ -1286,8 +1284,8 @@ static void diff_udp_buffers(const std::unordered_map<int, udp_buffer> &a,
   for (const auto &kv : a)
   {
     int fd = kv.first;
-    const udp_buffer &buf_a = kv.second;
-    const udp_buffer &buf_b = b.at(fd);
+    const auto &buf_a = kv.second;
+    const auto &buf_b = b.at(fd);
     
     if (buf_a.size() != buf_b.size())
     {
@@ -1305,7 +1303,9 @@ static void diff_udp_buffers(const std::unordered_map<int, udp_buffer> &a,
     
     while (it_a != buf_a.end() && it_b != buf_b.end())
     {
-      if (it_a->content != it_b->content || it_a->from != it_b->from)
+      bool from_differs = (it_a->from.sin_addr.s_addr != it_b->from.sin_addr.s_addr ||
+                           it_a->from.sin_port != it_b->from.sin_port);
+      if (it_a->content != it_b->content || from_differs)
       {
         if (!printed_header)
         {
@@ -1323,10 +1323,10 @@ static void diff_udp_buffers(const std::unordered_map<int, udp_buffer> &a,
   }
 }
 
-/* Helper: Compare TCP buffers */
-static void diff_tcp_buffers(const std::unordered_map<int, tcp_buffer> &a,
-                             const std::unordered_map<int, tcp_buffer> &b,
-                             int proc_id, bool &has_diff)
+/* Helper: Compare TCP connections */
+static void diff_tcp_connections(const std::unordered_map<int, TcpConnection> &a,
+                                 const std::unordered_map<int, TcpConnection> &b,
+                                 int proc_id, bool &has_diff)
 {
   /* Check if maps have same keys */
   std::set<int> keys_a, keys_b;
@@ -1335,26 +1335,24 @@ static void diff_tcp_buffers(const std::unordered_map<int, tcp_buffer> &a,
   
   if (keys_a != keys_b)
   {
-    printf("  [Process %d - TCP Buffers]\n", proc_id);
+    printf("  [Process %d - TCP Connections]\n", proc_id);
     printf("    fd sets differ\n");
     has_diff = true;
     return;
   }
   
-  /* Compare each fd's buffer content */
+  /* Compare each connection */
   for (const auto &kv : a)
   {
     int fd = kv.first;
-    const tcp_buffer &buf_a = kv.second;
-    const tcp_buffer &buf_b = b.at(fd);
+    const auto &conn_a = kv.second;
+    const auto &conn_b = b.at(fd);
     
-    std::string content_a = buf_a.ss.str();
-    std::string content_b = buf_b.ss.str();
-    
-    if (content_a != content_b)
+    if (conn_a.send_buffer.size() != conn_b.send_buffer.size() ||
+        conn_a.recv_buffer.size() != conn_b.recv_buffer.size())
     {
-      printf("  [Process %d - TCP Buffer fd=%d]\n", proc_id, fd);
-      printf("    content length: %zu != %zu\n", content_a.size(), content_b.size());
+      printf("  [Process %d - TCP Connection fd=%d]\n", proc_id, fd);
+      printf("    buffer sizes differ\n");
       has_diff = true;
     }
   }
@@ -1513,9 +1511,9 @@ static int cmd_diff(char *args)
     /* Compare sockets */
     if (!memory_only)
     {
-      diff_sock_list(state_a.child[i].sock_list, state_b.child[i].sock_list, i, proc_has_diff);
-      diff_udp_buffers(state_a.child[i].udp_buffer_list, state_b.child[i].udp_buffer_list, i, proc_has_diff);
-      diff_tcp_buffers(state_a.child[i].tcp_buffer_list, state_b.child[i].tcp_buffer_list, i, proc_has_diff);
+      diff_sock_list(state_a.child[i].sock_state.sockets(), state_b.child[i].sock_state.sockets(), i, proc_has_diff);
+      diff_udp_buffers(state_a.child[i].sock_state.udp_recv_buffers(), state_b.child[i].sock_state.udp_recv_buffers(), i, proc_has_diff);
+      diff_tcp_connections(state_a.child[i].sock_state.tcp_connections(), state_b.child[i].sock_state.tcp_connections(), i, proc_has_diff);
     }
     
     if (proc_has_diff) any_diff = true;

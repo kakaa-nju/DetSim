@@ -53,7 +53,7 @@ void *getnode(struct sockaddr_in *addr) {
   void *node;
   int i;
   for (i = 0; i < NP; i++) {
-    if (!memcmp(addr, &addrs[i], sizeof(struct sockaddr_in)))
+    if (addr->sin_addr.s_addr == addrs[i].sin_addr.s_addr && addr->sin_port == addrs[i].sin_port)
     {
       node = nodes[i];
       break;
@@ -61,13 +61,13 @@ void *getnode(struct sockaddr_in *addr) {
   }
   if (i == NP) {
     for (int j = 0; j < sizeof(struct sockaddr_in); j++) {
-      printf("%02x ", ((unsigned char *)addr)[j]);
+      /* printf("%02x ", ((unsigned char *)addr)[j]); */
     }
-    printf("\n");
+    /* printf("\n"); */
     for (int j = 0; j < sizeof(struct sockaddr_in); j++) {
-      printf("%02x ", ((unsigned char *)(addrs))[j]);
+      /* printf("%02x ", ((unsigned char *)(addrs))[j]); */
     }
-    printf("\n");
+    /* printf("\n"); */
   }
   fsync(1);
   assert(i != NP);

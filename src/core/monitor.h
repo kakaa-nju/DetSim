@@ -9,6 +9,8 @@
 #include "types.h"
 #include "sockstate.h"
 #include "state.h"
+#include "fd_manager.h"
+#include <memory>
 #include <string>
 #include <unordered_set>
 
@@ -35,9 +37,9 @@ typedef struct
   hash_type toload;
 
   int exited[NP];
-  std::list<ptmc_sock> sock_lists[NP];
-  std::unordered_map<int, tcp_buffer> tcp_buffer_lists[NP];
-  std::unordered_map<int, udp_buffer> udp_buffer_lists[NP];
+  
+  SockState sock_states[NP];
+  std::shared_ptr<FdManager> fd_managers[NP];  /* Per-process fd allocation */
   FileSystemState fs_states[NP];
 
   int pids[NP];

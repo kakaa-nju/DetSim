@@ -459,10 +459,12 @@ void tracee_state::recover_running_state(int index)
   recover_mem_reg_snapshot(maps);
 
   /* Restore subsystems */
-  ptmc_state.sock_lists[index] = sock_list;
-  ptmc_state.tcp_buffer_lists[index] = tcp_buffer_list;
-  ptmc_state.udp_buffer_lists[index] = udp_buffer_list;
+  ptmc_state.sock_states[index] = sock_state;
   ptmc_state.fs_states[index] = fs_state;
+
+  /* Re-link FdManager after deserialization */
+  ptmc_state.sock_states[index].set_fd_manager(ptmc_state.fd_managers[index]);
+  ptmc_state.fs_states[index].set_fd_manager(ptmc_state.fd_managers[index]);
 
   /* Restore time */
   ptmc_state.time[index] = tv;
@@ -690,9 +692,7 @@ tracee_state::tracee_state(int which, struct syscall_info *info)
   LOG_TRACE("tracee_state constructor: which=%d, pid=%d", which, pid);
 
   /* Save subsystems */
-  sock_list = ptmc_state.sock_lists[which];
-  tcp_buffer_list = ptmc_state.tcp_buffer_lists[which];
-  udp_buffer_list = ptmc_state.udp_buffer_lists[which];
+  sock_state = ptmc_state.sock_states[which];
   fs_state = ptmc_state.fs_states[which];
 
   /* Save time */

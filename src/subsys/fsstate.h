@@ -2,7 +2,9 @@
 #define __FSSTATE_H
 
 #include "common.h"
+#include "fd_manager.h"
 #include <map>
+#include <memory>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -75,11 +77,17 @@ public:
   std::vector<std::pair<std::string, std::string>> mappings;
 
 private:
-  // The next available file descriptor to be allocated.
-  int next_fd = 3; // Start after stdin, stdout, stderr
+  // FdManager for unified fd allocation (shared with SockState)
+  FdManagerPtr fd_manager_;
 
 public:
-  // Finds the next available file descriptor.
+  FileSystemState() = default;
+  explicit FileSystemState(FdManagerPtr fd_mgr) : fd_manager_(fd_mgr) {}
+
+  // Set the fd manager (must be called before using get_new_fd)
+  void set_fd_manager(FdManagerPtr fd_mgr) { fd_manager_ = fd_mgr; }
+
+  // Allocate a new file descriptor via FdManager
   int get_new_fd();
 
   template <class Archive> void serialize(Archive &ar);
