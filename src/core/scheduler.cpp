@@ -7,6 +7,7 @@
 #include "monitor.h"
 #include "sockstate.h"
 #include "state.h"
+#include "state_store.h"
 #include "utils.h"
 
 #include <assert.h>
@@ -556,10 +557,24 @@ int exec_cont()
   srand(time(NULL));
   sys_state *state_fetched = NULL;
   syscall_info syscall_info[NP];
+  
+  /* Statistics for this execution only */
+  size_t states_searched_this_run = 0;
+  size_t states_new_this_run = 0;
+  
+  /* Reset StateStore statistics for this run */
+  StateStore::instance().reset_stats();
 
-  state_queue.clear();
+  StateStore::instance().queue_clear();
   state_queue_append(&ptmc_state.dest_state);
+  
+  /* Check if this is a new state or was already in state_set */
+  if (!state_set.count(ptmc_state.dest_state.ss_hash))
+  {
+    states_new_this_run++;
+  }
   state_set.emplace(ptmc_state.dest_state.ss_hash);
+  states_searched_this_run++;
 
   ptmc_state.n_choose = 0;
   ptmc_state.choose = 0;
@@ -595,22 +610,26 @@ int exec_cont()
       if (ckpt != CKPT_DISCARD)
       {
         ptmc_state.dest_state.save_metadata();
-        if (!state_set.count(ptmc_state.dest_state.ss_hash))
+        bool is_new = !state_set.count(ptmc_state.dest_state.ss_hash);
+        if (is_new)
         {
           state_queue_append(&ptmc_state.dest_state);
           state_set.emplace(ptmc_state.dest_state.ss_hash);
+          states_new_this_run++;
         }
+        states_searched_this_run++;
         state_tree_add(&s, &ptmc_state.dest_state, i,
                        ptmc_state.n_choose ? ptmc_state.choose : -1);
       }
       if (check_state() != 0)
       {
-        printf("Stopped for illegal state. Searched for %ld sys_states\n",
-               state_set.size());
+        printf("Stopped for illegal state. Searched for %zu sys_states (new: %zu)\n",
+               states_searched_this_run, states_new_this_run);
         show_syscall_history();
         double time_used = gettime() - start_time;
         printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
-               state_set.size() / time_used);
+               states_searched_this_run / time_used);
+        StateStore::instance().print_stats();
         delete state_fetched;
         return 0;
       }
@@ -628,20 +647,24 @@ int exec_cont()
     if (sigint_received)
     {
       printf("Program received signal SIGINT, Interrupt.\n");
-      printf("Searched for %ld sys_states\n", state_set.size());
+      printf("Searched for %zu sys_states (new: %zu), total unique: %zu\n", 
+             states_searched_this_run, states_new_this_run, state_set.size());
       show_syscall_history();
       double time_used = gettime() - start_time;
       printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
-             state_set.size() / time_used);
+             states_searched_this_run / time_used);
+      StateStore::instance().print_stats();
       sigint_received = 0;
       return 0;
     }
   }
-  printf("Complete explore all %ld sys_states\n", state_set.size());
+  printf("Complete explore all %zu sys_states (new: %zu), total unique: %zu\n", 
+         states_searched_this_run, states_new_this_run, state_set.size());
   show_syscall_history();
   double time_used = gettime() - start_time;
   printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
-         state_set.size() / time_used);
+         states_searched_this_run / time_used);
+  StateStore::instance().print_stats();
   return 0;
 }
 

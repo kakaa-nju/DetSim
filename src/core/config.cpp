@@ -9,6 +9,7 @@
 #include "fsstate.h"
 #include "guest.h"
 #include "emu.h"
+#include "state_store.h"
 #include <cjson/cJSON.h>
 #include <cjson/cJSON_Utils.h>
 #include <stdio.h>
@@ -238,6 +239,45 @@ void read_config(const char *cfg_file)
     LOG_INFO("Done");
   }
 
+  /* StateStore configuration */
+  cJSON *statestore = cJSON_GetObjectItem(cfg, "StateStore");
+  if (statestore)
+  {
+    StateStore::Config ss_config;
+    
+    cJSON *hot_mb = cJSON_GetObjectItem(statestore, "hot_cache_mb");
+    if (hot_mb) {
+      ss_config.hot_cache_size = static_cast<size_t>(cJSON_GetNumberValue(hot_mb)) * 1024 * 1024;
+    }
+    
+    cJSON *warm_mb = cJSON_GetObjectItem(statestore, "warm_cache_mb");
+    if (warm_mb) {
+      ss_config.warm_cache_size = static_cast<size_t>(cJSON_GetNumberValue(warm_mb)) * 1024 * 1024;
+    }
+    
+    cJSON *prefetch_window = cJSON_GetObjectItem(statestore, "prefetch_window");
+    if (prefetch_window) {
+      ss_config.prefetch_window = static_cast<size_t>(cJSON_GetNumberValue(prefetch_window));
+    }
+    
+    cJSON *prefetch_threads = cJSON_GetObjectItem(statestore, "prefetch_threads");
+    if (prefetch_threads) {
+      ss_config.prefetch_threads = static_cast<size_t>(cJSON_GetNumberValue(prefetch_threads));
+    }
+    
+    cJSON *compression_level = cJSON_GetObjectItem(statestore, "compression_level");
+    if (compression_level) {
+      ss_config.compression_level = static_cast<int>(cJSON_GetNumberValue(compression_level));
+    }
+    
+    /* Initialize StateStore with custom config */
+    StateStore::instance().init(ss_config);
+    LOG_INFO("StateStore configured: hot=%zuMB, warm=%zuMB, prefetch=%zu",
+             ss_config.hot_cache_size / (1024*1024),
+             ss_config.warm_cache_size / (1024*1024),
+             ss_config.prefetch_window);
+  }
+  
   // cJSON_Delete(cfg);
 }
 

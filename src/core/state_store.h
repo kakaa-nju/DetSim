@@ -1,10 +1,11 @@
 /*
- * state_store.h - Transparent state storage with async persistence
+ * state_store.h - Transparent state storage with tiered cache and prefetch
  *
  * Design:
- * - save(data, len) -> hash: compress in memory, return hash immediately
- * - load(hash) -> data: query memory first, then disk
- * - Background threads handle decompression and disk I/O
+ * - L1 Hot Cache (raw): Fast access, limited by hot_cache_size
+ * - L2 Warm Cache (compressed): Higher capacity, warm_cache_size
+ * - Disk: Persistent storage
+ * - Prefetch: Background loading of upcoming states from queue
  */
 
 #ifndef __STATE_STORE_H
@@ -16,39 +17,41 @@
 #include <memory>
 #include <mutex>
 #include <unordered_map>
+#include <unordered_set>
 #include <list>
+#include <deque>
 #include <atomic>
 #include <condition_variable>
 #include <thread>
 #include <queue>
 #include <functional>
+#include <chrono>
 
 using hash_type = uint32_t;
 
-/* ======================================================================
- * Stored State Entry
- * ====================================================================== */
+/* ==============================================================================
+ * Cache Entry (unified for L1/L2)
+ * ============================================================================== */
 
 struct StateEntry {
-    hash_type hash{0};  // Explicitly initialized
+    hash_type hash{0};
     
-    // Uncompressed data (hot)
+    // L1: Uncompressed data (hot)
     std::vector<uint8_t> raw_data;
     
-    // Compressed data (warm)
+    // L2: Compressed data (warm)
     std::vector<uint8_t> compressed_data;
     
-    // State
     enum class State {
-        RAW,            // Has uncompressed data
-        COMPRESSED,     // Has compressed data, raw may be dropped
+        RAW,            // Has uncompressed data (in L1)
+        COMPRESSED,     // Has compressed data only (in L2)
         PERSISTING,     // Being written to disk
-        PERSISTED,      // On disk
+        PERSISTED,      // On disk only
         LOADING         // Being loaded from disk
     };
     std::atomic<State> state{State::RAW};
     
-    // For LRU - explicitly initialized
+    // For LRU tracking
     std::atomic<uint64_t> last_access{0};
     
     // For async notification
@@ -61,16 +64,36 @@ struct StateEntry {
 
 using StateEntryPtr = std::shared_ptr<StateEntry>;
 
-/* ======================================================================
+/* ==============================================================================
+ * Prefetch Task
+ * ============================================================================== */
+
+struct PrefetchTask {
+    hash_type hash;
+    std::chrono::steady_clock::time_point submit_time;
+};
+
+/* ==============================================================================
  * State Store
- * ====================================================================== */
+ * ============================================================================== */
 
 class StateStore {
 public:
     struct Config {
-        size_t memory_cache_size = 2ULL * 1024 * 1024 * 1024;  // 2GB uncompressed
+        // L1 Hot Cache: raw uncompressed data (fast access)
+        size_t hot_cache_size = 512ULL * 1024 * 1024;        // 512MB default
+        
+        // L2 Warm Cache: compressed data (higher capacity)
+        size_t warm_cache_size = 2048ULL * 1024 * 1024;      // 2GB default
+        
+        // Compression settings
         int compression_level = 1;
         int io_threads = 2;
+        
+        // Prefetch settings
+        size_t prefetch_window = 100;       // Number of upcoming states to prefetch
+        size_t prefetch_threads = 1;        // Prefetch worker threads
+        size_t max_inflight_prefetch = 200; // Max concurrent prefetch tasks
     };
     
     StateStore();
@@ -79,46 +102,134 @@ public:
     void init(const Config& config);
     void init();
     
-    // Save data: compress in memory, return hash immediately
-    // Background thread will write to disk
+    // Save data: returns hash immediately, background write to disk
     hash_type save(const void* data, size_t len);
     
-    // Load data: check memory first, then disk
-    // Returns actual size, or -1 if not found
+    // Load data: check L1 -> L2 -> disk
     ssize_t load(hash_type hash, std::vector<uint8_t>& out_data);
     
-    // Check if data is available (in memory or on disk)
+    // Check existence
     bool exists(hash_type hash);
     
-    // Wait for data to be persisted to disk
+    // Wait for persistence
     bool wait_persisted(hash_type hash, uint64_t timeout_ms = 0);
     
-    // Get entry for direct access (advanced usage)
+    // Get entry (advanced usage)
     StateEntryPtr get_entry(hash_type hash);
     
-    // Shutdown and wait for all pending writes
+    // Shutdown
     void shutdown();
     
     static StateStore& instance();
+
+    // ==================================================================
+    // Queue Management (with transparent prefetch)
+    // ==================================================================
+    
+    // Queue operations - prefetch happens automatically on pop
+    void queue_push_back(hash_type hash);
+    hash_type queue_front();
+    void queue_pop_front();
+    bool queue_empty() const;
+    size_t queue_size() const;
+    void queue_clear();
+    
+    // Get a hash at specific offset from front (for prefetch planning)
+    hash_type queue_peek(size_t offset) const;
+    
+    // Manual prefetch control (optional)
+    void prefetch(hash_type hash);
+    void prefetch_batch(const std::vector<hash_type>& hashes);
+    
+    // Check if hash is in L1/L2/prefetching
+    bool in_l1(hash_type hash) const;
+    bool in_l2(hash_type hash) const;
+    bool in_preflight(hash_type hash) const;
+    
+    // Statistics
+    struct Stats {
+        uint64_t load_requests = 0;      // Total load() calls
+        uint64_t l1_hits = 0;            // L1 cache hits
+        uint64_t l2_hits = 0;            // L2 cache hits
+        uint64_t disk_reads = 0;         // Disk reads
+        uint64_t prefetch_issued = 0;    // Prefetch tasks issued
+        uint64_t prefetch_hits = 0;      // Prefetch hits (loaded before needed)
+        
+        double hit_rate() const {
+            if (load_requests == 0) return 0.0;
+            return 100.0 * (l1_hits + l2_hits) / load_requests;
+        }
+    };
+    
+    Stats get_stats() const;
+    void reset_stats();
+    void print_stats() const;
+    
+    // Cache usage info
+    size_t get_l1_usage() const { return hot_memory_usage_.load(); }
+    size_t get_l2_usage() const { return warm_memory_usage_.load(); }
+    size_t get_l1_capacity() const { return config_.hot_cache_size; }
+    size_t get_l2_capacity() const { return config_.warm_cache_size; }
 
 private:
     Config config_;
     std::atomic<bool> initialized_{false};
     std::atomic<bool> shutdown_{false};
     
-    // Memory cache: hash -> entry
-    std::unordered_map<hash_type, StateEntryPtr> cache_;
-    std::mutex cache_mutex_;
+    // ==================================================================
+    // Memory Caches (physically separated)
+    // ==================================================================
     
-    // LRU tracking
-    std::list<hash_type> lru_list_;
-    std::unordered_map<hash_type, std::list<hash_type>::iterator> lru_index_;
-    std::mutex lru_mutex_;
+    // L1 Hot Cache: hash -> entry with raw_data
+    mutable std::mutex hot_mutex_;
+    std::unordered_map<hash_type, StateEntryPtr> hot_cache_;
+    std::list<hash_type> hot_lru_;
+    std::unordered_map<hash_type, std::list<hash_type>::iterator> hot_lru_index_;
+    std::atomic<size_t> hot_memory_usage_{0};
     
-    std::atomic<size_t> current_memory_usage_{0};
+    // L2 Warm Cache: hash -> entry with compressed_data
+    mutable std::mutex warm_mutex_;
+    std::unordered_map<hash_type, StateEntryPtr> warm_cache_;
+    std::list<hash_type> warm_lru_;
+    std::unordered_map<hash_type, std::list<hash_type>::iterator> warm_lru_index_;
+    std::atomic<size_t> warm_memory_usage_{0};
+    
+    // Unified access counter for both caches
     std::atomic<uint64_t> access_counter_{0};
     
-    // Background I/O
+    // Statistics
+    mutable std::mutex stats_mutex_;
+    Stats stats_;
+    
+    // ==================================================================
+    // State Queue (managed by StateStore for transparent prefetch)
+    // ==================================================================
+    
+    mutable std::mutex queue_mutex_;
+    std::deque<hash_type> state_queue_;
+    
+    // ==================================================================
+    // Prefetch System
+    // ==================================================================
+    
+    // Inflight tracking (prevent duplicate prefetch)
+    mutable std::mutex inflight_mutex_;
+    std::unordered_set<hash_type> prefetch_inflight_;
+    std::condition_variable inflight_cv_;
+    
+    // Prefetch queue
+    std::queue<PrefetchTask> prefetch_queue_;
+    std::mutex prefetch_mutex_;
+    std::condition_variable prefetch_cv_;
+    std::vector<std::thread> prefetch_threads_;
+    
+    void prefetch_worker();
+    void submit_prefetch_tasks();
+    
+    // ==================================================================
+    // Background I/O (for persistence)
+    // ==================================================================
+    
     std::queue<StateEntryPtr> io_queue_;
     std::mutex io_mutex_;
     std::condition_variable io_cv_;
@@ -126,10 +237,21 @@ private:
     
     void io_worker();
     
-    // Internal helpers
+    // ==================================================================
+    // Internal Helpers
+    // ==================================================================
+    
+    // Entry management
     StateEntryPtr find_or_create_entry(hash_type hash);
-    void update_lru(hash_type hash);
-    void evict_if_needed(size_t required_bytes);
+    
+    // Cache operations
+    void insert_to_l1(hash_type hash, std::vector<uint8_t>&& raw_data);
+    void insert_to_l2(hash_type hash, std::vector<uint8_t>&& compressed_data);
+    bool move_l2_to_l1(hash_type hash);  // Decompress on demand
+    void evict_l1_if_needed(size_t required_bytes);
+    void evict_l2_if_needed(size_t required_bytes);
+    void update_hot_lru(hash_type hash);
+    void update_warm_lru(hash_type hash);
     
     // Compression
     std::vector<uint8_t> compress(const std::vector<uint8_t>& data);
@@ -138,12 +260,13 @@ private:
     // Disk operations
     bool write_to_disk(hash_type hash, const std::vector<uint8_t>& data);
     bool read_from_disk(hash_type hash, std::vector<uint8_t>& data);
+    bool read_compressed_from_disk(hash_type hash, std::vector<uint8_t>& compressed_data);
     bool exists_on_disk(hash_type hash);
 };
 
-/* ======================================================================
- * C-style Interface (for easy integration)
- * ====================================================================== */
+/* ==============================================================================
+ * C-style Interface
+ * ============================================================================== */
 
 #ifdef __cplusplus
 extern "C" {

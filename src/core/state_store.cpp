@@ -1,5 +1,5 @@
 /*
- * state_store.cpp - Transparent state storage implementation
+ * state_store.cpp - Tiered cache with prefetch implementation
  */
 
 #include "state_store.h"
@@ -11,21 +11,21 @@
 #include <chrono>
 #include <filesystem>
 #include <cerrno>
-/* Use xxHash for fast hash computation */
 #include "xxhash.h"
 
 static uint32_t compute_hash(const void* data, size_t len) {
-    // xxHash is 2-5x faster than CRC32
     return XXHash64::hash32(data, len, 0);
 }
 
-/* ======================================================================
- * StateStore Implementation
- * ====================================================================== */
+/* ==============================================================================
+ * Constructor / Destructor
+ * ============================================================================== */
 
-StateStore::StateStore() 
+StateStore::StateStore()
     : config_()
-    , current_memory_usage_(0) {
+    , hot_memory_usage_(0)
+    , warm_memory_usage_(0)
+    , access_counter_(0) {
 }
 
 StateStore::~StateStore() {
@@ -45,13 +45,20 @@ void StateStore::init(const Config& config) {
     
     config_ = config;
     
-    // Start I/O workers
-    for (int i = 0; i < config_.io_threads; i++) {
+    // Start persistence workers
+    for (size_t i = 0; i < config_.io_threads; i++) {
         io_threads_.emplace_back(&StateStore::io_worker, this);
     }
     
-    LOG_INFO("StateStore initialized: memory_limit=%zuMB, io_threads=%d",
-             config_.memory_cache_size / (1024*1024), config_.io_threads);
+    // Start prefetch workers
+    for (size_t i = 0; i < config_.prefetch_threads; i++) {
+        prefetch_threads_.emplace_back(&StateStore::prefetch_worker, this);
+    }
+    
+    LOG_INFO("StateStore initialized: hot=%zuMB, warm=%zuMB, prefetch_window=%zu",
+             config_.hot_cache_size / (1024*1024),
+             config_.warm_cache_size / (1024*1024),
+             config_.prefetch_window);
 }
 
 void StateStore::init() {
@@ -62,149 +69,442 @@ void StateStore::init() {
 void StateStore::shutdown() {
     if (shutdown_.exchange(true)) return;
     
+    // Notify all workers
     io_cv_.notify_all();
+    prefetch_cv_.notify_all();
+    inflight_cv_.notify_all();
+    
+    // Join persistence threads
     for (auto& t : io_threads_) {
+        if (t.joinable()) t.join();
+    }
+    
+    // Join prefetch threads
+    for (auto& t : prefetch_threads_) {
         if (t.joinable()) t.join();
     }
 }
 
-StateEntryPtr StateStore::find_or_create_entry(hash_type hash) {
-    std::lock_guard<std::mutex> lock(cache_mutex_);
-    auto it = cache_.find(hash);
-    if (it != cache_.end()) {
-        return it->second;
-    }
-    
-    auto entry = std::make_shared<StateEntry>(hash);
-    cache_[hash] = entry;
-    return entry;
+/* ==============================================================================
+ * Queue Management (with Transparent Prefetch)
+ * ============================================================================== */
+
+void StateStore::queue_push_back(hash_type hash) {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    state_queue_.push_back(hash);
 }
 
-void StateStore::update_lru(hash_type hash) {
-    std::lock_guard<std::mutex> lock(lru_mutex_);
-    
-    auto it = lru_index_.find(hash);
-    if (it != lru_index_.end()) {
-        lru_list_.erase(it->second);
+hash_type StateStore::queue_front() {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (state_queue_.empty()) {
+        return 0;
     }
-    
-    lru_list_.push_front(hash);
-    lru_index_[hash] = lru_list_.begin();
+    return state_queue_.front();
 }
 
-void StateStore::evict_if_needed(size_t required_bytes) {
-    // Always acquire locks in consistent order: cache_mutex_ first, then lru_mutex_
-    std::lock_guard<std::mutex> cache_lock(cache_mutex_);
-    std::lock_guard<std::mutex> lru_lock(lru_mutex_);
+void StateStore::queue_pop_front() {
+    hash_type current_hash = 0;
     
-    while (current_memory_usage_ + required_bytes > config_.memory_cache_size 
-           && !lru_list_.empty()) {
-        // Evict oldest (back of list)
-        hash_type oldest_hash = lru_list_.back();
-        auto it = cache_.find(oldest_hash);
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        if (state_queue_.empty()) return;
+        current_hash = state_queue_.front();
+        state_queue_.pop_front();
+    }
+    
+    // Trigger prefetch for upcoming states
+    submit_prefetch_tasks();
+}
+
+bool StateStore::queue_empty() const {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    return state_queue_.empty();
+}
+
+size_t StateStore::queue_size() const {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    return state_queue_.size();
+}
+
+void StateStore::queue_clear() {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    state_queue_.clear();
+}
+
+hash_type StateStore::queue_peek(size_t offset) const {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (offset >= state_queue_.size()) {
+        return 0;
+    }
+    return state_queue_[offset];
+}
+
+/* ==============================================================================
+ * Prefetch System
+ * ============================================================================== */
+
+void StateStore::submit_prefetch_tasks() {
+    std::vector<hash_type> to_prefetch;
+    
+    {
+        std::lock_guard<std::mutex> inflight_lock(inflight_mutex_);
         
-        if (it != cache_.end()) {
-            auto& entry = it->second;
+        // Check if inflight is already at max
+        if (prefetch_inflight_.size() >= config_.max_inflight_prefetch) {
+            return;
+        }
+        
+        for (size_t i = 0; i < config_.prefetch_window; i++) {
+            hash_type h = queue_peek(i);
+            if (h == 0) break;
             
-            // Lock entry state to prevent race conditions
-            std::lock_guard<std::mutex> entry_lock(entry->mutex);
-            
-            // Only evict if persisted or compressible
-            StateEntry::State state = entry->state.load();
-            if (state == StateEntry::State::PERSISTED) {
-                // Safe to remove both raw and compressed
-                size_t freed = entry->raw_data.size() + entry->compressed_data.size();
-                current_memory_usage_ -= freed;
-                cache_.erase(it);
-            } else if (state == StateEntry::State::RAW && entry->compressed_data.empty()) {
-                // Compress before evicting
-                entry->compressed_data = compress(entry->raw_data);
-                // Check if compression succeeded
-                if (entry->compressed_data.empty()) {
-                    // Compression failed, skip this entry
-                    LOG_WARN("Compression failed during eviction for hash %08x", oldest_hash);
-                    // Move to next entry
-                    lru_list_.pop_back();
-                    lru_index_.erase(oldest_hash);
-                    continue;
-                }
-                size_t raw_size = entry->raw_data.size();
-                size_t compressed_size = entry->compressed_data.size();
-                // Prevent underflow
-                size_t freed = (raw_size > compressed_size) ? (raw_size - compressed_size) : 0;
-                entry->raw_data.clear();
-                entry->raw_data.shrink_to_fit();
-                entry->state = StateEntry::State::COMPRESSED;
-                current_memory_usage_ -= freed;
+            // Check: not in L1, not in L2, not already prefetching
+            if (!in_l1(h) && !in_l2(h) && 
+                prefetch_inflight_.find(h) == prefetch_inflight_.end()) {
                 
-                if (current_memory_usage_ + required_bytes <= config_.memory_cache_size) {
-                    break;
-                }
-            } else if (state == StateEntry::State::COMPRESSED) {
-                // Just drop raw if exists
-                size_t freed = entry->raw_data.size();
-                entry->raw_data.clear();
-                entry->raw_data.shrink_to_fit();
-                current_memory_usage_ -= freed;
+                prefetch_inflight_.insert(h);
+                to_prefetch.push_back(h);
                 
-                if (current_memory_usage_ + required_bytes <= config_.memory_cache_size) {
+                if (prefetch_inflight_.size() >= config_.max_inflight_prefetch) {
                     break;
                 }
             }
-        } else {
-            // Entry not in cache, clean up LRU tracking
-            LOG_WARN("LRU entry %08x not found in cache during eviction", oldest_hash);
         }
-        
-        lru_list_.pop_back();
-        lru_index_.erase(oldest_hash);
+    }
+    
+    // Submit tasks
+    {
+        std::lock_guard<std::mutex> lock(prefetch_mutex_);
+        for (auto h : to_prefetch) {
+            prefetch_queue_.push({h, std::chrono::steady_clock::now()});
+        }
+    }
+    prefetch_cv_.notify_all();
+    
+    // Update stats
+    {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.prefetch_issued += to_prefetch.size();
     }
 }
+
+void StateStore::prefetch_worker() {
+    while (!shutdown_.load()) {
+        PrefetchTask task;
+        
+        {
+            std::unique_lock<std::mutex> lock(prefetch_mutex_);
+            prefetch_cv_.wait(lock, [this] { 
+                return !prefetch_queue_.empty() || shutdown_.load(); 
+            });
+            
+            if (shutdown_.load()) break;
+            if (prefetch_queue_.empty()) continue;
+            
+            task = prefetch_queue_.front();
+            prefetch_queue_.pop();
+        }
+        
+        // Check if already loaded by main thread
+        if (in_l1(task.hash) || in_l2(task.hash)) {
+            std::lock_guard<std::mutex> lock(inflight_mutex_);
+            prefetch_inflight_.erase(task.hash);
+            inflight_cv_.notify_all();
+            continue;
+        }
+        
+        // Try to load from disk to L2
+        std::vector<uint8_t> compressed;
+        if (read_compressed_from_disk(task.hash, compressed)) {
+            insert_to_l2(task.hash, std::move(compressed));
+            LOG_TRACE("Prefetched hash %08x to L2", task.hash);
+        } else {
+            LOG_TRACE("Prefetch failed for hash %08x (not on disk yet?)", task.hash);
+        }
+        
+        // Remove from inflight
+        {
+            std::lock_guard<std::mutex> lock(inflight_mutex_);
+            prefetch_inflight_.erase(task.hash);
+            inflight_cv_.notify_all();
+        }
+    }
+}
+
+void StateStore::prefetch(hash_type hash) {
+    if (hash == 0) return;
+    
+    {
+        std::lock_guard<std::mutex> lock(inflight_mutex_);
+        if (in_l1(hash) || in_l2(hash) || 
+            prefetch_inflight_.find(hash) != prefetch_inflight_.end()) {
+            return;
+        }
+        prefetch_inflight_.insert(hash);
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(prefetch_mutex_);
+        prefetch_queue_.push({hash, std::chrono::steady_clock::now()});
+    }
+    prefetch_cv_.notify_one();
+}
+
+void StateStore::prefetch_batch(const std::vector<hash_type>& hashes) {
+    std::vector<hash_type> to_submit;
+    
+    {
+        std::lock_guard<std::mutex> lock(inflight_mutex_);
+        for (auto h : hashes) {
+            if (h == 0) continue;
+            if (!in_l1(h) && !in_l2(h) && 
+                prefetch_inflight_.find(h) == prefetch_inflight_.end() &&
+                prefetch_inflight_.size() < config_.max_inflight_prefetch) {
+                prefetch_inflight_.insert(h);
+                to_submit.push_back(h);
+            }
+        }
+    }
+    
+    {
+        std::lock_guard<std::mutex> lock(prefetch_mutex_);
+        for (auto h : to_submit) {
+            prefetch_queue_.push({h, std::chrono::steady_clock::now()});
+        }
+    }
+    prefetch_cv_.notify_all();
+}
+
+bool StateStore::in_l1(hash_type hash) const {
+    std::lock_guard<std::mutex> lock(hot_mutex_);
+    auto it = hot_cache_.find(hash);
+    return it != hot_cache_.end() && !it->second->raw_data.empty();
+}
+
+bool StateStore::in_l2(hash_type hash) const {
+    std::lock_guard<std::mutex> lock(warm_mutex_);
+    auto it = warm_cache_.find(hash);
+    return it != warm_cache_.end() && !it->second->compressed_data.empty();
+}
+
+bool StateStore::in_preflight(hash_type hash) const {
+    std::lock_guard<std::mutex> lock(inflight_mutex_);
+    return prefetch_inflight_.find(hash) != prefetch_inflight_.end();
+}
+
+/* ==============================================================================
+ * Cache Operations
+ * ============================================================================== */
+
+void StateStore::insert_to_l1(hash_type hash, std::vector<uint8_t>&& raw_data) {
+    if (raw_data.empty()) return;
+    
+    evict_l1_if_needed(raw_data.size());
+    
+    std::lock_guard<std::mutex> lock(hot_mutex_);
+    
+    auto entry = std::make_shared<StateEntry>(hash);
+    entry->raw_data = std::move(raw_data);
+    entry->state = StateEntry::State::RAW;
+    entry->last_access = ++access_counter_;
+    
+    hot_cache_[hash] = entry;
+    hot_lru_.push_front(hash);
+    hot_lru_index_[hash] = hot_lru_.begin();
+    
+    hot_memory_usage_ += entry->raw_data.size();
+}
+
+void StateStore::insert_to_l2(hash_type hash, std::vector<uint8_t>&& compressed_data) {
+    if (compressed_data.empty()) return;
+    
+    evict_l2_if_needed(compressed_data.size());
+    
+    std::lock_guard<std::mutex> lock(warm_mutex_);
+    
+    // Check if already exists
+    auto it = warm_cache_.find(hash);
+    if (it != warm_cache_.end()) {
+        // Update existing entry
+        warm_memory_usage_ -= it->second->compressed_data.size();
+        it->second->compressed_data = std::move(compressed_data);
+        it->second->state = StateEntry::State::COMPRESSED;
+        it->second->last_access = ++access_counter_;
+        warm_memory_usage_ += it->second->compressed_data.size();
+        
+        // Update LRU
+        warm_lru_.erase(warm_lru_index_[hash]);
+        warm_lru_.push_front(hash);
+        warm_lru_index_[hash] = warm_lru_.begin();
+        return;
+    }
+    
+    auto entry = std::make_shared<StateEntry>(hash);
+    entry->compressed_data = std::move(compressed_data);
+    entry->state = StateEntry::State::COMPRESSED;
+    entry->last_access = ++access_counter_;
+    
+    warm_cache_[hash] = entry;
+    warm_lru_.push_front(hash);
+    warm_lru_index_[hash] = warm_lru_.begin();
+    
+    warm_memory_usage_ += entry->compressed_data.size();
+}
+
+bool StateStore::move_l2_to_l1(hash_type hash) {
+    StateEntryPtr entry;
+    
+    {
+        std::lock_guard<std::mutex> lock(warm_mutex_);
+        auto it = warm_cache_.find(hash);
+        if (it == warm_cache_.end() || it->second->compressed_data.empty()) {
+            return false;
+        }
+        entry = it->second;
+    }
+    
+    // Decompress
+    std::vector<uint8_t> raw = decompress(entry->compressed_data, 0);
+    if (raw.empty()) {
+        LOG_ERROR("Failed to decompress hash %08x for L1 promotion", hash);
+        return false;
+    }
+    
+    // Insert to L1
+    insert_to_l1(hash, std::move(raw));
+    
+    // Keep in L2 (compressed), update state
+    {
+        std::lock_guard<std::mutex> lock(warm_mutex_);
+        entry->state = StateEntry::State::RAW;  // Now also in L1
+    }
+    
+    return true;
+}
+
+void StateStore::evict_l1_if_needed(size_t required_bytes) {
+    std::lock_guard<std::mutex> lock(hot_mutex_);
+    
+    while (hot_memory_usage_ + required_bytes > config_.hot_cache_size && 
+           !hot_lru_.empty()) {
+        hash_type oldest = hot_lru_.back();
+        auto it = hot_cache_.find(oldest);
+        
+        if (it != hot_cache_.end()) {
+            size_t freed = it->second->raw_data.size();
+            it->second->raw_data.clear();
+            it->second->raw_data.shrink_to_fit();
+            hot_memory_usage_ -= freed;
+            
+            // Move state to COMPRESSED if still in L2, otherwise PERSISTED
+            if (it->second->compressed_data.empty()) {
+                it->second->state = StateEntry::State::PERSISTED;
+            } else {
+                it->second->state = StateEntry::State::COMPRESSED;
+            }
+            
+            hot_cache_.erase(it);
+        }
+        
+        hot_lru_.pop_back();
+        hot_lru_index_.erase(oldest);
+    }
+}
+
+void StateStore::evict_l2_if_needed(size_t required_bytes) {
+    std::lock_guard<std::mutex> lock(warm_mutex_);
+    
+    while (warm_memory_usage_ + required_bytes > config_.warm_cache_size && 
+           !warm_lru_.empty()) {
+        hash_type oldest = warm_lru_.back();
+        auto it = warm_cache_.find(oldest);
+        
+        if (it != warm_cache_.end()) {
+            size_t freed = it->second->compressed_data.size();
+            warm_memory_usage_ -= freed;
+            warm_cache_.erase(it);
+        }
+        
+        warm_lru_.pop_back();
+        warm_lru_index_.erase(oldest);
+    }
+}
+
+void StateStore::update_hot_lru(hash_type hash) {
+    std::lock_guard<std::mutex> lock(hot_mutex_);
+    auto it = hot_lru_index_.find(hash);
+    if (it != hot_lru_index_.end()) {
+        hot_lru_.erase(it->second);
+        hot_lru_.push_front(hash);
+        it->second = hot_lru_.begin();
+    }
+}
+
+void StateStore::update_warm_lru(hash_type hash) {
+    std::lock_guard<std::mutex> lock(warm_mutex_);
+    auto it = warm_lru_index_.find(hash);
+    if (it != warm_lru_index_.end()) {
+        warm_lru_.erase(it->second);
+        warm_lru_.push_front(hash);
+        it->second = warm_lru_.begin();
+    }
+}
+
+/* ==============================================================================
+ * Save / Load
+ * ============================================================================== */
 
 hash_type StateStore::save(const void* data, size_t len) {
     if (!data || len == 0) return 0;
     
-    // Compute hash from raw data
     hash_type hash = compute_hash(data, len);
     
-    // Check if already exists (must hold lock during cache check and LRU update)
+    // Check if already exists (single lock scope to avoid deadlock)
+    bool in_hot = false, in_warm = false;
     {
-        std::unique_lock<std::mutex> lock(cache_mutex_);
-        auto it = cache_.find(hash);
-        if (it != cache_.end()) {
-            // Release cache_mutex_ before calling update_lru to avoid deadlock
-            lock.unlock();
-            update_lru(hash);
-            return hash;  // Already cached
+        std::lock_guard<std::mutex> lock(hot_mutex_);
+        auto it = hot_cache_.find(hash);
+        in_hot = (it != hot_cache_.end() && !it->second->raw_data.empty());
+        if (in_hot) {
+            // Update LRU while holding lock
+            auto idx_it = hot_lru_index_.find(hash);
+            if (idx_it != hot_lru_index_.end()) {
+                hot_lru_.erase(idx_it->second);
+                hot_lru_.push_front(hash);
+                idx_it->second = hot_lru_.begin();
+            }
         }
     }
     
-    // Check if exists on disk
-    if (exists_on_disk(hash)) {
-        return hash;  // Already persisted
+    if (in_hot || in_l2(hash) || exists_on_disk(hash)) {
+        update_warm_lru(hash);
+        return hash;
     }
     
-    // Create entry with raw data
-    auto entry = find_or_create_entry(hash);
-    entry->raw_data.resize(len);
-    memcpy(entry->raw_data.data(), data, len);
-    entry->state = StateEntry::State::RAW;
+    // Insert to L1 (raw)
+    std::vector<uint8_t> raw(len);
+    memcpy(raw.data(), data, len);
+    insert_to_l1(hash, std::move(raw));
     
-    // Update memory usage (atomic operation)
-    current_memory_usage_.fetch_add(len);
-    update_lru(hash);
-    
-    // Compress immediately (memory -> memory, fast)
-    entry->compressed_data = compress(entry->raw_data);
-    if (entry->compressed_data.empty() && !entry->raw_data.empty()) {
-        LOG_ERROR("StateStore compression failed for hash %08x", hash);
-        // Continue anyway - we still have raw data
+    // Get entry for persistence
+    StateEntryPtr entry;
+    {
+        std::lock_guard<std::mutex> lock(hot_mutex_);
+        entry = hot_cache_[hash];
     }
-    entry->state = StateEntry::State::COMPRESSED;
     
-    LOG_TRACE("StateStore saved hash %08x: raw=%zu, compressed=%zu (%.1f%%)",
-              hash, len, entry->compressed_data.size(),
-              100.0 * entry->compressed_data.size() / len);
+    // Compress for L2 and persistence
+    std::vector<uint8_t> compressed = compress(entry->raw_data);
+    if (!compressed.empty()) {
+        // Store compressed in entry for persistence
+        std::lock_guard<std::mutex> entry_lock(entry->mutex);
+        entry->compressed_data = std::move(compressed);
+        entry->state = StateEntry::State::COMPRESSED;
+        
+        // Also insert to L2
+        std::vector<uint8_t> compressed_copy = entry->compressed_data;
+        insert_to_l2(hash, std::move(compressed_copy));
+    }
     
     // Trigger async disk write
     {
@@ -213,149 +513,157 @@ hash_type StateStore::save(const void* data, size_t len) {
     }
     io_cv_.notify_one();
     
-    // Evict if memory pressure
-    evict_if_needed(0);
-    
+    LOG_TRACE("StateStore saved hash %08x: raw=%zu", hash, len);
     return hash;
 }
 
 ssize_t StateStore::load(hash_type hash, std::vector<uint8_t>& out_data) {
-    // Check memory cache
-    StateEntryPtr entry;
+    if (hash == 0) return -1;
+    
+    // Update statistics
     {
-        std::lock_guard<std::mutex> lock(cache_mutex_);
-        auto it = cache_.find(hash);
-        if (it != cache_.end()) {
-            entry = it->second;
-        }
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.load_requests++;
     }
     
-    if (entry) {
-        update_lru(hash);
-        entry->last_access.store(++access_counter_);
-        
-        // Lock entry for state check and data access
-        std::lock_guard<std::mutex> entry_lock(entry->mutex);
-        
-        StateEntry::State state = entry->state.load();
-        
-        // Return raw data if available
-        if (!entry->raw_data.empty()) {
-            out_data = entry->raw_data;
-            LOG_TRACE("StateStore load hash %08x from raw memory", hash);
-            return static_cast<ssize_t>(out_data.size());
-        }
-        
-        // Decompress if needed
-        if (!entry->compressed_data.empty()) {
-            // Pass 0 to let decompress() figure out the size
-            out_data = decompress(entry->compressed_data, 0);
-            
-            if (out_data.empty()) {
-                LOG_ERROR("StateStore decompression failed for hash %08x", hash);
-                return -1;
+    // Try L1 first
+    {
+        std::lock_guard<std::mutex> lock(hot_mutex_);
+        auto it = hot_cache_.find(hash);
+        if (it != hot_cache_.end() && !it->second->raw_data.empty()) {
+            out_data = it->second->raw_data;
+            it->second->last_access = ++access_counter_;
+            // Update LRU inline (already holding lock)
+            auto idx_it = hot_lru_index_.find(hash);
+            if (idx_it != hot_lru_index_.end()) {
+                hot_lru_.erase(idx_it->second);
+                hot_lru_.push_front(hash);
+                idx_it->second = hot_lru_.begin();
             }
-            
-            // Restore raw data if memory allows
-            size_t current_usage = current_memory_usage_.load();
-            if (current_usage + out_data.size() <= config_.memory_cache_size) {
-                entry->raw_data = out_data;
-                current_memory_usage_.fetch_add(out_data.size());
-                entry->state = StateEntry::State::RAW;
+            // Update stats
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                stats_.l1_hits++;
             }
-            
-            LOG_TRACE("StateStore load hash %08x from compressed memory", hash);
+            LOG_TRACE("StateStore load %08x from L1", hash);
             return static_cast<ssize_t>(out_data.size());
         }
     }
     
-    // Check disk
+    // Try L2 (decompress to L1)
+    std::vector<uint8_t> compressed_from_l2;
+    {
+        std::lock_guard<std::mutex> lock(warm_mutex_);
+        auto it = warm_cache_.find(hash);
+        if (it != warm_cache_.end() && !it->second->compressed_data.empty()) {
+            // Copy compressed data before releasing lock
+            compressed_from_l2 = it->second->compressed_data;
+            it->second->last_access = ++access_counter_;
+            // Update LRU inline (already holding lock)
+            auto idx_it = warm_lru_index_.find(hash);
+            if (idx_it != warm_lru_index_.end()) {
+                warm_lru_.erase(idx_it->second);
+                warm_lru_.push_front(hash);
+                idx_it->second = warm_lru_.begin();
+            }
+        }
+    }
+    
+    // Decompress outside the lock
+    if (!compressed_from_l2.empty()) {
+        out_data = decompress(compressed_from_l2, 0);
+        if (out_data.empty()) {
+            LOG_ERROR("Decompression failed for %08x", hash);
+            return -1;
+        }
+        
+        // Promote to L1 if space allows
+        if (hot_memory_usage_ + out_data.size() <= config_.hot_cache_size) {
+            insert_to_l1(hash, std::vector<uint8_t>(out_data));
+        }
+        
+        // Update stats
+        {
+            std::lock_guard<std::mutex> lock(stats_mutex_);
+            stats_.l2_hits++;
+        }
+        LOG_TRACE("StateStore load %08x from L2", hash);
+        return static_cast<ssize_t>(out_data.size());
+    }
+    
+    // Try disk
     if (exists_on_disk(hash)) {
-        // read_from_disk already returns decompressed data
         if (read_from_disk(hash, out_data)) {
-            LOG_TRACE("StateStore load hash %08x from disk", hash);
+            // Insert to L1 and L2
+            insert_to_l1(hash, std::vector<uint8_t>(out_data));
             
-            if (out_data.empty()) {
-                LOG_ERROR("Empty data read from disk for hash %08x", hash);
-                return -1;
+            std::vector<uint8_t> compressed = compress(out_data);
+            if (!compressed.empty()) {
+                insert_to_l2(hash, std::move(compressed));
             }
             
-            // Cache it
-            auto new_entry = find_or_create_entry(hash);
-            new_entry->raw_data = out_data;
-            new_entry->state = StateEntry::State::RAW;
-            current_memory_usage_.fetch_add(out_data.size());
-            update_lru(hash);
-            
-            evict_if_needed(0);
+            // Update stats
+            {
+                std::lock_guard<std::mutex> lock(stats_mutex_);
+                stats_.disk_reads++;
+            }
+            LOG_TRACE("StateStore load %08x from disk", hash);
             return static_cast<ssize_t>(out_data.size());
         }
     }
     
-    return -1;  // Not found
+    return -1;
 }
 
 bool StateStore::exists(hash_type hash) {
-    // Check memory
-    {
-        std::lock_guard<std::mutex> lock(cache_mutex_);
-        if (cache_.find(hash) != cache_.end()) {
-            return true;
-        }
-    }
-    
-    // Check disk
+    if (in_l1(hash) || in_l2(hash)) return true;
     return exists_on_disk(hash);
 }
 
 StateEntryPtr StateStore::get_entry(hash_type hash) {
-    std::lock_guard<std::mutex> lock(cache_mutex_);
-    auto it = cache_.find(hash);
-    if (it != cache_.end()) {
-        return it->second;
+    {
+        std::lock_guard<std::mutex> lock(hot_mutex_);
+        auto it = hot_cache_.find(hash);
+        if (it != hot_cache_.end()) return it->second;
+    }
+    {
+        std::lock_guard<std::mutex> lock(warm_mutex_);
+        auto it = warm_cache_.find(hash);
+        if (it != warm_cache_.end()) return it->second;
     }
     return nullptr;
 }
 
 bool StateStore::wait_persisted(hash_type hash, uint64_t timeout_ms) {
-    StateEntryPtr entry;
-    {
-        std::unique_lock<std::mutex> lock(cache_mutex_);
-        auto it = cache_.find(hash);
-        if (it == cache_.end()) {
-            // Not in cache, check disk
-            lock.unlock();
-            return exists_on_disk(hash);
-        }
-        entry = it->second;
-    }
+    // Check disk first
+    if (exists_on_disk(hash)) return true;
     
+    // Get entry
+    StateEntryPtr entry = get_entry(hash);
     if (!entry) {
         return exists_on_disk(hash);
     }
     
     std::unique_lock<std::mutex> lock(entry->mutex);
     
-    // Use a copy of shared_ptr in lambda to ensure entry stays alive
-    auto state_check = [entry]() {
-        StateEntry::State s = entry->state.load();
+    auto check_state = [entry]() {
+        auto s = entry->state.load();
         return s == StateEntry::State::PERSISTED || 
                s == StateEntry::State::PERSISTING;
     };
     
     if (timeout_ms == 0) {
-        entry->cv.wait(lock, state_check);
+        entry->cv.wait(lock, check_state);
         return true;
     } else {
         return entry->cv.wait_for(lock, 
-            std::chrono::milliseconds(timeout_ms),
-            state_check);
+            std::chrono::milliseconds(timeout_ms), check_state);
     }
 }
 
-/* ======================================================================
- * Background I/O Worker
- * ====================================================================== */
+/* ==============================================================================
+ * Background I/O Worker (Persistence)
+ * ============================================================================== */
 
 void StateStore::io_worker() {
     while (!shutdown_.load()) {
@@ -376,127 +684,100 @@ void StateStore::io_worker() {
         
         if (!entry || entry->compressed_data.empty()) continue;
         
-        // Lock entry before modifying state
-        std::lock_guard<std::mutex> entry_lock(entry->mutex);
-        
         // Mark as persisting
-        entry->state.store(StateEntry::State::PERSISTING);
-        
-        // Release entry lock during I/O (write_to_disk is thread-safe)
-        entry->mutex.unlock();
+        {
+            std::lock_guard<std::mutex> entry_lock(entry->mutex);
+            entry->state = StateEntry::State::PERSISTING;
+        }
         
         // Write to disk
         bool success = write_to_disk(entry->hash, entry->compressed_data);
         
-        // Re-acquire lock to update state
-        entry->mutex.lock();
-        
-        if (success) {
-            entry->state.store(StateEntry::State::PERSISTED);
-            LOG_TRACE("StateStore persisted hash %08x to disk", entry->hash);
-        } else {
-            LOG_ERROR("StateStore failed to persist hash %08x", entry->hash);
+        {
+            std::lock_guard<std::mutex> entry_lock(entry->mutex);
+            if (success) {
+                entry->state = StateEntry::State::PERSISTED;
+                LOG_TRACE("Persisted hash %08x", entry->hash);
+            } else {
+                LOG_ERROR("Failed to persist hash %08x", entry->hash);
+            }
         }
         
         entry->cv.notify_all();
     }
 }
 
-/* ======================================================================
+/* ==============================================================================
  * Compression
- * ====================================================================== */
+ * ============================================================================== */
 
 std::vector<uint8_t> StateStore::compress(const std::vector<uint8_t>& data) {
     if (data.empty()) return {};
     
-    // Validate compression level (ZSTD supports 1-22)
     int level = config_.compression_level;
     if (level < 1) level = 1;
     if (level > 22) level = 22;
     
     size_t bound = ZSTD_compressBound(data.size());
     if (bound == 0 || bound > SIZE_MAX / 2) {
-        LOG_ERROR("ZSTD compressBound returned invalid size: %zu", bound);
+        LOG_ERROR("ZSTD_compressBound failed");
         return {};
     }
     
     std::vector<uint8_t> compressed;
     try {
         compressed.resize(bound);
-    } catch (const std::bad_alloc& e) {
-        LOG_ERROR("Failed to allocate compression buffer: %s", e.what());
+    } catch (...) {
+        LOG_ERROR("Failed to allocate compression buffer");
         return {};
     }
     
-    size_t compressed_size = ZSTD_compress(
-        compressed.data(), bound,
-        data.data(), data.size(),
-        level);
+    size_t result = ZSTD_compress(compressed.data(), bound,
+                                  data.data(), data.size(), level);
     
-    if (ZSTD_isError(compressed_size)) {
-        LOG_ERROR("ZSTD compression failed: %s", ZSTD_getErrorName(compressed_size));
+    if (ZSTD_isError(result)) {
+        LOG_ERROR("ZSTD compression failed: %s", ZSTD_getErrorName(result));
         return {};
     }
     
-    compressed.resize(compressed_size);
+    compressed.resize(result);
     return compressed;
 }
 
 std::vector<uint8_t> StateStore::decompress(const std::vector<uint8_t>& data, size_t original_size) {
     if (data.empty()) return {};
     
-    // If original_size is unknown or seems too small, use a safe estimate
     size_t dst_capacity = original_size;
     if (original_size == 0 || original_size == ZSTD_CONTENTSIZE_UNKNOWN) {
-        // Get actual content size from frame header
         unsigned long long frame_size = ZSTD_getFrameContentSize(data.data(), data.size());
         if (frame_size != ZSTD_CONTENTSIZE_UNKNOWN && frame_size != ZSTD_CONTENTSIZE_ERROR) {
             if (frame_size > SIZE_MAX) {
-                LOG_ERROR("ZSTD frame content size too large: %llu", frame_size);
+                LOG_ERROR("Frame content size too large");
                 return {};
             }
             dst_capacity = static_cast<size_t>(frame_size);
         } else {
-            // Conservative estimate: compression ratio rarely exceeds 10x
-            if (data.size() > SIZE_MAX / 10) {
-                LOG_ERROR("Data size too large for decompression estimate");
-                return {};
-            }
-            dst_capacity = data.size() * 10;
+            dst_capacity = data.size() * 10;  // Conservative estimate
         }
-    } else {
-        dst_capacity = original_size;
     }
     
-    // Ensure minimum capacity
-    if (dst_capacity < 64) {
-        dst_capacity = 64;
-    }
+    if (dst_capacity < 64) dst_capacity = 64;
     
-    // Limit max expansion to prevent memory exhaustion
-    const size_t max_expansion_factor = 100;
-    size_t max_capacity;
-    if (data.size() > SIZE_MAX / max_expansion_factor) {
-        max_capacity = SIZE_MAX;
-    } else {
-        max_capacity = data.size() * max_expansion_factor;
-    }
-    
-    // Try decompression with potential retry
-    std::vector<uint8_t> decompressed;
+    const size_t max_factor = 100;
+    size_t max_capacity = (data.size() > SIZE_MAX / max_factor) ? 
+                          SIZE_MAX : data.size() * max_factor;
     
     while (dst_capacity <= max_capacity) {
+        std::vector<uint8_t> decompressed;
         try {
             decompressed.resize(dst_capacity);
-        } catch (const std::bad_alloc& e) {
-            LOG_ERROR("Failed to allocate decompression buffer (%zu bytes): %s", 
-                      dst_capacity, e.what());
+        } catch (...) {
+            LOG_ERROR("Failed to allocate decompression buffer");
             return {};
         }
         
-        size_t result = ZSTD_decompress(
-            decompressed.data(), dst_capacity,
-            data.data(), data.size());
+        size_t result = ZSTD_decompress(decompressed.data(), dst_capacity,
+                                        data.data(), data.size());
         
         if (!ZSTD_isError(result)) {
             decompressed.resize(result);
@@ -504,102 +785,46 @@ std::vector<uint8_t> StateStore::decompress(const std::vector<uint8_t>& data, si
         }
         
         if (ZSTD_getErrorCode(result) == ZSTD_error_dstSize_tooSmall) {
-            // Buffer too small, double it and retry
-            if (dst_capacity > max_capacity / 2) {
-                LOG_ERROR("Decompression failed: buffer expansion would exceed max capacity");
-                return {};
-            }
+            if (dst_capacity > max_capacity / 2) break;
             dst_capacity *= 2;
-            LOG_WARN("Decompression buffer too small, retrying with %zu bytes", dst_capacity);
         } else {
-            LOG_ERROR("ZSTD decompression failed: %s (code: %zu)", 
-                      ZSTD_getErrorName(result), ZSTD_getErrorCode(result));
+            LOG_ERROR("ZSTD decompression failed: %s", ZSTD_getErrorName(result));
             return {};
         }
     }
     
-    LOG_ERROR("Decompression failed: max buffer size exceeded (%zu bytes)", dst_capacity);
+    LOG_ERROR("Decompression buffer exceeded max capacity");
     return {};
 }
 
-/* ======================================================================
+/* ==============================================================================
  * Disk Operations
- * ====================================================================== */
+ * ============================================================================== */
 
 bool StateStore::write_to_disk(hash_type hash, const std::vector<uint8_t>& data) {
     std::string path = fileutils::format_hash_filename("memory", ".mem.zstd", hash);
-    
-    // Create parent directory if needed
     fileutils::ensure_directory_for_file(path);
     
-    // Write compressed data directly using the same format as compress_tmp_file
-    // Format: [compressed_chunk_size][compressed_data]...
     FILE* fp = fopen(path.c_str(), "wb");
     if (!fp) {
-        LOG_ERROR("Failed to open %s for writing: %s", path.c_str(), strerror(errno));
+        LOG_ERROR("Failed to open %s: %s", path.c_str(), strerror(errno));
         return false;
     }
     
-    // RAII wrapper to ensure fclose is called
     struct FileGuard {
         FILE* fp;
         FileGuard(FILE* f) : fp(f) {}
         ~FileGuard() { if (fp) fclose(fp); }
     } file_guard(fp);
     
-    // Validate compression level
-    int level = config_.compression_level;
-    if (level < 1) level = 1;
-    if (level > 22) level = 22;
-    
-    const size_t CHUNK_SIZE = 64 * 1024;
-    size_t offset = 0;
-    
-    while (offset < data.size()) {
-        size_t remaining = data.size() - offset;
-        size_t to_compress = std::min(CHUNK_SIZE, remaining);
-        
-        // Compress chunk
-        size_t compressed_bound = ZSTD_compressBound(to_compress);
-        if (compressed_bound == 0) {
-            LOG_ERROR("ZSTD_compressBound returned 0 for size %zu", to_compress);
-            return false;
-        }
-        
-        std::vector<uint8_t> compressed;
-        try {
-            compressed.resize(compressed_bound);
-        } catch (const std::bad_alloc& e) {
-            LOG_ERROR("Failed to allocate compression buffer: %s", e.what());
-            return false;
-        }
-        
-        size_t compressed_size = ZSTD_compress(
-            compressed.data(), compressed_bound,
-            data.data() + offset, to_compress,
-            level);
-        
-        if (ZSTD_isError(compressed_size)) {
-            LOG_ERROR("ZSTD compression failed: %s", ZSTD_getErrorName(compressed_size));
-            return false;
-        }
-        
-        // Write [size][data]
-        if (fwrite(&compressed_size, sizeof(size_t), 1, fp) != 1) {
-            LOG_ERROR("Failed to write chunk size to %s", path.c_str());
-            return false;
-        }
-        if (fwrite(compressed.data(), 1, compressed_size, fp) != compressed_size) {
-            LOG_ERROR("Failed to write compressed data to %s", path.c_str());
-            return false;
-        }
-        
-        offset += to_compress;
+    // Write raw compressed data directly (our format)
+    if (fwrite(data.data(), 1, data.size(), fp) != data.size()) {
+        LOG_ERROR("Failed to write data to %s", path.c_str());
+        return false;
     }
     
-    // Flush to ensure data is written to disk
     if (fflush(fp) != 0) {
-        LOG_ERROR("Failed to flush data to %s: %s", path.c_str(), strerror(errno));
+        LOG_ERROR("Failed to flush %s: %s", path.c_str(), strerror(errno));
         return false;
     }
     
@@ -609,66 +834,97 @@ bool StateStore::write_to_disk(hash_type hash, const std::vector<uint8_t>& data)
 bool StateStore::read_from_disk(hash_type hash, std::vector<uint8_t>& data) {
     std::string path = fileutils::format_hash_filename("memory", ".mem.zstd", hash);
     
-    // Check if file exists first
     if (!fileutils::file_exists(path)) {
         return false;
     }
     
-    // Use decompress_file_tmp which handles the [size][compressed_data] format
-    FILE* decompressed_fp = decompress_file_tmp(path.c_str());
-    if (!decompressed_fp) {
-        LOG_ERROR("Failed to decompress file: %s", path.c_str());
+    FILE* fp = fopen(path.c_str(), "rb");
+    if (!fp) {
+        LOG_ERROR("Failed to open %s: %s", path.c_str(), strerror(errno));
         return false;
     }
     
-    // RAII wrapper to ensure fclose is called
     struct FileGuard {
         FILE* fp;
         FileGuard(FILE* f) : fp(f) {}
         ~FileGuard() { if (fp) fclose(fp); }
-    } file_guard(decompressed_fp);
+    } file_guard(fp);
     
-    // Read all decompressed data
-    if (fseek(decompressed_fp, 0, SEEK_END) != 0) {
-        LOG_ERROR("Failed to seek to end of decompressed file");
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        LOG_ERROR("Failed to seek end of %s", path.c_str());
         return false;
     }
     
-    long file_size = ftell(decompressed_fp);
-    if (file_size < 0) {
-        LOG_ERROR("Failed to get file size: %s", strerror(errno));
+    long size = ftell(fp);
+    if (size < 0) {
+        LOG_ERROR("Failed to get size of %s", path.c_str());
         return false;
     }
     
-    if (fseek(decompressed_fp, 0, SEEK_SET) != 0) {
-        LOG_ERROR("Failed to seek to beginning of decompressed file");
+    if (size == 0) {
+        data.clear();
+        return true;
+    }
+    
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        LOG_ERROR("Failed to seek start of %s", path.c_str());
         return false;
     }
     
-    // Validate file size to prevent memory exhaustion
-    if (file_size > static_cast<long>(config_.memory_cache_size)) {
-        LOG_ERROR("Decompressed file size (%ld) exceeds memory cache limit", file_size);
+    std::vector<uint8_t> compressed(size);
+    if (fread(compressed.data(), 1, size, fp) != static_cast<size_t>(size)) {
+        LOG_ERROR("Failed to read %s", path.c_str());
+        return false;
+    }
+    
+    data = decompress(compressed, 0);
+    return !data.empty();
+}
+
+bool StateStore::read_compressed_from_disk(hash_type hash, std::vector<uint8_t>& compressed_data) {
+    std::string path = fileutils::format_hash_filename("memory", ".mem.zstd", hash);
+    
+    if (!fileutils::file_exists(path)) {
+        return false;
+    }
+    
+    FILE* fp = fopen(path.c_str(), "rb");
+    if (!fp) {
+        LOG_ERROR("Failed to open %s: %s", path.c_str(), strerror(errno));
+        return false;
+    }
+    
+    struct FileGuard {
+        FILE* fp;
+        FileGuard(FILE* f) : fp(f) {}
+        ~FileGuard() { if (fp) fclose(fp); }
+    } file_guard(fp);
+    
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        LOG_ERROR("Failed to seek end of %s", path.c_str());
+        return false;
+    }
+    
+    long size = ftell(fp);
+    if (size <= 0) {
+        return false;
+    }
+    
+    if (fseek(fp, 0, SEEK_SET) != 0) {
+        LOG_ERROR("Failed to seek start of %s", path.c_str());
         return false;
     }
     
     try {
-        data.resize(file_size);
-    } catch (const std::bad_alloc& e) {
-        LOG_ERROR("Failed to allocate buffer for decompressed data: %s", e.what());
+        compressed_data.resize(size);
+    } catch (...) {
+        LOG_ERROR("Failed to allocate buffer for %s", path.c_str());
         return false;
     }
     
-    if (file_size > 0) {
-        size_t read_size = fread(data.data(), 1, file_size, decompressed_fp);
-        if (read_size != static_cast<size_t>(file_size)) {
-            if (ferror(decompressed_fp)) {
-                LOG_ERROR("Error reading decompressed file: %s", strerror(errno));
-            } else if (feof(decompressed_fp)) {
-                LOG_ERROR("Unexpected EOF reading decompressed file (expected %ld, got %zu)", 
-                          file_size, read_size);
-            }
-            return false;
-        }
+    if (fread(compressed_data.data(), 1, size, fp) != static_cast<size_t>(size)) {
+        LOG_ERROR("Failed to read %s", path.c_str());
+        return false;
     }
     
     return true;
@@ -679,9 +935,49 @@ bool StateStore::exists_on_disk(hash_type hash) {
     return fileutils::file_exists(path);
 }
 
-/* ======================================================================
+/* ==============================================================================
+ * Statistics
+ * ============================================================================== */
+
+StateStore::Stats StateStore::get_stats() const {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    return stats_;
+}
+
+void StateStore::reset_stats() {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_ = Stats();
+}
+
+void StateStore::print_stats() const {
+    Stats stats = get_stats();
+    
+    printf("\n=== StateStore Cache Statistics ===\n");
+    printf("Load requests:     %lu\n", stats.load_requests);
+    printf("  L1 hits:         %lu (%.1f%%)\n", stats.l1_hits, 
+           stats.load_requests > 0 ? 100.0 * stats.l1_hits / stats.load_requests : 0.0);
+    printf("  L2 hits:         %lu (%.1f%%)\n", stats.l2_hits,
+           stats.load_requests > 0 ? 100.0 * stats.l2_hits / stats.load_requests : 0.0);
+    printf("  Disk reads:      %lu (%.1f%%)\n", stats.disk_reads,
+           stats.load_requests > 0 ? 100.0 * stats.disk_reads / stats.load_requests : 0.0);
+    printf("  Hit rate:        %.1f%%\n", stats.hit_rate());
+    
+    size_t l1_usage = hot_memory_usage_.load();
+    size_t l2_usage = warm_memory_usage_.load();
+    printf("\nCache Usage:\n");
+    printf("  L1 (Hot):        %zu MB / %zu MB (%.1f%%)\n",
+           l1_usage / (1024*1024), config_.hot_cache_size / (1024*1024),
+           100.0 * l1_usage / config_.hot_cache_size);
+    printf("  L2 (Warm):       %zu MB / %zu MB (%.1f%%)\n",
+           l2_usage / (1024*1024), config_.warm_cache_size / (1024*1024),
+           100.0 * l2_usage / config_.warm_cache_size);
+    printf("  Prefetch issued: %lu\n", stats.prefetch_issued);
+    printf("====================================\n");
+}
+
+/* ==============================================================================
  * C Interface
- * ====================================================================== */
+ * ============================================================================== */
 
 extern "C" {
 
@@ -698,7 +994,7 @@ ssize_t state_store_load(uint32_t hash, void* data, size_t max_len) {
     ssize_t result = StateStore::instance().load(hash, buffer);
     if (result < 0) return -1;
     
-    size_t copy_len = std::min((size_t)result, max_len);
+    size_t copy_len = std::min(static_cast<size_t>(result), max_len);
     memcpy(data, buffer.data(), copy_len);
     return result;
 }
@@ -707,4 +1003,4 @@ int state_store_exists(uint32_t hash) {
     return StateStore::instance().exists(hash) ? 1 : 0;
 }
 
-}
+} // extern "C"

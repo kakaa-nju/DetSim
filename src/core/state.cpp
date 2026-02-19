@@ -31,7 +31,7 @@
 
 PTMC_STATE ptmc_state;
 TSS state_tree;
-LSS state_queue;
+LSS state_queue;  // Kept for compatibility, but internally uses StateStore queue
 SSS state_set;
 
 std::unordered_map<int, void *> rseq_struct;
@@ -472,19 +472,24 @@ void tracee_state::recover_running_state(int index)
  * Section 6: State Queue & Tree Management
  * ====================================================================== */
 
-void state_queue_append(sys_state *s) { state_queue.push_back(s->ss_hash); }
+void state_queue_append(sys_state *s) { 
+  state_queue.push_back(s->ss_hash); 
+  StateStore::instance().queue_push_back(s->ss_hash);
+}
 
 void state_queue_append_front(sys_state *s)
 {
   state_queue.push_front(s->ss_hash);
+  // Note: StateStore doesn't support push_front, so we only use it for extraction
 }
 
 sys_state *state_queue_extract()
 {
-  if (state_queue.empty())
+  if (StateStore::instance().queue_empty())
     return NULL;
-  sys_state *s = new sys_state(state_queue.front());
-  state_queue.pop_front();
+  hash_type hash = StateStore::instance().queue_front();
+  StateStore::instance().queue_pop_front();
+  sys_state *s = new sys_state(hash);
   return s;
 }
 
@@ -842,7 +847,7 @@ bool mapping_exists(maps_item &a, std::vector<maps_item> &array)
 void show_state_stats()
 {
   printf("State set size: %zu\n", state_set.size());
-  printf("Queue size:     %zu\n", state_queue.size());
+  printf("Queue size:     %zu\n", StateStore::instance().queue_size());
 }
 
 /* ======================================================================
