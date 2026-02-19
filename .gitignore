@@ -26,8 +26,7 @@
 
 # Third party
 !third_party/
-!third_party/cereal/
-!third_party/cereal/**
+!third_party/**
 
 # Tests
 !tests/
@@ -67,3 +66,7 @@ sstate/
 # Debug
 core.*
 *.log
+
+# tools
+!tools/
+!tools/**
