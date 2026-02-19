@@ -37,7 +37,7 @@ debug: tracer
 
 tracer: $(OBJS) nr2call.o
 	$(LD) $^ $(LDFLAGS) -o tracer
-	-mkdir mappings memory filesystem tstate sstate
+	-mkdir memory sstate
 
 nr2call.o: nr2call.c
 	gcc -c $< -O3 -g
@@ -65,8 +65,8 @@ wc:
 	@find src -name "*.[ch]" -o -name "*.cpp" | xargs wc
 
 clear:
-	-/bin/rm -rf mappings memory filesystem tstate sstate
-	-mkdir mappings memory filesystem tstate sstate
+	-/bin/rm -rf memory sstate
+	-mkdir memory sstate
 
 clean:
 	-/bin/rm -f $(OBJS) $(DEPS) nr2call.o tracer *.so

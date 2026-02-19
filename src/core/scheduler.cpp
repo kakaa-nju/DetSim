@@ -220,7 +220,7 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
                        info->args[5]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_gettimeofday:
       ret = emu_gettimeofday((struct timeval *)info->args[0],
                              (struct timezone *)info->args[1]);
@@ -233,7 +233,7 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
       tracee_set_orig_rax(pid, ret);
       info->rval = ret;
       emu_socket(ret, info->args[0], info->args[1], info->args[2]);
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_listen:
       ret = emu_listen(info->args[0], info->args[1]);
       tracee_set_rax(pid, ret);
@@ -244,7 +244,7 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
                      info->args[2]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_connect:
       ret = emu_connect(info->args[0], (const struct sockaddr *)info->args[1],
                         info->args[2]);

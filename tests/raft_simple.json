@@ -1,0 +1,15 @@
+{
+  "Loglevel": 2,
+  "Nodes": 3,
+  "Tracee": [
+    ["./tests/raft/raft", "0"],
+    ["./tests/raft/raft", "1"],
+    ["./tests/raft/raft", "2"]
+  ],
+  "Addr": ["192.168.0.1", "192.168.0.2", "192.168.0.3"],
+  "WorkingDir": "/",
+  "SharedFiles": [],
+  "ChoosePoint": [
+    { "syscall": "gettimeofday", "choose": 2 }
+  ]
+}

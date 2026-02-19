@@ -14,6 +14,8 @@
 #include "scheduler.h"
 #include "utils.h"
 #include "state_store.h"
+#include "sockstate.h"
+#include <fmt/format.h>
 #include <cjson/cJSON.h>
 #include <csignal>
 #include <dirent.h>
@@ -291,11 +293,96 @@ static int cmd_load(char *args)
   return 0;
 }
 
+/* Helper: Format sockaddr for display */
+static std::string format_addr_short(const ptmc_addr &addr)
+{
+  if (addr.size() < sizeof(struct sockaddr_in))
+    return "<invalid>";
+  
+  struct sockaddr_in *sin = (struct sockaddr_in *)addr.c_str();
+  char ip[INET_ADDRSTRLEN];
+  inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
+  return fmt::format("{}:{}", ip, ntohs(sin->sin_port));
+}
+
+/* Helper: Display UDP buffer state */
+static void show_udp_buffers()
+{
+  printf("\n[UDP Buffers]\n");
+  
+  for (int i = 0; i < NP; i++)
+  {
+    const auto &udp_map = ptmc_state.udp_buffer_lists[i];
+    
+    if (udp_map.empty())
+    {
+      printf("  Process %d: (empty)\n", i);
+      continue;
+    }
+    
+    printf("  Process %d:\n", i);
+    
+    for (const auto &kv : udp_map)
+    {
+      int fd = kv.first;
+      const udp_buffer &buf = kv.second;
+      
+      printf("    fd=%d: ", fd);
+      
+      if (buf.empty())
+      {
+        printf("(empty queue)\n");
+        continue;
+      }
+      
+      printf("[%zu datagrams]\n", buf.size());
+      
+      /* Show each datagram (limit to first 5) */
+      size_t count = 0;
+      for (const auto &dg : buf)
+      {
+        if (count >= 5)
+        {
+          printf("      ... (%zu more)\n", buf.size() - count);
+          break;
+        }
+        
+        std::string from_str = format_addr_short(dg.from);
+        size_t content_len = dg.content.size();
+        
+        /* Truncate content display */
+        std::string content_preview;
+        if (content_len > 32)
+        {
+          content_preview = fmt::format("{}... ({} bytes total)",
+                                        dg.content.substr(0, 32),
+                                        content_len);
+        }
+        else
+        {
+          content_preview = dg.content;
+          /* Escape non-printable */
+          for (auto &c : content_preview)
+          {
+            if (!isprint(c)) c = '.';
+          }
+        }
+        
+        printf("      [%zu] from=%s, len=%zu, content=\"%s\"\n",
+               count, from_str.c_str(), content_len, content_preview.c_str());
+        
+        count++;
+      }
+    }
+  }
+}
+
 static int cmd_info(char *args)
 {
   printf("Current process: %d (pid=%d)\n", ptmc_state.cursor,
          ptmc_state.pids[ptmc_state.cursor]);
   show_syscall_history();
+  show_udp_buffers();
   return 0;
 }
 
@@ -1177,6 +1264,102 @@ static void diff_sock_list(const std::list<ptmc_sock> &a, const std::list<ptmc_s
   }
 }
 
+/* Helper: Compare UDP buffers */
+static void diff_udp_buffers(const std::unordered_map<int, udp_buffer> &a,
+                             const std::unordered_map<int, udp_buffer> &b,
+                             int proc_id, bool &has_diff)
+{
+  /* Check if maps have same keys */
+  std::set<int> keys_a, keys_b;
+  for (const auto &kv : a) keys_a.insert(kv.first);
+  for (const auto &kv : b) keys_b.insert(kv.first);
+  
+  if (keys_a != keys_b)
+  {
+    printf("  [Process %d - UDP Buffers]\n", proc_id);
+    printf("    fd sets differ\n");
+    has_diff = true;
+    return;
+  }
+  
+  /* Compare each fd's buffer */
+  for (const auto &kv : a)
+  {
+    int fd = kv.first;
+    const udp_buffer &buf_a = kv.second;
+    const udp_buffer &buf_b = b.at(fd);
+    
+    if (buf_a.size() != buf_b.size())
+    {
+      printf("  [Process %d - UDP Buffer fd=%d]\n", proc_id, fd);
+      printf("    queue size: %zu != %zu\n", buf_a.size(), buf_b.size());
+      has_diff = true;
+      continue;
+    }
+    
+    /* Compare each datagram */
+    auto it_a = buf_a.begin();
+    auto it_b = buf_b.begin();
+    size_t idx = 0;
+    bool printed_header = false;
+    
+    while (it_a != buf_a.end() && it_b != buf_b.end())
+    {
+      if (it_a->content != it_b->content || it_a->from != it_b->from)
+      {
+        if (!printed_header)
+        {
+          printf("  [Process %d - UDP Buffer fd=%d]\n", proc_id, fd);
+          printed_header = true;
+          has_diff = true;
+        }
+        printf("    datagram[%zu]: content or from addr differ\n", idx);
+        printf("      size: %zu vs %zu\n", it_a->content.size(), it_b->content.size());
+      }
+      ++it_a;
+      ++it_b;
+      ++idx;
+    }
+  }
+}
+
+/* Helper: Compare TCP buffers */
+static void diff_tcp_buffers(const std::unordered_map<int, tcp_buffer> &a,
+                             const std::unordered_map<int, tcp_buffer> &b,
+                             int proc_id, bool &has_diff)
+{
+  /* Check if maps have same keys */
+  std::set<int> keys_a, keys_b;
+  for (const auto &kv : a) keys_a.insert(kv.first);
+  for (const auto &kv : b) keys_b.insert(kv.first);
+  
+  if (keys_a != keys_b)
+  {
+    printf("  [Process %d - TCP Buffers]\n", proc_id);
+    printf("    fd sets differ\n");
+    has_diff = true;
+    return;
+  }
+  
+  /* Compare each fd's buffer content */
+  for (const auto &kv : a)
+  {
+    int fd = kv.first;
+    const tcp_buffer &buf_a = kv.second;
+    const tcp_buffer &buf_b = b.at(fd);
+    
+    std::string content_a = buf_a.ss.str();
+    std::string content_b = buf_b.ss.str();
+    
+    if (content_a != content_b)
+    {
+      printf("  [Process %d - TCP Buffer fd=%d]\n", proc_id, fd);
+      printf("    content length: %zu != %zu\n", content_a.size(), content_b.size());
+      has_diff = true;
+    }
+  }
+}
+
 /* Main cmd_diff implementation */
 static int cmd_diff(char *args)
 {
@@ -1331,6 +1514,8 @@ static int cmd_diff(char *args)
     if (!memory_only)
     {
       diff_sock_list(state_a.child[i].sock_list, state_b.child[i].sock_list, i, proc_has_diff);
+      diff_udp_buffers(state_a.child[i].udp_buffer_list, state_b.child[i].udp_buffer_list, i, proc_has_diff);
+      diff_tcp_buffers(state_a.child[i].tcp_buffer_list, state_b.child[i].tcp_buffer_list, i, proc_has_diff);
     }
     
     if (proc_has_diff) any_diff = true;

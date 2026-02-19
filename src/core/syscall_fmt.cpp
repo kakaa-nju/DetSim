@@ -8,8 +8,10 @@
 #include "state.h"
 #include "guest.h"
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
+#include <string.h>
 #include <sys/syscall.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -58,13 +60,33 @@ static int format_sockaddr(char *dest, struct sockaddr_in *addr)
 /* Format: int fd, void *buf, size_t count (read/write style) */
 void format_fd_buf_count(char *buf, tracee_state *t, syscall_info *info)
 {
-  char *mem = (char *)t->read_snapshot_mem(info->args[1], info->args[2]);
-  assert(mem);
+  /* For failed reads/writes, don't print any buffer content */
+  if (info->rval < 0) {
+    sprintf(buf, "%s(%ld, %p, %ld) = %ld <failed>", syscalls[info->nr], 
+            info->args[0], (void *)info->args[1], info->args[2], info->rval);
+    return;
+  }
+
+  /* Limit displayed bytes to actual bytes read/written or 4KB */
+  size_t display_len = info->rval;
+  if (display_len > 4096)
+    display_len = 4096;
+
+  char *mem = (char *)t->read_snapshot_mem(info->args[1], display_len);
+  if (!mem) {
+    sprintf(buf, "%s(%ld, %p, %ld) = %ld <error reading buffer>", 
+            syscalls[info->nr], info->args[0], (void *)info->args[1], 
+            info->args[2], info->rval);
+    return;
+  }
 
   int pos = sprintf(buf, "%s(%ld, %p(\"", syscalls[info->nr], info->args[0],
                     (void *)info->args[1]);
 
-  pos += format_mem_content(buf + pos, mem, info->args[2]);
+  pos += format_mem_content(buf + pos, mem, display_len);
+
+  if (info->rval > 4096)
+    pos += sprintf(buf + pos, "...(%ld more bytes)", info->rval - 4096);
 
   pos += sprintf(buf + pos, "\"), %ld) = %ld", info->args[2], info->rval);
   free(mem);
@@ -114,53 +136,79 @@ void format_sendto(char *buf, tracee_state *t, syscall_info *info)
   sprintf(buf + pos, ", %ld) = %ld", info->args[5], info->rval);
 }
 
-/* Format: recvfrom */
+/* Format: recvfrom - strace style */
 void format_recvfrom(char *buf, tracee_state *t, syscall_info *info)
 {
-  /* Limit displayed bytes to prevent buffer overflow - use return value if valid */
-  size_t display_len = info->rval;
-  if (display_len <= 0 || display_len > 4096)
-    display_len = (info->args[2] > 4096) ? 4096 : info->args[2];
+  int pos = 0;
+  ssize_t ret = info->rval;
   
-  char *mem = (char *)t->read_snapshot_mem(info->args[1], display_len);
-  if (!mem) {
-    sprintf(buf, "%s(%ld, <error reading buffer>, %ld, %ld, <addr>, [%d]) = %ld",
-            syscalls[info->nr], info->args[0], info->args[2], info->args[3],
-            sizeof(socklen_t), info->rval);
-    return;
-  }
-
-  int pos = sprintf(buf, "%s(%ld, \"", syscalls[info->nr], info->args[0]);
-
-  pos += format_mem_content(buf + pos, mem, display_len);
-
-  if (info->rval > 4096)
-    pos += sprintf(buf + pos, "...(%ld more bytes)", info->rval - 4096);
-
-  pos += sprintf(buf + pos, "\", %ld, %ld, ", info->args[2], info->args[3]);
-  free(mem);
-
-  socklen_t *plen = (socklen_t *)t->read_snapshot_mem(info->args[5], sizeof(socklen_t));
-  if (!plen) {
-    pos += sprintf(buf + pos, "<invalid addrlen>, [?]) = %ld", info->rval);
-    return;
-  }
+  /* Start: recvfrom(fd, buf, len, flags, addr, addrlen) */
+  pos += sprintf(buf + pos, "recvfrom(%ld, ", info->args[0]);
   
-  socklen_t addrlen = *plen;
-
-  struct sockaddr_in *addr =
-      (struct sockaddr_in *)t->read_snapshot_mem(info->args[4], addrlen);
-
-  if (addr) {
-    pos += format_sockaddr(buf + pos, addr);
-    free(addr);
+  /* buf argument */
+  if (ret < 0) {
+    /* Failed: just show pointer */
+    pos += sprintf(buf + pos, "%p", (void *)info->args[1]);
   } else {
-    pos += sprintf(buf + pos, "<invalid addr>");
+    /* Success: show pointer + content */
+    size_t display_len = ret;
+    if (display_len > 4096) display_len = 4096;
+    
+    char *mem = (char *)t->read_snapshot_mem(info->args[1], display_len);
+    if (mem && display_len > 0) {
+      pos += sprintf(buf + pos, "%p\"", (void *)info->args[1]);
+      pos += format_mem_content(buf + pos, mem, display_len);
+      pos += sprintf(buf + pos, "\"");
+      if (ret > 4096)
+        pos += sprintf(buf + pos, "...");
+      free(mem);
+    } else if (ret == 0) {
+      pos += sprintf(buf + pos, "%p\"\"", (void *)info->args[1]);
+    } else {
+      pos += sprintf(buf + pos, "%p", (void *)info->args[1]);
+    }
   }
-
-  sprintf(buf + pos, ", [%d]) = %ld", addrlen, info->rval);
-  free(plen);
+  
+  /* len and flags */
+  pos += sprintf(buf + pos, ", %ld, %ld, ", info->args[2], info->args[3]);
+  
+  /* addr and addrlen */
+  if (info->args[5] != 0) {
+    /* Read addrlen from output pointer */
+    socklen_t *plen = (socklen_t *)t->read_snapshot_mem(info->args[5], sizeof(socklen_t));
+    if (plen && *plen > 0) {
+      socklen_t addrlen = *plen;
+      /* addr pointer */
+      pos += sprintf(buf + pos, "%p", (void *)info->args[4]);
+      /* addr content */
+      if (addrlen >= sizeof(struct sockaddr_in)) {
+        struct sockaddr_in *addr = (struct sockaddr_in *)t->read_snapshot_mem(info->args[4], addrlen);
+        if (addr) {
+          pos += sprintf(buf + pos, " ");
+          pos += format_sockaddr(buf + pos, addr);
+          free(addr);
+        }
+      }
+      pos += sprintf(buf + pos, ", [%d]", addrlen);
+      free(plen);
+    } else {
+      /* No address returned */
+      pos += sprintf(buf + pos, "%p, [%d]", (void *)info->args[4], plen ? (int)*plen : 0);
+      if (plen) free(plen);
+    }
+  } else {
+    /* NULL addrlen pointer */
+    pos += sprintf(buf + pos, "%p, NULL", (void *)info->args[4]);
+  }
+  
+  /* Return value with errno name */
+  if (ret < 0) {
+    sprintf(buf + pos, ") = %ld (%s)", ret, strerror(-ret));
+  } else {
+    sprintf(buf + pos, ") = %ld", ret);
+  }
 }
+
 
 /* Format: void *addr (brk/mmap style) */
 void format_addr(char *buf, syscall_info *info)
@@ -261,7 +309,25 @@ void format_socket(char *buf, syscall_info *info)
           domain_str, type_str, info->args[2], info->rval);
 }
 
-/* Format: bind/listen/accept/connect */
+/* Format: bind with sockaddr details */
+void format_bind(char *buf, tracee_state *t, syscall_info *info)
+{
+  int pos = sprintf(buf, "bind(%ld, ", info->args[0]);
+  
+  /* Read sockaddr */
+  struct sockaddr_in *addr = (struct sockaddr_in *)t->read_snapshot_mem(
+      info->args[1], info->args[2]);
+  if (addr) {
+    pos += format_sockaddr(buf + pos, addr);
+    free(addr);
+  } else {
+    pos += sprintf(buf + pos, "<invalid addr>");
+  }
+  
+  sprintf(buf + pos, ", %ld) = %ld", info->args[2], info->rval);
+}
+
+/* Format: listen/accept/connect */
 void format_socket_fd(char *buf, syscall_info *info)
 {
   sprintf(buf, "%s(%ld, ...) = %ld", syscalls[info->nr], info->args[0], info->rval);
@@ -294,6 +360,8 @@ void format(char *buf, tracee_state *t, syscall_info *info)
       format_socket(buf, info);
       break;
     case SYS_bind:
+      format_bind(buf, t, info);
+      break;
     case SYS_listen:
     case SYS_accept:
     case SYS_accept4:

@@ -191,8 +191,37 @@ void read_config(const char *cfg_file)
     for (int j = 0; j < choose_points_cnt; j++)
     {
       cJSON *choose_point = cJSON_GetArrayItem(choose_points, j);
-      int nr =
-          cJSON_GetNumberValue(cJSON_GetObjectItem(choose_point, "syscall"));
+      cJSON *syscall_item = cJSON_GetObjectItem(choose_point, "syscall");
+      int nr = -1;
+      
+      if (cJSON_IsNumber(syscall_item))
+      {
+        nr = (int)cJSON_GetNumberValue(syscall_item);
+      }
+      else if (cJSON_IsString(syscall_item))
+      {
+        /* Convert syscall name to number */
+        const char *syscall_name = cJSON_GetStringValue(syscall_item);
+        for (int i = 0; i < 450; i++)
+        {
+          if (syscalls[i] && strcmp(syscalls[i], syscall_name) == 0)
+          {
+            nr = i;
+            break;
+          }
+        }
+        if (nr == -1)
+        {
+          LOG_ERROR("Unknown syscall name: %s", syscall_name);
+          continue;
+        }
+      }
+      else
+      {
+        LOG_ERROR("Invalid syscall type in ChoosePoint");
+        continue;
+      }
+      
       int n_choose =
           cJSON_GetNumberValue(cJSON_GetObjectItem(choose_point, "choose"));
       choose_many[nr] = n_choose;
