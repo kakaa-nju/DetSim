@@ -21,6 +21,8 @@
 #include <assert.h>
 #include <getopt.h>
 #include <vector>
+#include <libgen.h>
+#include <limits.h>
 
 char *cfg_file = (char *)"config.json";
 char *log_file = NULL;
@@ -46,9 +48,32 @@ void init_log(const char *log_file)
 }
 
 static char cfg_str[4096];
+
+/* Get absolute path relative to config file directory */
+static std::string resolve_path(const char *path, const char *cfg_dir)
+{
+  if (!path || path[0] == '/') {
+    // Absolute path or empty
+    return std::string(path ? path : "");
+  }
+  
+  // Relative path: prepend config file directory
+  if (cfg_dir && strlen(cfg_dir) > 0) {
+    return std::string(cfg_dir) + "/" + path;
+  }
+  return std::string(path);
+}
+
 void read_config(const char *cfg_file)
 {
   assert(cfg_file);
+  
+  /* Get the directory of the config file */
+  char cfg_file_copy[PATH_MAX];
+  strncpy(cfg_file_copy, cfg_file, PATH_MAX - 1);
+  cfg_file_copy[PATH_MAX - 1] = '\0';
+  char *cfg_dir = dirname(cfg_file_copy);
+  
   FILE *cfg_fp = fopen(cfg_file, "r");
   Assert(cfg_fp, "Can not open '%s'", cfg_file);
 
@@ -70,14 +95,24 @@ void read_config(const char *cfg_file)
   for (int i = 0; i < nodes; i++)
   {
     cJSON *argv = cJSON_GetArrayItem(tracee, i);
-    int argc = cJSON_GetArraySize(tracee);
+    int argc = cJSON_GetArraySize(argv);
     Assert(argc <= 5, "More than 5 arguments is not supported");
 
     ptmc_state.tracee[i].argc = argc;
     for (int j = 0; j < argc; j++)
     {
       cJSON *arg = cJSON_GetArrayItem(argv, j);
-      ptmc_state.tracee[i].argv[j] = cJSON_GetStringValue(arg);
+      std::string arg_str = cJSON_GetStringValue(arg);
+      
+      // First argument (executable) is resolved relative to config dir
+      if (j == 0) {
+        arg_str = resolve_path(arg_str.c_str(), cfg_dir);
+      }
+      
+      // Store the string persistently
+      char *stored = (char *)malloc(arg_str.length() + 1);
+      strcpy(stored, arg_str.c_str());
+      ptmc_state.tracee[i].argv[j] = stored;
     }
     ptmc_state.tracee[i].executable = ptmc_state.tracee[i].argv[0];
     ptmc_state.tracee[i].argv[argc] = NULL;
@@ -124,8 +159,8 @@ void read_config(const char *cfg_file)
       cJSON *host = cJSON_GetObjectItem(item, "Host");
       cJSON *target = cJSON_GetObjectItem(item, "Target");
       if (host && target) {
-        maps.emplace_back(std::string(cJSON_GetStringValue(host)),
-                          std::string(cJSON_GetStringValue(target)));
+        std::string host_path = resolve_path(cJSON_GetStringValue(host), cfg_dir);
+        maps.emplace_back(host_path, std::string(cJSON_GetStringValue(target)));
       }
     }
   }
@@ -156,25 +191,38 @@ void read_config(const char *cfg_file)
   if (user_check)
   {
     char *src = cJSON_GetStringValue(user_check);
-    std::string obj(src, strchr(src, '.'));
-    obj = "./" + obj + ".so";
-    LOG_INFO("Compiling user check sources to %s", obj.c_str());
+    std::string src_path = resolve_path(src, cfg_dir);
+    std::string obj_path;
+    
+    // If already a .so file, use it directly
+    if (src_path.length() > 3 && src_path.substr(src_path.length() - 3) == ".so") {
+      obj_path = src_path;
+      LOG_INFO("Loading user check plugin %s", obj_path.c_str());
+    } else {
+      // Compile .cpp to .so
+      std::string obj(src, strchr(src, '.'));
+      obj = "./" + obj + ".so";
+      LOG_INFO("Compiling user check sources %s to %s", src_path.c_str(), obj.c_str());
 
-    if (access(obj.c_str(), R_OK | X_OK))
-    {
-      int pid = vfork();
-      if (pid == 0)
+      if (access(obj.c_str(), R_OK | X_OK))
       {
-        char arg_d[10];
-        sprintf(arg_d, "-DNP=%d", NP);
-        execlp("g++", "g++", "-O2", arg_d, "-fpic", "-shared", src, "-o",
-               obj.c_str(), NULL);
-        perror("exec");
+        int pid = vfork();
+        if (pid == 0)
+        {
+          char arg_d[10];
+          sprintf(arg_d, "-DNP=%d", NP);
+          execlp("g++", "g++", "-O2", arg_d, "-fpic", "-shared", 
+                 "-I.", "-Isrc", "-Isrc/core", "-Isrc/utils", "-Isrc/subsys",
+                 src_path.c_str(), "-o", obj.c_str(), NULL);
+          perror("exec");
+        }
+        else
+          waitpid(pid, 0, 0);
       }
-      else
-        waitpid(pid, 0, 0);
+      obj_path = obj;
     }
-    void *handle = dlopen(obj.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    
+    void *handle = dlopen(obj_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle)
     {
       panic("%s", dlerror());
@@ -232,25 +280,38 @@ void read_config(const char *cfg_file)
   if (choose_function)
   {
     char *src = cJSON_GetStringValue(choose_function);
-    std::string obj(src, strchr(src, '.'));
-    obj = "./" + obj + ".so";
-    LOG_INFO("Compiling user choose function sources to %s", obj.c_str());
+    std::string src_path = resolve_path(src, cfg_dir);
+    std::string obj_path;
+    
+    // If already a .so file, use it directly
+    if (src_path.length() > 3 && src_path.substr(src_path.length() - 3) == ".so") {
+      obj_path = src_path;
+      LOG_INFO("Loading user choose plugin %s", obj_path.c_str());
+    } else {
+      // Compile .cpp to .so
+      std::string obj(src, strchr(src, '.'));
+      obj = "./" + obj + ".so";
+      LOG_INFO("Compiling user choose function sources %s to %s", src_path.c_str(), obj.c_str());
 
-    if (access(obj.c_str(), R_OK | X_OK))
-    {
-      int pid = vfork();
-      if (pid == 0)
+      if (access(obj.c_str(), R_OK | X_OK))
       {
-        char arg_d[10];
-        sprintf(arg_d, "-DNP=%d", NP);
-        execlp("g++", "g++", "-O2", arg_d, "-fpic", "-shared", src, "-o",
-               obj.c_str(), NULL);
-        perror("exec");
+        int pid = vfork();
+        if (pid == 0)
+        {
+          char arg_d[10];
+          sprintf(arg_d, "-DNP=%d", NP);
+          execlp("g++", "g++", "-O2", arg_d, "-fpic", "-shared",
+                 "-I.", "-Isrc", "-Isrc/core", "-Isrc/utils", "-Isrc/subsys",
+                 src_path.c_str(), "-o", obj.c_str(), NULL);
+          perror("exec");
+        }
+        else
+          waitpid(pid, 0, 0);
       }
-      else
-        waitpid(pid, 0, 0);
+      obj_path = obj;
     }
-    void *handle = dlopen(obj.c_str(), RTLD_LAZY | RTLD_LOCAL);
+    
+    void *handle = dlopen(obj_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
     if (!handle)
     {
       panic("%s", dlerror());

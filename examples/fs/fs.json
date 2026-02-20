@@ -1,0 +1,10 @@
+{
+  "Loglevel": 0,
+  "Nodes": 1,
+  "Tracee": [["./fs", "0"]],
+  "Addr": ["192.168.0.1"],
+  "WorkingDir": "/",
+  "FSMap": [
+    { "Host": "./fs_root", "Target": "/" }
+  ]
+}

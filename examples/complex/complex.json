@@ -1,0 +1,16 @@
+{
+  "Loglevel": 0,
+  "Nodes": 1,
+  "Tracee": [["./complex", "0"]],
+  "Addr": ["192.168.0.1"],
+  "Assertions": [
+    "tracee0(g_point.x == 10)",
+    "tracee0(g_line.points[2].y == 40)",
+    "tracee0(g_rect.border->count == 3)",
+    "tracee0(g_node.data->top_left.z == 30)",
+    "tracee0(g_container.nodes[2].value == 200)",
+    "tracee0(g_container.rects[0]->bottom_right.x == 100)",
+    "tracee0(g_tree_root.container->name[0] == 't')",
+    "tracee0(g_node_list->next->value == 2)"
+  ]
+}

@@ -1,0 +1,13 @@
+{
+  "Loglevel": 0,
+  "Nodes": 1,
+  "Tracee": [["./cast_test", "0"]],
+  "Addr": ["192.168.0.1"],
+  "Assertions": [
+    "tracee0(g_container.visible_count == 100)",
+    "tracee0(((hidden_struct*)g_container.hidden_data)->secret_value == 42)",
+    "tracee0(((hidden_struct*)g_container.hidden_data)->secret_name[0] == 'H')",
+    "tracee0(((point*)g_generic_ptr)->x == 10)",
+    "tracee0(((point*)g_generic_ptr)->y == 20)"
+  ]
+}

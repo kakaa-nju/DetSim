@@ -1,0 +1,15 @@
+{
+  "Loglevel": 2,
+  "Nodes": 2,
+  "Tracee": [
+    ["./bakery_mp", "0"],
+    ["./bakery_mp", "1"]
+  ],
+  "Addr": ["192.168.0.1", "192.168.0.2"],
+  "SharedFiles": ["lock"],
+  "Assertions": [
+    "tracee0:critical == 0 || tracee0:critical == 1",
+    "tracee1:critical == 0 || tracee1:critical == 1",
+    "tracee0:critical == 0 || tracee1:critical == 0"
+  ]
+}

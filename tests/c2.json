@@ -1,9 +1,0 @@
-{
-  "Loglevel": 1,
-  "Nodes": 2,
-  "Tracee": [
-    ["./tests/write", "0"], ["./tests/write", "1"]
-  ],
-  "Addr": [ "192.168.0.1", "192.168.0.2" ]
-}
-

@@ -38,6 +38,10 @@ std::unordered_map<int, void *> rseq_struct;
 std::unordered_map<int, int> rseq_len;
 
 static bytes *membuf;
+__attribute__((constructor)) void _membuf_init()
+{
+  membuf = (bytes *)malloc(4096);
+}
 static int membufsz = 4096;
 
 /* ======================================================================

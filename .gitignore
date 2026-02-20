@@ -6,6 +6,13 @@
 !*.c
 !*.cpp
 !*.h
+!*.json
+!*.md
+!*.rst
+!*.sh
+!*.txt
+!*.py
+!LICENSE
 
 # Build system
 !Makefile
@@ -30,11 +37,6 @@
 
 # Tests
 !tests/
-!tests/*
-!tests/fs_root/
-!tests/fs_root/*
-!tests/raft/
-!tests/raft/**
 
 # Scripts
 !scripts/
@@ -70,3 +72,36 @@ core.*
 # tools
 !tools/
 !tools/**
+
+# examples
+!examples/
+!examples/**
+
+# Ignore build artifacts in examples
+examples/**/*.o
+examples/**/*.so
+examples/**/*.a
+examples/**/compile_commands.json
+examples/**/__pycache__/
+examples/**/*.pyc
+
+# Ignore compiled binaries (match specific files)
+/examples/raft/raft/raft
+/examples/raft/raft/raft_dynamic
+/examples/bakery/bakery
+/examples/bakery/bakery_mp
+/examples/brk/brk
+/examples/bt/bt
+/examples/cast_test/cast_test
+/examples/complex/complex
+/examples/expr_test/expr_test
+/examples/fs/fs
+/examples/loop/loop
+/examples/loop/loop3
+/examples/loop_inf/loop_inf
+/examples/malloc/malloc
+/examples/member/member
+/examples/simple_complex/simple_complex
+/examples/write/write
+/examples/raft/plugins/check.so
+/examples/raft/plugins/choose.so
