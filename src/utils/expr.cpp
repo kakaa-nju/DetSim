@@ -11,6 +11,7 @@
 #include "monitor.h"
 #include "dwarf_info.h"
 #include "expr_ast.hpp"
+#include "expr_eval.hpp"
 #include <cctype>
 #include <string>
 #include <vector>
@@ -34,6 +35,12 @@ static int get_current_pid() {
     int cursor = ptmc_state.cursor;
     if (cursor < 0 || cursor >= NP) cursor = 0;
     return ptmc_state.pids[cursor];
+}
+
+/* Get process ID by index */
+static int get_pid_by_index(int proc_idx) {
+    if (proc_idx < 0 || proc_idx >= NP) return get_current_pid();
+    return ptmc_state.pids[proc_idx];
 }
 
 /* Evaluate expression and return value
@@ -123,7 +130,8 @@ static bool is_char_pointer(const std::string& type_name) {
 }
 
 /* Recursive value printer 
- * is_member: if true, print as struct member with name = value,\n format
+ * is_member: if true, print as struct member with name = value,
+ format
  * is_toplevel: if true, this is the top-level expression
  */
 static void print_value_recursive(int pid, const char* expr, uint64_t addr, 
@@ -302,4 +310,86 @@ void expr_print(const char *e) {
 /* Dummy init function for compatibility */
 void init_regex() {
     /* Nothing to do - parser is self-initializing */
+}
+
+/* ======================================================================
+ * Template-based eval interface for check functions
+ * ====================================================================== */
+
+/* Helper: evaluate expression with process index and return result */
+static long eval_internal(const std::string& expr, int proc_idx, bool& success) {
+    init_parser_globals();
+    
+    int pid = get_pid_by_index(proc_idx);
+    
+    ExprNode* ast = parse_expression(expr.c_str());
+    if (!ast) {
+        fprintf(stderr, "Parse error: failed to parse expression '%s'\n", expr.c_str());
+        success = false;
+        return 0;
+    }
+    
+    bool ok = true;
+    EvalResult result = ast->eval(pid, ok);
+    
+    delete ast;
+    
+    if (!ok) {
+        fprintf(stderr, "Evaluation error: failed to evaluate expression '%s'\n", expr.c_str());
+        success = false;
+        return 0;
+    }
+    
+    success = true;
+    return result.as_value();
+}
+
+/* Template specializations for eval<T> */
+
+template<>
+int eval<int>(const std::string& expr, int proc_idx, bool* success) {
+    bool ok;
+    long val = eval_internal(expr, proc_idx, ok);
+    if (success) *success = ok;
+    return static_cast<int>(val);
+}
+
+template<>
+long eval<long>(const std::string& expr, int proc_idx, bool* success) {
+    bool ok;
+    long val = eval_internal(expr, proc_idx, ok);
+    if (success) *success = ok;
+    return val;
+}
+
+template<>
+uint32_t eval<uint32_t>(const std::string& expr, int proc_idx, bool* success) {
+    bool ok;
+    long val = eval_internal(expr, proc_idx, ok);
+    if (success) *success = ok;
+    return static_cast<uint32_t>(val);
+}
+
+template<>
+uint64_t eval<uint64_t>(const std::string& expr, int proc_idx, bool* success) {
+    bool ok;
+    long val = eval_internal(expr, proc_idx, ok);
+    if (success) *success = ok;
+    return static_cast<uint64_t>(val);
+}
+
+template<>
+bool eval<bool>(const std::string& expr, int proc_idx, bool* success) {
+    bool ok;
+    long val = eval_internal(expr, proc_idx, ok);
+    if (success) *success = ok;
+    return val != 0;
+}
+
+template<>
+void* eval<void*>(const std::string& expr, int proc_idx, bool* success) {
+    bool ok;
+    long val = eval_internal(expr, proc_idx, ok);
+    if (success) *success = ok;
+    return reinterpret_cast<void*>(static_cast<uintptr_t>(val));
 }
