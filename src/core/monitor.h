@@ -25,40 +25,46 @@ enum
   PTMC_QUIT
 };
 
-typedef struct
-{
-  int state;
-  int cursor;
-  int n_choose;
-  int choose;
+struct PTMC_STATE {
+  enum { MODE_DFS, MODE_BFS, MODE_RAND } mode = MODE_RAND;
+  int state = PTMC_PRELOAD;
+  int cursor = -1;
+  int n_choose = 0;
+  int choose = -1;
   sys_state source_state;
   sys_state dest_state;
-  hash_type sysstate_hash; /* state in operating system */
-  hash_type toload;
+  hash_type sysstate_hash = 0; /* state in operating system */
+  hash_type toload = 0;
 
-  int exited[NP];
+  int exited[NP] = {};
   
   SockState sock_states[NP];
   std::shared_ptr<FdManager> fd_managers[NP];  /* Per-process fd allocation */
   FileSystemState fs_states[NP];
 
-  int pids[NP];
+  int pids[NP] = {};
 
-  struct
+  struct tracee_info
   {
-    char *executable;
-    int argc;
-    char *argv[5];
+    char *executable = nullptr;
+    int argc = 0;
+    char *argv[5] = {};
   } tracee[NP];
 
-  struct timeval time[NP];
+  struct timeval time[NP] = {};
   std::string addrs[NP];
   std::unordered_set<std::string> shared_files;
   std::unordered_set<std::string> proc_files[NP];
 
   std::unordered_set<std::string> assertions;
   std::vector<int (*)()> user_checks;
-} PTMC_STATE;
+  
+  /* Raft consensus checking state - stored per-process */
+  raft_check_state raft_states[NP];
+  
+  // Constructor to ensure proper initialization
+  PTMC_STATE() = default;
+};
 
 int is_auto_mode();
 

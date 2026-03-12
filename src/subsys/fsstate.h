@@ -81,7 +81,17 @@ private:
   FdManagerPtr fd_manager_;
 
 public:
-  FileSystemState() = default;
+  // Default constructor - ensures all members are properly initialized
+  FileSystemState() : cwd(""), fd_manager_() {}
+  
+  // Copy control
+  FileSystemState(const FileSystemState& other) = default;
+  FileSystemState& operator=(const FileSystemState& other) = default;
+  
+  // Move control
+  FileSystemState(FileSystemState&& other) noexcept = default;
+  FileSystemState& operator=(FileSystemState&& other) noexcept = default;
+  
   explicit FileSystemState(FdManagerPtr fd_mgr) : fd_manager_(fd_mgr) {}
 
   // Set the fd manager (must be called before using get_new_fd)

@@ -193,6 +193,8 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
       line_read = readline("Please make legal choice: ");
     }
     free(line_read);
+  } else if (is_auto_mode() && ptmc_state.n_choose != 0 && ptmc_state.mode == PTMC_STATE::MODE_RAND) {
+    ptmc_state.choose = rand() % ptmc_state.n_choose; 
   }
 
   /* Check and dump for each generated next state */
@@ -232,12 +234,12 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
       ret = emu_socket(info->args[0], info->args[1], info->args[2]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_listen:
       ret = emu_listen(info->args[0], info->args[1]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_bind:
       ret = emu_bind(info->args[0], (const struct sockaddr *)info->args[1],
                      info->args[2]);
@@ -249,7 +251,7 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
                         info->args[2]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
 
     case SYS_chdir: {
       // Read the path string from the tracee memory and update cwd on success
@@ -282,17 +284,17 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
         ret = emu_vfs_openat(AT_FDCWD, (const char *)info->args[0], info->args[1], info->args[2]);
         tracee_set_rax(pid, ret);
         info->rval = ret;
-        return CKPT_YES;
+        return CKPT_NO;
     case SYS_openat:
       ret = emu_vfs_openat(info->args[0], (const char *)info->args[1], info->args[2], info->args[3]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_read:
       ret = emu_vfs_read(info->args[0], (void *)info->args[1], info->args[2]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_write:
       ret = emu_vfs_write(info->args[0], (const void *)info->args[1], info->args[2]);
       tracee_set_rax(pid, ret);
@@ -302,22 +304,22 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
         ret = emu_vfs_close(info->args[0]);
         tracee_set_rax(pid, ret);
         info->rval = ret;
-        return CKPT_YES;
+        return CKPT_NO;
     case SYS_lseek:
         ret = emu_vfs_lseek(info->args[0], info->args[1], info->args[2]);
         tracee_set_rax(pid, ret);
         info->rval = ret;
-        return CKPT_YES;
+        return CKPT_NO;
     case SYS_stat:
         ret = emu_vfs_stat((const char *)info->args[0], (struct stat *)info->args[1]);
         tracee_set_rax(pid, ret);
         info->rval = ret;
-        return CKPT_YES;
+        return CKPT_NO;
     case SYS_fstat:
         ret = emu_vfs_fstat(info->args[0], (struct stat *)info->args[1]);
         tracee_set_rax(pid, ret);
         info->rval = ret;
-        return CKPT_YES;
+        return CKPT_NO;
 
     case SYS_nanosleep:
     case SYS_brk:
@@ -580,8 +582,8 @@ int exec_cont()
   /* until no state in queue */
   while ((state_fetched = state_queue_extract()) != NULL)
   {
-    // int i = rand() % NP;
-    for (int i = 0; i < NP; i++)
+    int i = rand() % NP;
+    // for (int i = 0; i < NP; i++)
     {
     again:
       ptmc_state.source_state = *state_fetched;
@@ -609,7 +611,7 @@ int exec_cont()
       {
         ptmc_state.dest_state.save_metadata();
         bool is_new = !state_set.count(ptmc_state.dest_state.ss_hash);
-        if (is_new)
+        if (is_new || ptmc_state.mode == PTMC_STATE::MODE_RAND)
         {
           state_queue_append(&ptmc_state.dest_state);
           state_set.emplace(ptmc_state.dest_state.ss_hash);
@@ -634,10 +636,16 @@ int exec_cont()
 
       if (ptmc_state.n_choose)
       {
-        ptmc_state.choose++;
-        if (ptmc_state.choose < ptmc_state.n_choose)
-          goto again;
-        ptmc_state.choose = 0;
+        if (ptmc_state.mode == PTMC_STATE::MODE_BFS)
+        {
+          ptmc_state.choose++;
+          if (ptmc_state.choose < ptmc_state.n_choose)
+            goto again;
+          ptmc_state.choose = 0;
+        }
+        else if (ptmc_state.mode == PTMC_STATE::MODE_RAND)
+        {
+        }
       }
     }
     delete state_fetched;

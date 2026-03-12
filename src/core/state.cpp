@@ -6,6 +6,7 @@
 #include "syscall_fmt.h"
 #include "cereal/archives/binary.hpp"
 #include "debug.h"
+#include "fd_manager.h"
 #include "fsstate.h"
 #include "guest.h"
 #include "monitor.h"
@@ -20,6 +21,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
@@ -121,6 +123,8 @@ sys_state::sys_state(struct syscall_info *info)
     child[j].save_full_state();
     exited[j] = ptmc_state.exited[j];
     ts_hash[j] = child[j].ts_hash;
+    /* Copy Raft check state from ptmc_state to tracee_state for serialization */
+    child[j].raft_state = ptmc_state.raft_states[j];
     LOG_DEBUG("Create tstate " HASH_FORMAT, ts_hash[j]);
   }
 
@@ -396,6 +400,7 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps)
     if (size <= 0) continue;
     
     // Check if this region is still valid in current maps
+    // Use the saved protection flags to verify compatibility
     bool valid = false;
     for (auto &item : maps) {
       if (item.start <= start && end <= item.end && item.flags[1] == 'w') {
@@ -465,7 +470,11 @@ void tracee_state::recover_running_state(int index)
   /* Restore subsystems */
   ptmc_state.sock_states[index] = sock_state;
   ptmc_state.fs_states[index] = fs_state;
+  ptmc_state.raft_states[index] = raft_state;
 
+  /* Restore FdManager state */
+  *ptmc_state.fd_managers[index] = fd_manager_state;
+  
   /* Re-link FdManager after deserialization */
   ptmc_state.sock_states[index].set_fd_manager(ptmc_state.fd_managers[index]);
   ptmc_state.fs_states[index].set_fd_manager(ptmc_state.fd_managers[index]);
@@ -539,6 +548,9 @@ void tracee_state::capture_memory_state()
     sscanf(line, "%lx-%lx %4s %x %d:%d %d %63s", &start, &end, flags, &offset, &a,
            &b, &inode, name);
 
+    /* Only save writable regions - code/rodata don't change
+     * and are reloaded by execve during process startup
+     */
     if (flags[1] != 'w')
       continue;
     if (start == available_memory)
@@ -573,13 +585,19 @@ void tracee_state::capture_memory_state()
     RegionInfo info;
     info.start = start;
     info.end = end;
+    // Parse and store protection flags
+    info.prot = 0;
+    if (flags[0] == 'r') info.prot |= PROT_READ;
+    if (flags[1] == 'w') info.prot |= PROT_WRITE;
+    if (flags[2] == 'x') info.prot |= PROT_EXEC;
+    memcpy(info.flags, flags, 5);
     regions.push_back(info);
     
     std::vector<uint8_t> data(region_size);
     memcpy(data.data(), membuf, region_size);
     region_data.push_back(std::move(data));
     
-    LOG_TRACE("dump %lx-%lx, %s", start, end, name);
+    LOG_TRACE("dump %lx-%lx (prot=%x), %s", start, end, info.prot, name);
   }
 
   // Serialize tracee_state (without ts_hash - will be set after save)
@@ -698,6 +716,12 @@ tracee_state::tracee_state(int which, struct syscall_info *info)
   /* Save subsystems */
   sock_state = ptmc_state.sock_states[which];
   fs_state = ptmc_state.fs_states[which];
+  raft_state = ptmc_state.raft_states[which];
+  
+  /* Save FdManager state */
+  if (ptmc_state.fd_managers[which]) {
+    fd_manager_state = *ptmc_state.fd_managers[which];
+  }
 
   /* Save time */
   tv = ptmc_state.time[which];
@@ -869,6 +893,8 @@ void sys_state::recover_running_state()
     if (!exited[i]) {
       child[i].recover_running_state(i);
     }
+    /* Restore Raft check state from tracee_state to ptmc_state */
+    ptmc_state.raft_states[i] = child[i].raft_state;
   }
   recover_shared_files();
 }

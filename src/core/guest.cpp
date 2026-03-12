@@ -337,12 +337,15 @@ void tracee_do_munmap(int pid, uint64_t start, uint64_t end)
   tracee_do_syscall(pid, SYS_munmap, start, end - start, 0, 0, 0, 0);
 }
 
-void *tracee_do_mmap(int pid, uint64_t start, uint64_t end)
+void *tracee_do_mmap(int pid, uint64_t start, uint64_t end, int prot)
 {
   void *ret = (void *)tracee_do_syscall(pid, SYS_mmap, start, end - start,
-                                        PROT_EXEC | PROT_READ | PROT_WRITE,
-                                        MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-  assert(ret != MAP_FAILED);
+                                        prot,
+                                        MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+  if (ret == MAP_FAILED) {
+    LOG_ERROR("mmap failed for %p-%p (prot=%x): %s", 
+              (void*)start, (void*)end, prot, strerror(errno));
+  }
   return ret;
 }
 

@@ -742,6 +742,41 @@ static void diff_tracee_state(const tracee_state &a, const tracee_state &b, int 
   bool syscall_diff = false;
   diff_syscall_info(a.si, b.si, proc_id, syscall_diff);
   if (syscall_diff) has_diff = true;
+  
+  /* Compare Raft state */
+  if (a.raft_state.current_term != b.raft_state.current_term ||
+      a.raft_state.is_leader != b.raft_state.is_leader ||
+      a.raft_state.last_log_term != b.raft_state.last_log_term)
+  {
+    print_header();
+    printf("    raft_state: different\n");
+    if (a.raft_state.current_term != b.raft_state.current_term)
+      printf("      current_term: %ld != %ld\n", 
+             a.raft_state.current_term, b.raft_state.current_term);
+    if (a.raft_state.is_leader != b.raft_state.is_leader)
+      printf("      is_leader: %d != %d\n", 
+             a.raft_state.is_leader, b.raft_state.is_leader);
+    if (a.raft_state.last_log_term != b.raft_state.last_log_term)
+      printf("      last_log_term: %ld != %ld\n", 
+             a.raft_state.last_log_term, b.raft_state.last_log_term);
+    has_diff = true;
+  }
+  
+  /* Compare FdManager state */
+  if (!(a.fd_manager_state == b.fd_manager_state))
+  {
+    print_header();
+    printf("    fd_manager_state: different\n");
+    if (a.fd_manager_state.get_next_fd() != b.fd_manager_state.get_next_fd())
+      printf("      next_fd: %d != %d\n", 
+             a.fd_manager_state.get_next_fd(), b.fd_manager_state.get_next_fd());
+    // Count allocated fds for comparison
+    auto fds_a = a.fd_manager_state.get_allocated_fds();
+    auto fds_b = b.fd_manager_state.get_allocated_fds();
+    if (fds_a.size() != fds_b.size())
+      printf("      allocated_fds count: %zu != %zu\n", fds_a.size(), fds_b.size());
+    has_diff = true;
+  }
 }
 
 /* Helper: Read registers from memory dump using StateStore */

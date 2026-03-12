@@ -95,7 +95,17 @@ struct TcpConnection {
 
 class SockState {
 public:
+    // Default constructor
     SockState() = default;
+    
+    // Copy control
+    SockState(const SockState& other) = default;
+    SockState& operator=(const SockState& other) = default;
+    
+    // Move control
+    SockState(SockState&& other) noexcept = default;
+    SockState& operator=(SockState&& other) noexcept = default;
+    
     explicit SockState(FdManagerPtr fd_mgr) : fd_manager_(fd_mgr) {}
     
     /* Set the fd manager (must be called before using allocate_fd) */

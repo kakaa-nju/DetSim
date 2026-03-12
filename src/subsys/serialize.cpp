@@ -20,7 +20,7 @@ void syscall_info::serialize(Archive &ar)
 template <class Archive>
 void tracee_state::serialize(Archive &ar)
 {
-  ar(si, pid, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state);
+  ar(si, pid, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state, raft_state, fd_manager_state);
 }
 
 template <class Archive>

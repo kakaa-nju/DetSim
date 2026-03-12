@@ -26,6 +26,37 @@ class FdManager {
 public:
     FdManager() : next_fd_(3) {}  // Start after stdin(0), stdout(1), stderr(2)
     
+    /* Copy constructor */
+    FdManager(const FdManager& other) 
+        : next_fd_(other.next_fd_.load()), 
+          allocated_fds_(other.allocated_fds_) {}
+    
+    /* Copy assignment - manual implementation for atomic member */
+    FdManager& operator=(const FdManager& other) {
+        if (this != &other) {
+            next_fd_ = other.next_fd_.load();
+            allocated_fds_ = other.allocated_fds_;
+        }
+        return *this;
+    }
+    
+    /* Move constructor */
+    FdManager(FdManager&& other) noexcept
+        : next_fd_(other.next_fd_.load()),
+          allocated_fds_(std::move(other.allocated_fds_)) {
+        other.next_fd_ = 3;
+    }
+    
+    /* Move assignment */
+    FdManager& operator=(FdManager&& other) noexcept {
+        if (this != &other) {
+            next_fd_ = other.next_fd_.load();
+            allocated_fds_ = std::move(other.allocated_fds_);
+            other.next_fd_ = 3;
+        }
+        return *this;
+    }
+    
     /* Allocate a new fd of given type */
     int allocate_fd(FdType type);
     
@@ -37,6 +68,22 @@ public:
     
     /* Check if fd is currently allocated */
     bool is_allocated(int fd) const;
+    
+    /* Get next fd value (for comparison) */
+    int get_next_fd() const { return next_fd_.load(); }
+    
+    /* Get allocated fds set (for comparison) */
+    std::unordered_set<int> get_allocated_fds() const { return allocated_fds_; }
+    
+    /* Equality comparison */
+    bool operator==(const FdManager& other) const {
+        return next_fd_.load() == other.next_fd_.load() && 
+               allocated_fds_ == other.allocated_fds_;
+    }
+    
+    bool operator!=(const FdManager& other) const {
+        return !(*this == other);
+    }
     
     /* For serialization */
     template <class Archive>

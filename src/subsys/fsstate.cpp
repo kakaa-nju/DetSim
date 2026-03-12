@@ -3,6 +3,7 @@
 #include "cereal/cereal.hpp"
 #include "cereal/types/map.hpp"
 #include "cereal/types/string.hpp"
+#include "cereal/types/utility.hpp"
 #include "cereal/types/vector.hpp"
 #include "debug.h"
 #include "monitor.h"
@@ -39,7 +40,7 @@ template <class Archive> void OpenFileDescription::serialize(Archive &ar) {
 
 template <class Archive> void FileSystemState::serialize(Archive &ar) {
   /* Note: fd_manager_ is shared and not serialized per instance */
-  ar(filesystem, open_files);
+  ar(filesystem, open_files, cwd, mappings);
 }
 
 /* --- FileSystemState Method Implementations --- */

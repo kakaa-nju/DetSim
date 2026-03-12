@@ -763,7 +763,7 @@ std::vector<uint8_t> StateStore::decompress(const std::vector<uint8_t>& data, si
     
     if (dst_capacity < 64) dst_capacity = 64;
     
-    const size_t max_factor = 100;
+    const size_t max_factor = 500;
     size_t max_capacity = (data.size() > SIZE_MAX / max_factor) ? 
                           SIZE_MAX : data.size() * max_factor;
     

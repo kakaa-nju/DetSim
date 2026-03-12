@@ -5,9 +5,9 @@ CXX = ccache g++
 LD = g++ -L/usr/local/lib
 
 # Include paths
-INCLUDES = -I. -Isrc -Isrc/core -Isrc/subsys -Isrc/utils -Ithird_party
+INCLUDES = -I. -Isrc -Isrc/core -Isrc/subsys -Isrc/utils -Ithird_party -Iexamples/raft/plugins
 
-CXXFLAGS ?= $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
+CXXFLAGS ?= $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2 -D_FORTIFY_SOURCE=0
 LDFLAGS = -g -ldwarf -lreadline -lcjson -ldw -lzstd -rdynamic \
 					-lunwind-ptrace -lunwind-x86_64 -lunwind -lelf -lfmt
 
@@ -17,7 +17,8 @@ SRCS = src/main.cpp \
        src/subsys/serialize.cpp src/subsys/sockstate.cpp src/subsys/fsstate.cpp src/subsys/emu.cpp src/subsys/fd_manager.cpp \
        src/utils/utils.cpp src/utils/expr.cpp src/utils/expr_ast.cpp \
        src/utils/expr_lexer.cpp src/utils/expr_parser.cpp \
-       src/utils/resolve.cpp src/utils/crc32.cpp
+       src/utils/resolve.cpp src/utils/crc32.cpp \
+       examples/raft/plugins/raft_msg_parser.cpp
 
 OBJS = $(SRCS:.cpp=.o)
 DEPS = $(SRCS:.cpp=.d)
