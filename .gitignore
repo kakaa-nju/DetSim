@@ -31,6 +31,10 @@
 !src/utils/
 !src/utils/*
 
+# Perf benchmarks
+!perf/
+!perf/*
+
 # Third party
 !third_party/
 !third_party/**

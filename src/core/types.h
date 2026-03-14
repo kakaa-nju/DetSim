@@ -79,8 +79,8 @@ struct ptrace_syscall_info
 #define NP 1
 #endif
 
-#define HASH_LEN 8
-#define HASH_FORMAT "%08x"
+#define HASH_LEN 16
+#define HASH_FORMAT "%016lx"
 
 #define KiB *1024
 #define MiB KiB * 1024
@@ -90,7 +90,7 @@ struct ptrace_syscall_info
  * ======================================================================== */
 
 typedef uint8_t bytes;
-typedef uint32_t hash_type;
+typedef uint64_t hash_type;
 
 /* ========================================================================
  * Memory Mapping Item

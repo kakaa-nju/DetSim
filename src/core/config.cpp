@@ -360,12 +360,23 @@ void read_config(const char *cfg_file)
       ss_config.compression_level = static_cast<int>(cJSON_GetNumberValue(compression_level));
     }
     
+    cJSON *enable_malloc_trim = cJSON_GetObjectItem(statestore, "enable_malloc_trim");
+    if (enable_malloc_trim) {
+      ss_config.enable_malloc_trim = cJSON_IsTrue(enable_malloc_trim);
+    }
+    
+    cJSON *malloc_trim_threshold_mb = cJSON_GetObjectItem(statestore, "malloc_trim_threshold_mb");
+    if (malloc_trim_threshold_mb) {
+      ss_config.malloc_trim_threshold = static_cast<size_t>(cJSON_GetNumberValue(malloc_trim_threshold_mb)) * 1024 * 1024;
+    }
+    
     /* Initialize StateStore with custom config */
     StateStore::instance().init(ss_config);
-    LOG_INFO("StateStore configured: hot=%zuMB, warm=%zuMB, prefetch=%zu",
+    LOG_INFO("StateStore configured: hot=%zuMB, warm=%zuMB, prefetch=%zu, trim=%s",
              ss_config.hot_cache_size / (1024*1024),
              ss_config.warm_cache_size / (1024*1024),
-             ss_config.prefetch_window);
+             ss_config.prefetch_window,
+             ss_config.enable_malloc_trim ? "on" : "off");
   }
   
   // cJSON_Delete(cfg);
@@ -410,4 +421,23 @@ void parse_args(int argc, char *argv[])
 int is_auto_mode()
 {
   return auto_mode;
+}
+
+/* ======================================================================
+ * Configuration Cleanup
+ * ====================================================================== */
+
+void cleanup_config()
+{
+  /* Free all allocated argv strings */
+  for (int i = 0; i < NP; i++) {
+    for (int j = 0; j < ptmc_state.tracee[i].argc; j++) {
+      if (ptmc_state.tracee[i].argv[j]) {
+        free(ptmc_state.tracee[i].argv[j]);
+        ptmc_state.tracee[i].argv[j] = nullptr;
+      }
+    }
+    ptmc_state.tracee[i].argc = 0;
+    ptmc_state.tracee[i].executable = nullptr;
+  }
 }

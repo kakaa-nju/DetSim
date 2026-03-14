@@ -11,6 +11,8 @@
 #ifndef __STATE_STORE_H
 #define __STATE_STORE_H
 
+#include "types.h"
+
 #include <cstdint>
 #include <cstddef>
 #include <vector>
@@ -27,7 +29,18 @@
 #include <functional>
 #include <chrono>
 
-using hash_type = uint32_t;
+// Platform-specific includes for memory trimming
+#ifdef __linux__
+#include <malloc.h>
+#endif
+
+// Forward declare ZSTD types
+struct ZSTD_CCtx_s;
+struct ZSTD_DCtx_s;
+typedef struct ZSTD_CCtx_s ZSTD_CCtx;
+typedef struct ZSTD_DCtx_s ZSTD_DCtx;
+
+// hash_type is now defined in types.h as uint64_t
 
 /* ==============================================================================
  * Cache Entry (unified for L1/L2)
@@ -94,6 +107,14 @@ public:
         size_t prefetch_window = 100;       // Number of upcoming states to prefetch
         size_t prefetch_threads = 1;        // Prefetch worker threads
         size_t max_inflight_prefetch = 200; // Max concurrent prefetch tasks
+        
+        // Memory management
+        bool enable_malloc_trim = false;    // Call malloc_trim on L2 eviction (Linux only)
+        size_t malloc_trim_threshold = 64ULL * 1024 * 1024; // Trigger trim every 64MB evicted
+        
+        // Malloc tuning (Linux glibc only)
+        int malloc_arena_max = 4;           // Limit malloc arenas (default: 8*cores)
+        size_t malloc_mmap_threshold = 1024ULL * 1024 * 1024; // Only mmap for >1GB allocations
     };
     
     StateStore();
@@ -155,9 +176,21 @@ public:
         uint64_t prefetch_issued = 0;    // Prefetch tasks issued
         uint64_t prefetch_hits = 0;      // Prefetch hits (loaded before needed)
         
+        // Save path statistics
+        uint64_t save_calls = 0;         // Total save() calls
+        uint64_t save_dedup_hot = 0;     // Deduplicated at hot cache
+        uint64_t save_dedup_warm = 0;    // Deduplicated at warm cache
+        uint64_t save_dedup_disk = 0;    // Deduplicated at disk
+        uint64_t save_new = 0;           // New states (actually saved)
+        
         double hit_rate() const {
             if (load_requests == 0) return 0.0;
             return 100.0 * (l1_hits + l2_hits) / load_requests;
+        }
+        
+        double dedup_rate() const {
+            if (save_calls == 0) return 0.0;
+            return 100.0 * (save_dedup_hot + save_dedup_warm + save_dedup_disk) / save_calls;
         }
     };
     
@@ -170,6 +203,13 @@ public:
     size_t get_l2_usage() const { return warm_memory_usage_.load(); }
     size_t get_l1_capacity() const { return config_.hot_cache_size; }
     size_t get_l2_capacity() const { return config_.warm_cache_size; }
+    size_t get_l1_entry_count() const;
+    size_t get_l2_entry_count() const;
+    
+    // Queue sizes for monitoring
+    size_t get_io_queue_size() const;
+    size_t get_prefetch_queue_size() const;
+    size_t get_io_queue_capacity() const { return max_io_queue_size_; }
 
 private:
     Config config_;
@@ -181,14 +221,14 @@ private:
     // ==================================================================
     
     // L1 Hot Cache: hash -> entry with raw_data
-    mutable std::mutex hot_mutex_;
+    mutable std::recursive_mutex hot_mutex_;
     std::unordered_map<hash_type, StateEntryPtr> hot_cache_;
     std::list<hash_type> hot_lru_;
     std::unordered_map<hash_type, std::list<hash_type>::iterator> hot_lru_index_;
     std::atomic<size_t> hot_memory_usage_{0};
     
     // L2 Warm Cache: hash -> entry with compressed_data
-    mutable std::mutex warm_mutex_;
+    mutable std::recursive_mutex warm_mutex_;
     std::unordered_map<hash_type, StateEntryPtr> warm_cache_;
     std::list<hash_type> warm_lru_;
     std::unordered_map<hash_type, std::list<hash_type>::iterator> warm_lru_index_;
@@ -232,7 +272,9 @@ private:
     
     std::queue<StateEntryPtr> io_queue_;
     std::mutex io_mutex_;
-    std::condition_variable io_cv_;
+    std::condition_variable io_cv_;           // Notify workers new entry available
+    std::condition_variable io_queue_not_full_cv_; // Notify producers queue not full
+    size_t max_io_queue_size_ = 50;           // Limit queue to prevent OOM
     std::vector<std::thread> io_threads_;
     
     void io_worker();
@@ -253,9 +295,27 @@ private:
     void update_hot_lru(hash_type hash);
     void update_warm_lru(hash_type hash);
     
-    // Compression
+    // Compression with context caching to avoid repeated malloc
     std::vector<uint8_t> compress(const std::vector<uint8_t>& data);
     std::vector<uint8_t> decompress(const std::vector<uint8_t>& data, size_t original_size);
+    
+    // Thread-local ZSTD context cache (to avoid 128MB heap segment allocations)
+    struct ZSTDContextCache {
+        ZSTD_CCtx* cctx = nullptr;
+        ZSTD_DCtx* dctx = nullptr;
+        std::mutex mutex;
+        
+        ~ZSTDContextCache() { reset(); }
+        void reset();
+        ZSTD_CCtx* getCCtx();
+        ZSTD_DCtx* getDCtx();
+    };
+    
+    // One cache per IO/prefetch thread (indexed by thread id)
+    mutable std::mutex ctx_cache_mutex_;
+    std::unordered_map<std::thread::id, std::unique_ptr<ZSTDContextCache>> ctx_caches_;
+    
+    ZSTDContextCache* get_thread_ctx_cache();
     
     // Disk operations
     bool write_to_disk(hash_type hash, const std::vector<uint8_t>& data);
@@ -274,8 +334,8 @@ extern "C" {
 
 void state_store_init(void);
 uint32_t state_store_save(const void* data, size_t len);
-ssize_t state_store_load(uint32_t hash, void* data, size_t max_len);
-int state_store_exists(uint32_t hash);
+ssize_t state_store_load(uint64_t hash, void* data, size_t max_len);
+int state_store_exists(uint64_t hash);
 
 #ifdef __cplusplus
 }

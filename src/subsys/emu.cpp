@@ -32,5 +32,6 @@ int emu_gettimeofday(struct timeval *tv, struct timezone *tz)
 
   ptmc_state.time[index] = *(struct timeval *)out->args[0];
   int rval = out->rval;
+  delete out;
   return rval;
 }

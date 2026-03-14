@@ -118,6 +118,9 @@ typedef struct tracee_state
   // Move control - explicitly default
   tracee_state(tracee_state&& other) noexcept = default;
   tracee_state& operator=(tracee_state&& other) noexcept = default;
+  
+  // Explicit memory cleanup - call after copying to ptmc_state to free source
+  void clear();
 
   /* ---------------------------------------------------------
    * State Capture (running -> struct -> disk)
@@ -218,6 +221,9 @@ typedef struct sys_state
   sys_state(hash_type hash);
 
   ~sys_state(){};
+  
+  // Explicit memory cleanup - call after copying to ptmc_state to free source
+  void clear();
 
   /* ---------------------------------------------------------
    * Persistence
@@ -292,5 +298,11 @@ bool mapping_exists(maps_item &a, std::vector<maps_item> &array);
  * ====================================================================== */
 
 void state_stats_print();
+
+/* ======================================================================
+ * Global Cleanup
+ * ====================================================================== */
+
+void cleanup_all();
 
 #endif /* __STATE_H */

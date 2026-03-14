@@ -10,8 +10,6 @@
 #include <string>
 
 int is_dynamically_linked(const char *filename);
-hash_type compress_tmp_file(FILE *fin, const char *out_path, int level);
-FILE *decompress_file_tmp(const char *in_path);
 void fcopy(char *source_filename, char *destination_filename);
 int filecmp(const char *file1, const char *file2);
 FILE *create_anonymous_tmp(const char *id, const char *mode);
@@ -39,11 +37,9 @@ bool remove_file(const std::string &path);
 std::unique_ptr<FILE, file_closer> open_cfile(const std::string &path,
                                               const char *mode);
 std::string format_hash_filename(const std::string &dir, const std::string &ext,
-                                 uint32_t hash);
+                                 hash_type hash);
 void ensure_directory_for_file(const std::string &path);
 std::unique_ptr<FILE, file_closer> open_map_file(hash_type hash,
-                                                 const char *mode = "r");
-std::unique_ptr<FILE, file_closer> open_mem_file(hash_type hash,
                                                  const char *mode = "r");
 std::unique_ptr<FILE, file_closer>
 open_state_file(hash_type hash, const std::string &prefix,

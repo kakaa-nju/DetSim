@@ -1,0 +1,71 @@
+# depth total_states_searched
+5 239
+6 752
+7 1730
+8 4201
+9 11693
+10 32176
+11 84885
+12 218023
+# depth total_states_searched
+12 206
+13 654
+14 1990
+15 5520
+16 16759
+17 48152
+18 131828
+19 351298
+# depth total_states_searched
+13 243
+14 694
+15 1145
+16 3777
+17 11409
+18 33663
+19 105264
+# depth total_states_searched
+13 183
+14 627
+15 1539
+16 3772
+17 10191
+18 28209
+19 75834
+20 198319
+21 512174
+22 1307299
+23 3308818
+24 8320355
+# depth total_states_searched
+# depth total_states_searched
+# depth total_states_searched
+4 227
+6 694
+7 1125
+8 3322
+9 8103
+# depth total_states_searched
+5 223
+6 665
+7 1125
+8 3310
+# depth total_states_searched
+5 205
+6 643
+7 1530
+8 2853
+9 7726
+10 17819
+# depth total_states_searched
+15 142
+16 411
+# depth total_states_searched
+5 189
+6 649
+7 1091
+8 2895
+# depth total_states_searched
+5 232
+6 675
+7 1119

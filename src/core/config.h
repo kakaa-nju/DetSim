@@ -32,4 +32,7 @@ extern FILE *log_fp;
 /* Auto mode flag (defined in config.cpp) */
 extern int auto_mode;
 
+/* Cleanup allocated configuration memory */
+void cleanup_config();
+
 #endif /* __CONFIG_H */

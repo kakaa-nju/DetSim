@@ -14,6 +14,7 @@
 #include "scheduler.h"
 #include "utils.h"
 #include "state_store.h"
+#include "sysstate_store.h"
 #include "sockstate.h"
 #include <arpa/inet.h>
 #include <fmt/format.h>
@@ -132,10 +133,10 @@ void init_monitor(int argc, char *argv[])
 
 /* We use the `readline' library to provide more flexibility to read from stdin.
  */
+static char *line_read = NULL;
+
 char *rl_gets()
 {
-  static char *line_read = NULL;
-
   if (line_read)
   {
     free(line_read);
@@ -150,6 +151,20 @@ char *rl_gets()
   }
 
   return line_read;
+}
+
+/* Cleanup readline resources */
+void cleanup_readline()
+{
+  /* Free the last line read */
+  if (line_read)
+  {
+    free(line_read);
+    line_read = NULL;
+  }
+  
+  /* Clear readline history to free all history entries */
+  clear_history();
 }
 
 static int cmd_c(char *args)
@@ -255,42 +270,26 @@ static int cmd_load(char *args)
     printf("No Arguments!\n");
     return 1;
   }
-  /* match */
-  std::vector<hash_type> s;
-  DIR *dir = opendir("sstate");
-  if (!dir) {
-    printf("Error: Cannot open sstate directory: %s\n", strerror(errno));
-    return 1;
-  }
-  struct dirent *de;
-  while ((de = readdir(dir)) != NULL)
-  {
-    if (de->d_name[0] == '.')
-      continue;
-    if (strstr(de->d_name, arg) == de->d_name)
-    {
-      hash_type hash;
-      if (sscanf(de->d_name, "%x", &hash) == 1) {
-        s.push_back(hash);
-      }
-    }
-  }
-  closedir(dir);
+  
+  /* Use SysStateStore to find matching hashes */
+  SysStateStore& store = SysStateStore::instance();
+  std::vector<hash_type> s = store.find_by_prefix(arg);
 
   if (s.size() == 1)
   {
     ptmc_state.sysstate_hash = s[0];
     ptmc_state.state = PTMC_PRELOAD;
     load(s[0]);
+    printf("Loaded state %016lx\n", s[0]);
   }
   else if (s.size() == 0)
     printf("sys_state hash starts with %s has 0 candidates. Please specify "
            "another\n",
            arg);
   else
-    printf("sys_state hash starts with %s has multiple candidates. Please "
+    printf("sys_state hash starts with %s has %zu candidates. Please "
            "specify one\n",
-           arg);
+           arg, s.size());
   return 0;
 }
 
@@ -655,7 +654,7 @@ static std::vector<hash_type> find_states_by_prefix(const char *prefix)
     if (strstr(de->d_name, prefix) == de->d_name)
     {
       hash_type hash;
-      if (sscanf(de->d_name, "%x", &hash) == 1) {
+      if (sscanf(de->d_name, "%lx", &hash) == 1) {
         matches.push_back(hash);
       }
     }
@@ -792,38 +791,38 @@ static bool read_regs_from_dump(hash_type ts_hash, struct user_regs_struct *regs
   ssize_t data_size = StateStore::instance().load(ts_hash, data);
   
   if (data_size < 0) {
-    LOG_ERROR("Cannot load state for hash %08x in read_regs_from_dump", ts_hash);
+    LOG_ERROR("Cannot load state for hash %016lx in read_regs_from_dump", ts_hash);
     return false;
   }
   
   // Parse header
   if (data.size() < sizeof(StateDataHeader)) {
-    LOG_ERROR("Invalid state data for hash %08x: too small", ts_hash);
+    LOG_ERROR("Invalid state data for hash %016lx: too small", ts_hash);
     return false;
   }
   
   // Ensure proper alignment for header access
   if (reinterpret_cast<uintptr_t>(data.data()) % alignof(StateDataHeader) != 0) {
-    LOG_ERROR("Misaligned state data for hash %08x", ts_hash);
+    LOG_ERROR("Misaligned state data for hash %016lx", ts_hash);
     return false;
   }
   
   StateDataHeader* header = reinterpret_cast<StateDataHeader*>(data.data());
   if (header->magic != 0x4453544D) {
-    LOG_ERROR("Invalid state data format for hash %08x: bad magic", ts_hash);
+    LOG_ERROR("Invalid state data format for hash %016lx: bad magic", ts_hash);
     return false;
   }
   
   // Support versions 1, 2, and 3
   if (header->version < 1 || header->version > 3) {
-    LOG_ERROR("Unsupported state data version %u for hash %08x", header->version, ts_hash);
+    LOG_ERROR("Unsupported state data version %u for hash %016lx", header->version, ts_hash);
     return false;
   }
   
   // Read registers from the offset specified in header
   if (header->regs_offset > data.size() || 
       header->regs_offset + sizeof(struct user_regs_struct) > data.size()) {
-    LOG_ERROR("Invalid register offset in state data for hash %08x", ts_hash);
+    LOG_ERROR("Invalid register offset in state data for hash %016lx", ts_hash);
     return false;
   }
   
@@ -974,11 +973,11 @@ static void diff_memory_content(hash_type ts_a, hash_type ts_b,
   RegionInfo *regions_a = nullptr, *regions_b = nullptr;
   
   if (!load_state_data(ts_a, data_a, header_a, regions_a)) {
-    LOG_ERROR("Failed to load state A for hash %08x", ts_a);
+    LOG_ERROR("Failed to load state A for hash %016lx", ts_a);
     return;
   }
   if (!load_state_data(ts_b, data_b, header_b, regions_b)) {
-    LOG_ERROR("Failed to load state B for hash %08x", ts_b);
+    LOG_ERROR("Failed to load state B for hash %016lx", ts_b);
     return;
   }
   
@@ -1072,18 +1071,18 @@ static bool load_maps_from_state(hash_type ts_hash, std::vector<maps_item> &maps
   std::vector<uint8_t> data;
   ssize_t size = StateStore::instance().load(ts_hash, data);
   
-  LOG_TRACE("load_maps_from_state: hash=%08x, size=%zd, data.size=%zu", 
+  LOG_TRACE("load_maps_from_state: hash=%016lx, size=%zd, data.size=%zu", 
             ts_hash, size, data.size());
   
   if (size > 0 && data.size() >= sizeof(StateDataHeader)) {
     // Ensure proper alignment for header access
     if (reinterpret_cast<uintptr_t>(data.data()) % alignof(StateDataHeader) != 0) {
-      LOG_ERROR("Misaligned state data for hash %08x", ts_hash);
+      LOG_ERROR("Misaligned state data for hash %016lx", ts_hash);
       return false;
     }
     
     StateDataHeader* header = reinterpret_cast<StateDataHeader*>(data.data());
-    LOG_TRACE("  header: magic=%08x, version=%u, maps_offset=%lu, maps_size=%lu",
+    LOG_TRACE("  header: magic=%016lx, version=%u, maps_offset=%lu, maps_size=%lu",
               header->magic, header->version, header->maps_offset, header->maps_size);
     
     if (header->magic == 0x4453544D && header->version >= 3 && header->maps_size > 0) {
@@ -1117,13 +1116,13 @@ static bool load_maps_from_state(hash_type ts_hash, std::vector<maps_item> &maps
                   header->maps_offset, header->maps_size, data.size());
       }
     } else {
-      LOG_TRACE("  Not version 3 or no maps: magic=%08x, version=%u, maps_size=%lu",
+      LOG_TRACE("  Not version 3 or no maps: magic=%016lx, version=%u, maps_size=%lu",
                 header->magic, header->version, header->maps_size);
     }
   }
   
   /* Fallback to .maps file for legacy compatibility */
-  LOG_TRACE("  Falling back to .maps file for hash %08x", ts_hash);
+  LOG_TRACE("  Falling back to .maps file for hash %016lx", ts_hash);
   auto map_fp = fileutils::open_map_file(ts_hash);
   if (map_fp) {
     get_maps_item(maps, map_fp.get());
@@ -1131,7 +1130,7 @@ static bool load_maps_from_state(hash_type ts_hash, std::vector<maps_item> &maps
     return !maps.empty();
   }
   
-  LOG_ERROR("  Failed to load maps for hash %08x", ts_hash);
+  LOG_ERROR("  Failed to load maps for hash %016lx", ts_hash);
   return false;
 }
 

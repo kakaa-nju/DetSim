@@ -13,5 +13,13 @@
     { "syscall": 96, "choose": 2 }
   ],
   "ChooseFunc": "./plugins/choose.so",
-  "UserCheck": "./plugins/check.so"
+  "UserCheck": "./plugins/check.so",
+  "StateStore": {
+    "hot_cache_mb": 512,
+    "warm_cache_mb": 2048,
+    "prefetch_window": 100,
+    "compression_level": 1,
+    "enable_malloc_trim": true,
+    "malloc_trim_threshold_mb": 64
+  }
 }

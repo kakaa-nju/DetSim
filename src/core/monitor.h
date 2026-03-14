@@ -26,7 +26,7 @@ enum
 };
 
 struct PTMC_STATE {
-  enum { MODE_DFS, MODE_BFS, MODE_RAND } mode = MODE_RAND;
+  enum { MODE_DFS, MODE_BFS, MODE_RAND } mode = MODE_BFS;
   int state = PTMC_PRELOAD;
   int cursor = -1;
   int n_choose = 0;
@@ -67,6 +67,7 @@ struct PTMC_STATE {
 };
 
 int is_auto_mode();
+void cleanup_readline();
 
 extern PTMC_STATE ptmc_state;
 

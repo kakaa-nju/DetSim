@@ -43,8 +43,6 @@ struct func_info {
   std::vector<var_info> local_vars;
 };
 
-static std::unordered_map<std::string, func_info> func_cache;
-
 /* ======================================================================
  * Section 1: Global State
  * ====================================================================== */
@@ -617,6 +615,26 @@ void init_dwarf(void)
   }
   LOG_INFO("DWARF: Parsing %s", ptmc_state.tracee[0].executable);
   dwarf_init(ptmc_state.tracee[0].executable);
+}
+
+void cleanup_dwarf(void)
+{
+  /* Close dwarf debug handle */
+  if (dbg) {
+    Dwarf_Error err;
+    dwarf_finish(dbg, &err);
+    dbg = nullptr;
+  }
+  
+  /* Close file descriptor */
+  if (dwarf_fd >= 0) {
+    close(dwarf_fd);
+    dwarf_fd = -1;
+  }
+  
+  /* Clear all caches */
+  global_vars.clear();
+  type_cache.clear();
 }
 
 /* ======================================================================

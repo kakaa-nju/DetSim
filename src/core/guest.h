@@ -68,6 +68,7 @@ void tracee_show_regs(int pid);
 uintptr_t get_var_addr(const char *varname);
 std::string get_var_type(const char *varname);
 void init_dwarf();
+void cleanup_dwarf();
 
 void *memcpy_guest2host(void *dest, const void *src, size_t n);
 void *memcpy_host2guest(void *dest, const void *src, size_t n);

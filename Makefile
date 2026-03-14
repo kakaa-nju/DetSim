@@ -1,4 +1,4 @@
-.PHONY: all debug release wc clean clear
+.PHONY: all debug release wc clean clear benchmark
 
 CC = gcc
 CXX = ccache g++
@@ -13,7 +13,7 @@ LDFLAGS = -g -ldwarf -lreadline -lcjson -ldw -lzstd -rdynamic \
 
 # Source files with new directory structure
 SRCS = src/main.cpp \
-       src/core/scheduler.cpp src/core/guest.cpp src/core/monitor.cpp src/core/state.cpp src/core/config.cpp src/core/syscall_fmt.cpp src/core/dwarf.cpp src/core/state_store.cpp \
+       src/core/scheduler.cpp src/core/guest.cpp src/core/monitor.cpp src/core/state.cpp src/core/config.cpp src/core/syscall_fmt.cpp src/core/dwarf.cpp src/core/state_store.cpp src/core/sysstate_store.cpp \
        src/subsys/serialize.cpp src/subsys/sockstate.cpp src/subsys/fsstate.cpp src/subsys/emu.cpp src/subsys/fd_manager.cpp \
        src/utils/utils.cpp src/utils/expr.cpp src/utils/expr_ast.cpp \
        src/utils/expr_lexer.cpp src/utils/expr_parser.cpp \
@@ -72,3 +72,49 @@ clear:
 clean:
 	-/bin/rm -f $(OBJS) $(DEPS) nr2call.o tracer *.so
 	-/bin/rm -f $(LEX_SRC) $(YACC_SRC) $(YACC_HDR) src/utils/expr_parser.output
+	-/bin/rm -f $(BENCH_EXE) $(BENCH_OBJ) $(BENCH_SRC:.cpp=.d)
+
+# --- Benchmark Targets ---
+# Exclude the main tracer entry point from the object list for linking the benchmark
+TRACER_OBJS_NO_MAIN = $(filter-out src/main.o, $(OBJS))
+
+# StateStore benchmark
+BENCH1_SRC = perf/state_store_benchmark.cpp
+BENCH1_OBJ = $(BENCH1_SRC:.cpp=.o)
+BENCH1_EXE = ss_bench
+
+# SysStateStore benchmark  
+BENCH2_SRC = perf/sysstate_store_benchmark.cpp
+BENCH2_OBJ = $(BENCH2_SRC:.cpp=.o)
+BENCH2_EXE = sys_bench
+
+# XXHash benchmark
+BENCH3_SRC = perf/xxhash_benchmark.cpp
+BENCH3_OBJ = $(BENCH3_SRC:.cpp=.o)
+BENCH3_EXE = xxh_bench
+
+benchmark: $(BENCH1_EXE) $(BENCH2_EXE) $(BENCH3_EXE)
+
+$(BENCH1_EXE): $(BENCH1_OBJ) $(TRACER_OBJS_NO_MAIN) nr2call.o
+	@echo "==> Linking Benchmark: $(BENCH1_EXE)"
+	$(LD) $^ $(LDFLAGS) -o $@
+
+$(BENCH2_EXE): $(BENCH2_OBJ) $(TRACER_OBJS_NO_MAIN) nr2call.o
+	@echo "==> Linking Benchmark: $(BENCH2_EXE)"
+	$(LD) $^ $(LDFLAGS) -o $@
+
+$(BENCH3_EXE): $(BENCH3_OBJ) nr2call.o
+	@echo "==> Linking Benchmark: $(BENCH3_EXE)"
+	$(CXX) $^ -O3 -o $@
+
+# Compile benchmark files
+perf/%.o: perf/%.cpp
+	@if [ -z "$(NP)" ]; then \
+		echo "NP not set"; exit 1; \
+	fi
+	@echo "Compiling benchmark $<"
+	@start=$$(date +%s.%N); \
+	$(CXX) $< $(CXXFLAGS) -c -o $@ -DNP=$(NP); \
+	end=$$(date +%s.%N); \
+	dur=$$(echo "$$end - $$start" | bc); \
+	echo "Compiled $< in $$dur seconds"

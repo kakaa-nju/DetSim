@@ -9,10 +9,13 @@
 #include "state.h"
 #include "state_store.h"
 #include "utils.h"
+#include "expr_eval.hpp"
 
 #include <assert.h>
 #include <cstddef>
 #include <cstdlib>
+#include <cmath>        // for log, exp
+#include <random>
 #include <fcntl.h>
 #include <readline/readline.h>
 #include <signal.h>
@@ -21,6 +24,10 @@
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <atomic>
+#include <thread>
+#include <chrono>
+#include <sys/ioctl.h>
 
 #define pids ptmc_state.pids
 #define PTRACE_TRAP_SIG (SIGTRAP | 0x80)
@@ -208,12 +215,12 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
                          (socklen_t *)info->args[5]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_YES;
-      if (ret >= 0) /* for willemt/raft, a `poll_msg` cycle will recv() until
+      if (ret < 0) /* for willemt/raft, a `poll_msg` cycle will recv() until
                        nothing can be received */
       {
         return CKPT_NO;
       }
+      return CKPT_YES;
       break;
     case SYS_sched_yield:
       break;
@@ -223,7 +230,7 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
                        info->args[5]);
       tracee_set_rax(pid, ret);
       info->rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_gettimeofday:
       ret = emu_gettimeofday((struct timeval *)info->args[0],
                              (struct timezone *)info->args[1]);
@@ -494,6 +501,9 @@ void load(hash_type hash)
   ptmc_state.source_state.recover_running_state();
 }
 
+/* Forward declarations for status monitor */
+static void stop_status_monitor();
+
 int exec_store()
 {
   ptmc_state.state = PTMC_RUNNING;
@@ -526,9 +536,11 @@ int exec_store()
 
   if (check_state() != 0)
   {
+    stop_status_monitor();
     printf("Reach illegal state.\n");
     show_syscall_history();
   }
+  stop_status_monitor();
   return 0;
 }
 
@@ -540,6 +552,7 @@ int load_exec_store()
 
 extern LSS state_queue;
 extern SSS state_set;
+extern TSS state_tree;
 extern int sigint_received;
 
 #include <sys/time.h>
@@ -550,11 +563,428 @@ static double gettime()
   return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
 
+/* ======================================================================
+ * Status Monitor - Real-time statistics display
+ * ====================================================================== */
+
+/* Global statistics for status monitor */
+static std::atomic<size_t> g_states_searched{0};
+static std::atomic<size_t> g_states_new{0};
+static std::atomic<size_t> g_queue_size{0};
+static std::atomic<double> g_start_time{0.0};
+static std::atomic<bool> g_monitor_running{false};
+
+/* Depth tracking for depth vs states analysis */
+static std::atomic<size_t> g_max_depth_recorded{0};  // Maximum depth seen so far
+static FILE* g_depth_stat_file = nullptr;            // File for depth-statistics output
+static std::mutex g_depth_stat_mutex;                // Mutex for file access
+
+/* Data points for exponential fitting: (depth, total_states) */
+static std::vector<std::pair<double, double>> g_depth_data_points;
+static std::mutex g_depth_data_mutex;
+
+/* Exponential fit parameters: states = a * exp(b * depth) */
+static double g_fit_a = 0.0;  // coefficient
+static double g_fit_b = 0.0;  // exponent
+static std::mutex g_fit_mutex;
+
+/* Perform exponential fit: y = a * exp(b * x)
+ * Returns true if fit succeeds, false otherwise */
+static bool exponential_fit(const std::vector<std::pair<double, double>>& points, 
+                            double& out_a, double& out_b) {
+  if (points.size() < 3) return false;  // Need at least 3 points
+  
+  size_t n = points.size();
+  double sum_x = 0.0, sum_y = 0.0, sum_xy = 0.0, sum_x2 = 0.0;
+  
+  // Use log-linear fit: ln(y) = ln(a) + b*x
+  for (const auto& p : points) {
+    double x = p.first;
+    double y_log = log(p.second);
+    sum_x += x;
+    sum_y += y_log;
+    sum_xy += x * y_log;
+    sum_x2 += x * x;
+  }
+  
+  double denom = n * sum_x2 - sum_x * sum_x;
+  if (fabs(denom) < 1e-10) return false;  // Avoid division by zero
+  
+  out_b = (n * sum_xy - sum_x * sum_y) / denom;
+  double a_log = (sum_y - out_b * sum_x) / n;
+  out_a = exp(a_log);
+  
+  return true;
+}
+
+/* Update fit with new data point */
+static void update_depth_fit(size_t depth, size_t total_states) {
+  std::lock_guard<std::mutex> lock(g_depth_data_mutex);
+  g_depth_data_points.push_back({static_cast<double>(depth), static_cast<double>(total_states)});
+  
+  // Keep only last 50 points for local fitting
+  if (g_depth_data_points.size() > 50) {
+    g_depth_data_points.erase(g_depth_data_points.begin());
+  }
+  
+  double a, b;
+  if (exponential_fit(g_depth_data_points, a, b)) {
+    std::lock_guard<std::mutex> fit_lock(g_fit_mutex);
+    g_fit_a = a;
+    g_fit_b = b;
+  }
+}
+
+/* Performance diagnostics */
+static std::atomic<uint64_t> g_save_time_us{0};      // Total state save time
+static std::atomic<uint64_t> g_restore_time_us{0};   // Total state restore time
+static std::atomic<uint64_t> g_syscall_time_us{0};   // Total syscall execution time
+static std::atomic<size_t> g_save_count{0};          // Number of saves
+static std::atomic<size_t> g_restore_count{0};       // Number of restores
+static std::chrono::high_resolution_clock::time_point g_last_stat_time;
+static std::thread g_monitor_thread;
+
+/* Calculate real depth from state_tree by backtracking to root
+ * This is the actual path length from current state to initial state */
+static size_t calculate_state_depth(hash_type current_hash) {
+  if (current_hash == 0) return 0;
+  
+  size_t depth = 0;
+  hash_type hash = current_hash;
+  
+  /* Use a simple visited set to prevent infinite loops (shouldn't happen in tree) */
+  std::unordered_set<hash_type> visited;
+  
+  while (state_tree.count(hash) && visited.insert(hash).second) {
+    auto &parent_info = state_tree[hash];
+    hash = std::get<0>(parent_info);
+    if (hash == 0) break;  // Reached root
+    depth++;
+  }
+  
+  return depth;
+}
+
+/* Get terminal size */
+static void get_terminal_size(int &rows, int &cols) {
+  struct winsize w;
+  rows = 24; cols = 80; /* defaults */
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0) {
+    rows = w.ws_row;
+    cols = w.ws_col;
+  }
+}
+
+/* Format bytes to human readable */
+static std::string format_bytes(size_t bytes) {
+  const char *units[] = {"B", "KB", "MB", "GB"};
+  int unit = 0;
+  double size = bytes;
+  while (size >= 1024 && unit < 3) {
+    size /= 1024;
+    unit++;
+  }
+  char buf[32];
+  snprintf(buf, sizeof(buf), "%.1f%s", size, units[unit]);
+  return std::string(buf);
+}
+
+/* ANSI escape codes */
+#define ANSI_HIDE_CURSOR "\033[?25l"
+#define ANSI_SHOW_CURSOR "\033[?25h"
+#define ANSI_CLEAR_LINE "\033[2K"
+#define ANSI_MOVE_UP "\033[A"
+#define ANSI_MOVE_DOWN "\033[B"
+#define ANSI_SAVE_CURSOR "\033[s"
+#define ANSI_RESTORE_CURSOR "\033[u"
+#define ANSI_MOVE_TO_ROW(r) "\033[" #r ";1H"
+
+/* Status monitor thread - updates display every second */
+static void status_monitor_thread() {
+  /* Wait a bit for initial states to be processed */
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  
+  int rows, cols;
+  get_terminal_size(rows, cols);
+  
+  /* Hide cursor */
+  printf(ANSI_HIDE_CURSOR);
+  fflush(stdout);
+  
+  while (g_monitor_running.load()) {
+    auto &store = StateStore::instance();
+    auto stats = store.get_stats();
+    
+    size_t l1_usage = store.get_l1_usage();
+    size_t l1_cap = store.get_l1_capacity();
+    size_t l2_usage = store.get_l2_usage();
+    size_t l2_cap = store.get_l2_capacity();
+    size_t l1_entries = store.get_l1_entry_count();
+    size_t l2_entries = store.get_l2_entry_count();
+    size_t io_queue_size = store.get_io_queue_size();
+    size_t io_queue_cap = store.get_io_queue_capacity();
+    size_t prefetch_queue_size = store.get_prefetch_queue_size();
+    
+    double hit_rate = stats.hit_rate();
+    double elapsed = gettime() - g_start_time.load();
+    double states_per_sec = elapsed > 0 ? g_states_searched.load() / elapsed : 0;
+    
+    size_t total_sysstates = state_set.size();
+    size_t unique_states = g_states_new.load();
+    size_t queue_size = g_queue_size.load();
+    /* Calculate real depth from state tree */
+    size_t depth = calculate_state_depth(ptmc_state.dest_state.ss_hash);
+    
+    /* NEW: Track depth vs states relationship - log when we see a new max depth */
+    size_t current_max_depth = g_max_depth_recorded.load();
+    size_t total_searched = g_states_searched.load();
+    if (depth > current_max_depth && total_searched > 0) {
+      // Update max depth (may fail if another thread updated, that's OK)
+      if (g_max_depth_recorded.compare_exchange_weak(current_max_depth, depth)) {
+        std::lock_guard<std::mutex> lock(g_depth_stat_mutex);
+        if (g_depth_stat_file) {
+          fprintf(g_depth_stat_file, "%zu %zu\n", depth, total_searched);
+          fflush(g_depth_stat_file);
+        }
+        // Update exponential fit with new data point
+        update_depth_fit(depth, total_searched);
+      }
+    }
+    
+    /* NEW: Track global container sizes (potential memory hogs) */
+    size_t state_tree_size = state_tree.size();
+    size_t state_queue_internal = StateStore::instance().queue_size();
+    size_t sock_state_total = 0;
+    size_t fs_state_total = 0;
+    for (int i = 0; i < NP; i++) {
+        sock_state_total += ptmc_state.sock_states[i].sockets().size();
+        sock_state_total += ptmc_state.sock_states[i].udp_recv_buffers().size();
+    }
+    
+    /* Save cursor and move to status area (bottom 9 lines) */
+    printf(ANSI_SAVE_CURSOR);
+    
+    /* Calculate status area starting row (reserve bottom 11 lines) */
+    int status_start = rows - 11;
+    if (status_start < 1) status_start = 1;
+    
+    /* Print separator line */
+    printf("\033[%d;1H" ANSI_CLEAR_LINE "═══════════════════════════════════════════════════════════════════════════════", status_start - 1);
+    
+    /* Line 1: Basic stats */
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " 🚀 States: %zu searched | %zu unique | %zu queued | Depth: %zu | %.1f states/s", 
+           status_start, 
+           g_states_searched.load(), 
+           unique_states, 
+           queue_size,
+           depth,
+           states_per_sec);
+    
+    /* Line 2: Worker queues (NEW) */
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " 📥 Queues: IO=[%zu/%zu] | Prefetch=[%zu]", 
+           status_start + 1, io_queue_size, io_queue_cap, prefetch_queue_size);
+    
+    /* Line 3: Cache L1 with entry count */
+    double l1_pct = l1_cap > 0 ? 100.0 * l1_usage / l1_cap : 0;
+    int l1_bar = (int)(50 * l1_usage / l1_cap);
+    if (l1_bar > 50) l1_bar = 50;
+    char l1_bar_str[51];
+    for (int i = 0; i < 50; i++) l1_bar_str[i] = (i < l1_bar) ? '#' : '-';
+    l1_bar_str[50] = '\0';
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " L1 Hot:   [%s] %s / %s (%.1f%%) | %zu entries", 
+           status_start + 2, l1_bar_str, format_bytes(l1_usage).c_str(), format_bytes(l1_cap).c_str(), l1_pct, l1_entries);
+    
+    /* Line 4: Cache L2 with entry count */
+    double l2_pct = l2_cap > 0 ? 100.0 * l2_usage / l2_cap : 0;
+    int l2_bar = (int)(50 * l2_usage / l2_cap);
+    if (l2_bar > 50) l2_bar = 50;
+    char l2_bar_str[51];
+    for (int i = 0; i < 50; i++) l2_bar_str[i] = (i < l2_bar) ? '#' : '-';
+    l2_bar_str[50] = '\0';
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " L2 Warm:  [%s] %s / %s (%.1f%%) | %zu entries", 
+           status_start + 3, l2_bar_str, format_bytes(l2_usage).c_str(), format_bytes(l2_cap).c_str(), l2_pct, l2_entries);
+    
+    /* Line 5: Save/dedup statistics */
+    uint64_t total_dedup = stats.save_dedup_hot + stats.save_dedup_warm + stats.save_dedup_disk;
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " Save: %zu calls | %zu new | dedup: H=%zu W=%zu D=%zu (%.1f%%)", 
+           status_start + 4,
+           stats.save_calls,
+           stats.save_new,
+           stats.save_dedup_hot,
+           stats.save_dedup_warm,
+           stats.save_dedup_disk,
+           stats.dedup_rate());
+    
+    /* Line 6: Time and throughput */
+    int hours = (int)(elapsed / 3600);
+    int minutes = ((int)elapsed % 3600) / 60;
+    int seconds = (int)elapsed % 60;
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " Elapsed:  %02d:%02d:%02d | Total SysStates: %zu", 
+           status_start + 5,
+           hours, minutes, seconds,
+           total_sysstates);
+    
+    /* Line 7: Exponential fit for depth vs states */
+    double fit_a, fit_b;
+    {
+      std::lock_guard<std::mutex> fit_lock(g_fit_mutex);
+      fit_a = g_fit_a;
+      fit_b = g_fit_b;
+    }
+    if (fit_a > 0 && fit_b > 0 && g_depth_data_points.size() >= 3) {
+      // Predict total states at depth+1 and depth+5
+      double pred_next = fit_a * exp(fit_b * (depth + 1));
+      double pred_5more = fit_a * exp(fit_b * (depth + 5));
+      printf("\033[%d;1H" ANSI_CLEAR_LINE " DepthFit: N=%zu | states=%.2f*e^(%.4f*depth) | d+1:%.0f d+5:%.0f",
+             status_start + 6,
+             g_depth_data_points.size(), fit_a, fit_b, pred_next, pred_5more);
+    } else {
+      printf("\033[%d;1H" ANSI_CLEAR_LINE " DepthFit: collecting data... (%zu points)",
+             status_start + 6, g_depth_data_points.size());
+    }
+    
+    /* Line 8: Process status */
+    int running = 0, exited = 0;
+    for (int i = 0; i < NP; i++) {
+      if (ptmc_state.exited[i]) exited++;
+      else running++;
+    }
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " Processes: %d running | %d exited | Current: %d", 
+           status_start + 7, running, exited, ptmc_state.cursor);
+    
+    /* Line 8: Mode info */
+    const char *mode_str = "DFS";
+    if (ptmc_state.mode == PTMC_STATE::MODE_RAND) mode_str = "RAND";
+    else if (ptmc_state.mode == PTMC_STATE::MODE_DFS) mode_str = "DFS";
+    else if (ptmc_state.mode == PTMC_STATE::MODE_BFS) mode_str = "BFS";
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " Mode:     %s | Auto: %s | SIGINT: %s", 
+           status_start + 8,
+           mode_str,
+           is_auto_mode() ? "ON" : "OFF",
+           sigint_received ? "YES" : "NO");
+    
+    /* Line 9: Global containers (NEW - potential memory hogs) */
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " TREE=%zu SET=%zu SOCKS=%zu", 
+           status_start + 9,
+           state_tree_size, total_sysstates, sock_state_total);
+    
+    /* Line 10: Current state hash */
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " Current:  %016lx", 
+           status_start + 10,
+           ptmc_state.dest_state.ss_hash);
+    
+    /* Performance diagnostics */
+    size_t save_count = g_save_count.load();
+    size_t restore_count = g_restore_count.load();
+    uint64_t total_save_us = g_save_time_us.load();
+    uint64_t total_restore_us = g_restore_time_us.load();
+    
+    double avg_save_ms = save_count > 0 ? (total_save_us / 1000.0) / save_count : 0;
+    double avg_restore_ms = restore_count > 0 ? (total_restore_us / 1000.0) / restore_count : 0;
+    
+    /* Line 9: Performance (avoid accessing state_set from monitor thread) */
+    printf("\033[%d;1H" ANSI_CLEAR_LINE " Save: %.2fms | Restore: %.2fms | Count: %zu", 
+           status_start + 7,
+           avg_save_ms, avg_restore_ms, save_count + restore_count);
+    
+    /* Restore cursor */
+    printf(ANSI_RESTORE_CURSOR);
+    fflush(stdout);
+    
+    /* Sleep 1 second */
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+  
+  /* Show cursor again */
+  printf(ANSI_SHOW_CURSOR);
+  fflush(stdout);
+}
+
+static void start_status_monitor() {
+  g_monitor_running = true;
+  g_start_time = gettime();
+  g_last_stat_time = std::chrono::high_resolution_clock::now();
+  g_max_depth_recorded = 0;
+  
+  /* Open depth statistics file for append */
+  std::lock_guard<std::mutex> lock(g_depth_stat_mutex);
+  if (g_depth_stat_file) {
+    fclose(g_depth_stat_file);
+  }
+  g_depth_stat_file = fopen("depth_stats.txt", "a");
+  if (g_depth_stat_file) {
+    fprintf(g_depth_stat_file, "# depth total_states_searched\n");
+    fflush(g_depth_stat_file);
+  }
+  
+  g_monitor_thread = std::thread(status_monitor_thread);
+}
+
+static void stop_status_monitor() {
+  g_monitor_running = false;
+  if (g_monitor_thread.joinable()) {
+    g_monitor_thread.join();
+  }
+  
+  /* Close depth statistics file */
+  {
+    std::lock_guard<std::mutex> lock(g_depth_stat_mutex);
+    if (g_depth_stat_file) {
+      fclose(g_depth_stat_file);
+      g_depth_stat_file = nullptr;
+    }
+  }
+  
+  /* Clear depth data points for next run */
+  {
+    std::lock_guard<std::mutex> data_lock(g_depth_data_mutex);
+    g_depth_data_points.clear();
+  }
+  {
+    std::lock_guard<std::mutex> fit_lock(g_fit_mutex);
+    g_fit_a = 0.0;
+    g_fit_b = 0.0;
+  }
+  g_max_depth_recorded = 0;
+  
+  /* Clear status area */
+  int rows, cols;
+  get_terminal_size(rows, cols);
+  printf(ANSI_SAVE_CURSOR);
+  for (int i = rows - 10; i <= rows; i++) {
+    printf("\033[%d;1H" ANSI_CLEAR_LINE, i);
+  }
+  printf(ANSI_RESTORE_CURSOR);
+  fflush(stdout);
+}
+
+bool state_to_be_discarded(int index, syscall_info *infos) {
+  if (index == 0) 
+  {
+    uintptr_t raft = eval<uintptr_t>("((raft_server_private_t *)raft)", 0);
+    if (raft == 0) return false; // If we can't evaluate, don't discard
+    int state = eval<int>("((raft_server_private_t *)raft)->state", 0);
+    if (state == 2 || state == 3) {
+      return true;
+    }
+  }
+
+  uintptr_t raft = eval<uintptr_t>("((raft_server_private_t *)raft)", index);
+  if (raft == 0) return false; // If we can't evaluate, don't discard
+  int state = eval<int>("((raft_server_private_t *)raft)->state", index);
+  if (state == 3 && infos[index].nr == SYS_gettimeofday && ptmc_state.choose == 1)
+  {
+    return true;
+  }
+
+  return false;
+}
+
 /* auto mode: */
 int exec_cont()
 {
   double start_time = gettime();
-  srand(time(NULL));
+  // srand(time(NULL));
   sys_state *state_fetched = NULL;
   syscall_info syscall_info[NP];
   
@@ -564,6 +994,11 @@ int exec_cont()
   
   /* Reset StateStore statistics for this run */
   StateStore::instance().reset_stats();
+  
+  /* Initialize global statistics */
+  g_states_searched = 0;
+  g_states_new = 0;
+  g_queue_size = 0;
 
   StateStore::instance().queue_clear();
   state_queue_append(&ptmc_state.dest_state);
@@ -575,15 +1010,36 @@ int exec_cont()
   }
   state_set.emplace(ptmc_state.dest_state.ss_hash);
   states_searched_this_run++;
+  
+  /* Update global stats */
+  g_states_searched = states_searched_this_run;
+  g_states_new = states_new_this_run;
 
   ptmc_state.n_choose = 0;
   ptmc_state.choose = 0;
+  
+  /* Start status monitor in auto mode */
+  start_status_monitor();
 
   /* until no state in queue */
   while ((state_fetched = state_queue_extract()) != NULL)
   {
-    int i = rand() % NP;
-    // for (int i = 0; i < NP; i++)
+    std::vector<int> indexes;
+    switch (ptmc_state.mode)
+    {
+    case PTMC_STATE::MODE_RAND:
+      indexes.push_back(rand() % NP);
+      break;
+    default:
+      for (int k = 0; k < NP; k++)
+      {
+        if (!ptmc_state.source_state.exited[k])
+          indexes.push_back(k);
+      }
+      shuffle(indexes.begin(), indexes.end(), std::default_random_engine(rand()));
+    }
+    
+    for (auto &i : indexes)
     {
     again:
       ptmc_state.source_state = *state_fetched;
@@ -595,7 +1051,14 @@ int exec_cont()
       if (ptmc_state.exited[i])
         continue;
 
+      /* Time state restore */
+      auto t_restore_start = std::chrono::high_resolution_clock::now();
       s.recover_running_state();
+      auto t_restore_end = std::chrono::high_resolution_clock::now();
+      g_restore_time_us += std::chrono::duration_cast<std::chrono::microseconds>(
+          t_restore_end - t_restore_start).count();
+      g_restore_count++;
+      
       ptmc_state.cursor = i;
 
       /* Initialize syscall_info from source_state for all processes
@@ -607,9 +1070,15 @@ int exec_cont()
 
       ptmc_state.dest_state = sys_state(syscall_info);
 
-      if (ckpt != CKPT_DISCARD)
+      if (ckpt != CKPT_DISCARD && !state_to_be_discarded(i, syscall_info))
       {
+        /* Time state save */
+        auto t_save_start = std::chrono::high_resolution_clock::now();
         ptmc_state.dest_state.save_metadata();
+        auto t_save_end = std::chrono::high_resolution_clock::now();
+        g_save_time_us += std::chrono::duration_cast<std::chrono::microseconds>(
+            t_save_end - t_save_start).count();
+        g_save_count++;
         bool is_new = !state_set.count(ptmc_state.dest_state.ss_hash);
         if (is_new || ptmc_state.mode == PTMC_STATE::MODE_RAND)
         {
@@ -623,6 +1092,7 @@ int exec_cont()
       }
       if (check_state() != 0)
       {
+        stop_status_monitor();
         printf("Stopped for illegal state. Searched for %zu sys_states (new: %zu)\n",
                states_searched_this_run, states_new_this_run);
         show_syscall_history();
@@ -630,6 +1100,7 @@ int exec_cont()
         printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
                states_searched_this_run / time_used);
         StateStore::instance().print_stats();
+        state_fetched->clear();
         delete state_fetched;
         return 0;
       }
@@ -648,22 +1119,33 @@ int exec_cont()
         }
       }
     }
+    // Clear state_fetched before delete to free memory early
+    state_fetched->clear();
     delete state_fetched;
+    
+    /* Update global statistics for monitor */
+    g_states_searched = states_searched_this_run;
+    g_states_new = states_new_this_run;
+    g_queue_size = StateStore::instance().queue_size();
 
     if (sigint_received)
     {
+      stop_status_monitor();
       printf("Program received signal SIGINT, Interrupt.\n");
       printf("Searched for %zu sys_states (new: %zu), total unique: %zu\n", 
              states_searched_this_run, states_new_this_run, state_set.size());
       show_syscall_history();
+      stop_status_monitor();
       double time_used = gettime() - start_time;
       printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
              states_searched_this_run / time_used);
       StateStore::instance().print_stats();
       sigint_received = 0;
+      state_set.clear();
       return 0;
     }
   }
+  stop_status_monitor();
   printf("Complete explore all %zu sys_states (new: %zu), total unique: %zu\n", 
          states_searched_this_run, states_new_this_run, state_set.size());
   show_syscall_history();
