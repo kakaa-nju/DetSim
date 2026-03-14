@@ -825,6 +825,41 @@ bool StateStore::wait_persisted(hash_type hash, uint64_t timeout_ms) {
     }
 }
 
+void StateStore::wait_for_completion() {
+    // Wait for all pending IO operations to complete
+    // This is used when SIGINT is received to ensure data consistency
+    std::unique_lock<std::mutex> lock(io_mutex_);
+    
+    // Wait until IO queue is empty
+    while (!io_queue_.empty()) {
+        lock.unlock();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        lock.lock();
+    }
+    
+    // Also wait for any in-flight writes (state == PERSISTING)
+    // by checking all entries in hot cache
+    lock.unlock();
+    
+    std::vector<StateEntryPtr> pending_entries;
+    {
+        std::lock_guard<std::recursive_mutex> hot_lock(hot_mutex_);
+        for (auto& [hash, entry] : hot_cache_) {
+            if (entry->state.load() == StateEntry::State::PERSISTING) {
+                pending_entries.push_back(entry);
+            }
+        }
+    }
+    
+    // Wait for each pending entry
+    for (auto& entry : pending_entries) {
+        std::unique_lock<std::mutex> entry_lock(entry->mutex);
+        entry->cv.wait(entry_lock, [&entry]() {
+            return entry->state.load() == StateEntry::State::PERSISTED;
+        });
+    }
+}
+
 /* ==============================================================================
  * Background I/O Worker (Persistence)
  * ============================================================================== */
@@ -1269,27 +1304,27 @@ size_t StateStore::get_prefetch_queue_size() const {
 void StateStore::print_stats() const {
     Stats stats = get_stats();
     
-    printf("\n=== StateStore Cache Statistics ===\n");
-    printf("Load requests:     %lu\n", stats.load_requests);
-    printf("  L1 hits:         %lu (%.1f%%)\n", stats.l1_hits, 
+    detsim::ui::ui_printf("\n=== StateStore Cache Statistics ===\n");
+    detsim::ui::ui_printf("Load requests:     %lu\n", stats.load_requests);
+    detsim::ui::ui_printf("  L1 hits:         %lu (%.1f%%)\n", stats.l1_hits, 
            stats.load_requests > 0 ? 100.0 * stats.l1_hits / stats.load_requests : 0.0);
-    printf("  L2 hits:         %lu (%.1f%%)\n", stats.l2_hits,
+    detsim::ui::ui_printf("  L2 hits:         %lu (%.1f%%)\n", stats.l2_hits,
            stats.load_requests > 0 ? 100.0 * stats.l2_hits / stats.load_requests : 0.0);
-    printf("  Disk reads:      %lu (%.1f%%)\n", stats.disk_reads,
+    detsim::ui::ui_printf("  Disk reads:      %lu (%.1f%%)\n", stats.disk_reads,
            stats.load_requests > 0 ? 100.0 * stats.disk_reads / stats.load_requests : 0.0);
-    printf("  Hit rate:        %.1f%%\n", stats.hit_rate());
+    detsim::ui::ui_printf("  Hit rate:        %.1f%%\n", stats.hit_rate());
     
     size_t l1_usage = hot_memory_usage_.load();
     size_t l2_usage = warm_memory_usage_.load();
-    printf("\nCache Usage:\n");
-    printf("  L1 (Hot):        %zu MB / %zu MB (%.1f%%)\n",
+    detsim::ui::ui_printf("\nCache Usage:\n");
+    detsim::ui::ui_printf("  L1 (Hot):        %zu MB / %zu MB (%.1f%%)\n",
            l1_usage / (1024*1024), config_.hot_cache_size / (1024*1024),
            100.0 * l1_usage / config_.hot_cache_size);
-    printf("  L2 (Warm):       %zu MB / %zu MB (%.1f%%)\n",
+    detsim::ui::ui_printf("  L2 (Warm):       %zu MB / %zu MB (%.1f%%)\n",
            l2_usage / (1024*1024), config_.warm_cache_size / (1024*1024),
            100.0 * l2_usage / config_.warm_cache_size);
-    printf("  Prefetch issued: %lu\n", stats.prefetch_issued);
-    printf("====================================\n");
+    detsim::ui::ui_printf("  Prefetch issued: %lu\n", stats.prefetch_issued);
+    detsim::ui::ui_printf("====================================\n");
 }
 
 /* ==============================================================================

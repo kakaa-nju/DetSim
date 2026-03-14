@@ -852,25 +852,25 @@ void dwarf_dump_type(const char *type_name)
   type_info info = dwarf_get_type_info(type_name);
   
   if (info.name.empty()) {
-    printf("Type '%s' not found\n", type_name);
+    detsim::ui::ui_printf("Type '%s' not found\n", type_name);
     return;
   }
   
-  printf("Type: %s\n", info.name.c_str());
-  printf("  Size: %zu bytes\n", info.size);
-  printf("  Is pointer: %s\n", info.is_pointer ? "yes" : "no");
-  printf("  Is struct: %s\n", info.is_struct ? "yes" : "no");
-  printf("  Is array: %s\n", info.is_array ? "yes" : "no");
+  detsim::ui::ui_printf("Type: %s\n", info.name.c_str());
+  detsim::ui::ui_printf("  Size: %zu bytes\n", info.size);
+  detsim::ui::ui_printf("  Is pointer: %s\n", info.is_pointer ? "yes" : "no");
+  detsim::ui::ui_printf("  Is struct: %s\n", info.is_struct ? "yes" : "no");
+  detsim::ui::ui_printf("  Is array: %s\n", info.is_array ? "yes" : "no");
   
   if (info.is_array) {
-    printf("  Array elements: %zu\n", info.array_elements);
-    printf("  Element type: %s\n", info.element_type.c_str());
+    detsim::ui::ui_printf("  Array elements: %zu\n", info.array_elements);
+    detsim::ui::ui_printf("  Element type: %s\n", info.element_type.c_str());
   }
   
   if (!info.members.empty()) {
-    printf("  Members:\n");
+    detsim::ui::ui_printf("  Members:\n");
     for (const auto &m : info.members) {
-      printf("    %s: %s (offset=%zu, size=%zu)\n", 
+      detsim::ui::ui_printf("    %s: %s (offset=%zu, size=%zu)\n", 
              m.name.c_str(), m.type_name.c_str(), m.offset, m.size);
     }
   }
@@ -1470,13 +1470,13 @@ static void print_param_value(int pid, const param_info &param, unw_cursor_t *cu
   
   /* Format based on type */
   if (param.type_name == "int" || param.type_name == "long") {
-    printf("%ld", value);
+    detsim::ui::ui_printf("%ld", value);
   } else if (param.type_name.find('*') != std::string::npos) {
-    printf("0x%lx", (unsigned long)value);
+    detsim::ui::ui_printf("0x%lx", (unsigned long)value);
   } else if (param.type_name == "char") {
-    printf("'%c'", (char)value);
+    detsim::ui::ui_printf("'%c'", (char)value);
   } else {
-    printf("%ld", value);  /* Default to integer */
+    detsim::ui::ui_printf("%ld", value);  /* Default to integer */
   }
 }
 
@@ -1580,20 +1580,20 @@ void dwarf_print_stack_trace(int pid)
   current_stack_trace = dwarf_get_stack_trace(pid);
   
   if (current_stack_trace.empty()) {
-    printf("No stack trace available\n");
+    detsim::ui::ui_printf("No stack trace available\n");
     return;
   }
   
   unw_addr_space_t as = unw_create_addr_space(&_UPT_accessors, 0);
   void *ui = _UPT_create(pid);
   if (!ui) {
-    printf("Failed to create unwind context\n");
+    detsim::ui::ui_printf("Failed to create unwind context\n");
     return;
   }
   
   unw_cursor_t cursor;
   if (unw_init_remote(&cursor, as, ui) < 0) {
-    printf("Failed to initialize unwind cursor\n");
+    detsim::ui::ui_printf("Failed to initialize unwind cursor\n");
     _UPT_destroy(ui);
     return;
   }
@@ -1601,30 +1601,30 @@ void dwarf_print_stack_trace(int pid)
   for (size_t i = 0; i < current_stack_trace.size(); i++) {
     const auto &frame = current_stack_trace[i];
     
-    printf("#%-2zu 0x%016lx in ", i, frame.pc);
+    detsim::ui::ui_printf("#%-2zu 0x%016lx in ", i, frame.pc);
     
     if (!frame.function_name.empty() && frame.function_name != "??") {
-      printf("%s", frame.function_name.c_str());
+      detsim::ui::ui_printf("%s", frame.function_name.c_str());
       
       /* Print parameters if available */
       func_info finfo;
       if (find_function_by_pc(frame.pc, finfo) && !finfo.params.empty()) {
-        printf("(");
+        detsim::ui::ui_printf("(");
         for (size_t j = 0; j < finfo.params.size(); j++) {
-          if (j > 0) printf(", ");
+          if (j > 0) detsim::ui::ui_printf(", ");
           const auto &p = finfo.params[j];
-          printf("%s=", p.name.c_str());
+          detsim::ui::ui_printf("%s=", p.name.c_str());
           print_param_value(pid, p, &cursor);
         }
-        printf(")");
+        detsim::ui::ui_printf(")");
       } else {
-        printf("()");
+        detsim::ui::ui_printf("()");
       }
     } else {
-      printf("?? ()");
+      detsim::ui::ui_printf("?? ()");
     }
     
-    printf("\n");
+    detsim::ui::ui_printf("\n");
     
     /* Step cursor for next frame */
     if (i < current_stack_trace.size() - 1) {
@@ -1637,7 +1637,7 @@ void dwarf_print_stack_trace(int pid)
   
   /* Show current frame */
   if (current_frame_id < (int)current_stack_trace.size()) {
-    printf("-- Current frame: #%d --\n", current_frame_id);
+    detsim::ui::ui_printf("-- Current frame: #%d --\n", current_frame_id);
   }
 }
 
@@ -1686,23 +1686,23 @@ extern void expr_print(const char *e);
 void dwarf_print_local_vars(int pid)
 {
   if (current_frame_id < 0 || current_frame_id >= (int)current_stack_trace.size()) {
-    printf("No frame selected\n");
+    detsim::ui::ui_printf("No frame selected\n");
     return;
   }
   
   const auto &frame = current_stack_trace[current_frame_id];
   
   if (frame.local_vars.empty()) {
-    printf("No local variables/parameters in frame #%d (%s)\n", 
+    detsim::ui::ui_printf("No local variables/parameters in frame #%d (%s)\n", 
            current_frame_id, frame.function_name.c_str());
     return;
   }
   
-  printf("Local variables/parameters in frame #%d (%s):\n", 
+  detsim::ui::ui_printf("Local variables/parameters in frame #%d (%s):\n", 
          current_frame_id, frame.function_name.c_str());
   
   for (const auto &v : frame.local_vars) {
-    printf("  %s = ", v.name.c_str());
+    detsim::ui::ui_printf("  %s = ", v.name.c_str());
     /* Use p command logic to print with proper type handling */
     expr_print(v.name.c_str());
   }

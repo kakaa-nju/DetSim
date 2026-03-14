@@ -451,12 +451,12 @@ template void SockState::serialize<cereal::BinaryOutputArchive>(cereal::BinaryOu
  * ============================================================================== */
 
 void SockState::dump_state() const {
-    printf("[SockState] %zu sockets, %zu UDP buffers\n", 
+    detsim::ui::ui_printf("[SockState] %zu sockets, %zu UDP buffers\n", 
            sockets_.size(), udp_recv_buffers_.size());
     
     for (const auto &kv : sockets_) {
         const Socket &sock = kv.second;
-        printf("  fd=%d: domain=%d, type=%s, bound=%s, %s\n",
+        detsim::ui::ui_printf("  fd=%d: domain=%d, type=%s, bound=%s, %s\n",
                sock.fd,
                sock.domain,
                sock.type == SOCK_STREAM ? "TCP" : "UDP",
@@ -465,7 +465,7 @@ void SockState::dump_state() const {
         
         auto buf_it = udp_recv_buffers_.find(sock.fd);
         if (buf_it != udp_recv_buffers_.end() && !buf_it->second.empty()) {
-            printf("    UDP buffer: %zu datagrams\n", buf_it->second.size());
+            detsim::ui::ui_printf("    UDP buffer: %zu datagrams\n", buf_it->second.size());
         }
     }
 }

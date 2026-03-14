@@ -61,7 +61,7 @@ void tracee_state::show_syscall(syscall_info *info)
 {
   char buf[1024];
   syscall_fmt::format(buf, this, info);
-  printf("%s\n", buf);
+  detsim::ui::ui_printf("%s\n", buf);
 }
 
 /* Format syscall for history display */
@@ -103,10 +103,10 @@ void show_syscall_history()
 
   while (!print_stack.empty())
   {
-    printf("%s", print_stack.top().c_str());
+    detsim::ui::ui_printf("%s", print_stack.top().c_str());
     print_stack.pop();
   }
-  printf("%d steps in total.\n", cnt);
+  detsim::ui::ui_printf("%d steps in total.\n", cnt);
 }
 
 /* ======================================================================
@@ -221,6 +221,11 @@ void tracee_state::serialize_to_disk()
 /* Load tracee_state from integrated StateStore data */
 tracee_state::tracee_state(hash_type hash)
 {
+  // Handle invalid hash (0 means uninitialized/invalid)
+  if (hash == 0) {
+    return;
+  }
+  
   // Load integrated data from StateStore
   std::vector<uint8_t> data;
   ssize_t data_size = StateStore::instance().load(hash, data);
@@ -276,6 +281,11 @@ sys_state::sys_state(hash_type hash)
 {
   ss_hash = hash;
   
+  // Initialize ts_hash to 0 to avoid garbage values if loading fails
+  for (int i = 0; i < NP; i++) {
+    ts_hash[i] = 0;
+  }
+  
   // Try SysStateStore first (new format)
   SysStateStore& store = SysStateStore::instance();
   std::vector<uint8_t> data;
@@ -307,9 +317,9 @@ sys_state::sys_state(hash_type hash)
     }
   }
   
-  // Load child states from integrated data
+  // Load child states from integrated data (only for valid hashes)
   for (int i = 0; i < NP; i++) {
-    if (!exited[i]) {
+    if (!exited[i] && ts_hash[i] != 0) {
       child[i] = tracee_state(ts_hash[i]);
     }
   }
@@ -1067,8 +1077,8 @@ bool mapping_exists(maps_item &a, std::vector<maps_item> &array)
 
 void show_state_stats()
 {
-  printf("State set size: %zu\n", state_set.size());
-  printf("Queue size:     %zu\n", StateStore::instance().queue_size());
+  detsim::ui::ui_printf("State set size: %zu\n", state_set.size());
+  detsim::ui::ui_printf("Queue size:     %zu\n", StateStore::instance().queue_size());
 }
 
 /* ======================================================================
@@ -1098,22 +1108,22 @@ void sys_state::recover_running_state()
 
 void cleanup_all()
 {
-  printf("[DEBUG] Starting global cleanup...\n");
+  detsim::ui::ui_printf("[DEBUG] Starting global cleanup...\n");
   
   /* 0. Cleanup DWARF resources */
-  printf("[DEBUG] Cleaning up DWARF...\n");
+  detsim::ui::ui_printf("[DEBUG] Cleaning up DWARF...\n");
   cleanup_dwarf();
   
   /* 1. Shutdown StateStore - stops threads and clears caches */
-  printf("[DEBUG] Shutting down StateStore...\n");
+  detsim::ui::ui_printf("[DEBUG] Shutting down StateStore...\n");
   StateStore::instance().shutdown();
   
   /* 2. Shutdown SysStateStore */
-  printf("[DEBUG] Shutting down SysStateStore...\n");
+  detsim::ui::ui_printf("[DEBUG] Shutting down SysStateStore...\n");
   SysStateStore::instance().shutdown();
   
   /* 3. Clear ptmc_state to free all memory */
-  printf("[DEBUG] Clearing ptmc_state...\n");
+  detsim::ui::ui_printf("[DEBUG] Clearing ptmc_state...\n");
   ptmc_state.source_state.clear();
   ptmc_state.dest_state.clear();
   for (int i = 0; i < NP; i++) {
@@ -1124,14 +1134,14 @@ void cleanup_all()
   }
   
   /* 4. Clear global containers */
-  printf("[DEBUG] Clearing global containers...\n");
+  detsim::ui::ui_printf("[DEBUG] Clearing global containers...\n");
   state_tree.clear();
   state_queue.clear();
   state_set.clear();
   
   /* 5. Free rseq structures */
   /*
-  printf("[DEBUG] Freeing rseq structures...\n");
+  detsim::ui::ui_printf("[DEBUG] Freeing rseq structures...\n");
   for (auto& pair : rseq_struct) {
     free(pair.second);
   }
@@ -1140,12 +1150,12 @@ void cleanup_all()
   */
   
   /* 6. Cleanup readline resources */
-  printf("[DEBUG] Cleaning up readline...\n");
+  detsim::ui::ui_printf("[DEBUG] Cleaning up readline...\n");
   cleanup_readline();
   
   /* 7. Cleanup config allocated memory */
-  printf("[DEBUG] Cleaning up config...\n");
+  detsim::ui::ui_printf("[DEBUG] Cleaning up config...\n");
   cleanup_config();
   
-  printf("[DEBUG] Global cleanup completed\n");
+  detsim::ui::ui_printf("[DEBUG] Global cleanup completed\n");
 }

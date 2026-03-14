@@ -6,6 +6,11 @@
  */
 
 #include "monitor.h"
+
+/* NCursesUI integration */
+#include "ui/ncurses_ui.h"
+#include "ui/log_wrapper.h"
+
 #include "config.h"
 #include "fsstate.h"
 #include "debug.h"
@@ -100,9 +105,9 @@ static struct
 
 static inline void welcome()
 {
-  printf("Build time: %s, %s\n", __TIME__, __DATE__);
-  printf("Welcome to \33[1;41m\33[1;33m\33[0m-ptraceMC!\n");
-  printf("For help, type \"help\"\n");
+  detsim::ui::ui_printf("Build time: %s, %s\n", __TIME__, __DATE__);
+  detsim::ui::ui_printf("Welcome to ptraceMC!\n");
+  detsim::ui::ui_printf("For help, type \"help\"\n");
 }
 
 int sigint_received = 0;
@@ -178,6 +183,8 @@ static int cmd_c(char *args)
 static int cmd_q(char *args)
 {
   ptmc_state.state = PTMC_QUIT;
+  // 通知 UI 退出
+  detsim::ui::request_ui_exit();
   return -1;
 }
 
@@ -191,7 +198,7 @@ static int cmd_help(char *args)
     /* no argument given */
     for (i = 0; i < NR_CMD; i++)
     {
-      printf("%s - %s\n", cmd_table[i].name, cmd_table[i].description);
+      detsim::ui::ui_printf("%s - %s\n", cmd_table[i].name, cmd_table[i].description);
     }
   }
   else
@@ -200,11 +207,9 @@ static int cmd_help(char *args)
     {
       if (strcmp(arg, cmd_table[i].name) == 0)
       {
-        printf("%s - %s\n", cmd_table[i].name, cmd_table[i].description);
-        return 0;
-      }
+        detsim::ui::ui_printf("%s - %s\n", cmd_table[i].name, cmd_table[i].description); return 0; }
     }
-    printf("Unknown command '%s'\n", arg);
+    detsim::ui::ui_printf("Unknown command '%s'\n", arg);
   }
   return 0;
 }
@@ -215,7 +220,7 @@ static int cmd_si(char *args)
   int cursor = ptmc_state.cursor;
   if (cursor < 0 || cursor >= NP)
   {
-    printf("cursor = %d, out of range [0, %d). Please set again.\n", cursor,
+    detsim::ui::ui_printf("cursor = %d, out of range [0, %d). Please set again.\n", cursor,
            NP);
     return 0;
   }
@@ -246,17 +251,17 @@ static int cmd_sw(char *args)
 {
   if (args == NULL)
   {
-    printf("Please provide a process number\n");
+    detsim::ui::ui_printf("Please provide a process number\n");
     return 0;
   }
   int proc = atoi(args);
   if (proc < 0 || proc >= NP)
   {
-    printf("Invalid process number %d (must be 0-%d)\n", proc, NP - 1);
+    detsim::ui::ui_printf("Invalid process number %d (must be 0-%d)\n", proc, NP - 1);
     return 0;
   }
   ptmc_state.cursor = proc;
-  printf("Switched to process %d (pid=%d)\n", proc, ptmc_state.pids[proc]);
+  detsim::ui::ui_printf("Switched to process %d (pid=%d)\n", proc, ptmc_state.pids[proc]);
   return 0;
 }
 
@@ -267,7 +272,7 @@ static int cmd_load(char *args)
   char *arg = strtok(args, " ");
   if (arg == NULL)
   {
-    printf("No Arguments!\n");
+    detsim::ui::ui_printf("No Arguments!\n");
     return 1;
   }
   
@@ -280,14 +285,14 @@ static int cmd_load(char *args)
     ptmc_state.sysstate_hash = s[0];
     ptmc_state.state = PTMC_PRELOAD;
     load(s[0]);
-    printf("Loaded state %016lx\n", s[0]);
+    detsim::ui::ui_printf("Loaded state %016lx\n", s[0]);
   }
   else if (s.size() == 0)
-    printf("sys_state hash starts with %s has 0 candidates. Please specify "
+    detsim::ui::ui_printf("sys_state hash starts with %s has 0 candidates. Please specify "
            "another\n",
            arg);
   else
-    printf("sys_state hash starts with %s has %zu candidates. Please "
+    detsim::ui::ui_printf("sys_state hash starts with %s has %zu candidates. Please "
            "specify one\n",
            arg, s.size());
   return 0;
@@ -304,7 +309,7 @@ static std::string format_addr_short(const struct sockaddr_in &addr)
 /* Helper: Display UDP buffer state */
 static void show_udp_buffers()
 {
-  printf("\n[UDP Buffers]\n");
+  detsim::ui::ui_printf("\n[UDP Buffers]\n");
   
   for (int i = 0; i < NP; i++)
   {
@@ -312,26 +317,26 @@ static void show_udp_buffers()
     
     if (udp_map.empty())
     {
-      printf("  Process %d: (empty)\n", i);
+      detsim::ui::ui_printf("  Process %d: (empty)\n", i);
       continue;
     }
     
-    printf("  Process %d:\n", i);
+    detsim::ui::ui_printf("  Process %d:\n", i);
     
     for (const auto &kv : udp_map)
     {
       int fd = kv.first;
       const auto &buf = kv.second;
       
-      printf("    fd=%d: ", fd);
+      detsim::ui::ui_printf("    fd=%d: ", fd);
       
       if (buf.empty())
       {
-        printf("(empty queue)\n");
+        detsim::ui::ui_printf("(empty queue)\n");
         continue;
       }
       
-      printf("[%zu datagrams]\n", buf.size());
+      detsim::ui::ui_printf("[%zu datagrams]\n", buf.size());
       
       /* Show each datagram (limit to first 5) */
       size_t count = 0;
@@ -339,7 +344,7 @@ static void show_udp_buffers()
       {
         if (count >= 5)
         {
-          printf("      ... (%zu more)\n", buf.size() - count);
+          detsim::ui::ui_printf("      ... (%zu more)\n", buf.size() - count);
           break;
         }
         
@@ -364,7 +369,7 @@ static void show_udp_buffers()
           }
         }
         
-        printf("      [%zu] from=%s, len=%zu, content=\"%s\"\n",
+        detsim::ui::ui_printf("      [%zu] from=%s, len=%zu, content=\"%s\"\n",
                count, from_str.c_str(), content_len, content_preview.c_str());
         
         count++;
@@ -375,7 +380,7 @@ static void show_udp_buffers()
 
 static int cmd_info(char *args)
 {
-  printf("Current process: %d (pid=%d)\n", ptmc_state.cursor,
+  detsim::ui::ui_printf("Current process: %d (pid=%d)\n", ptmc_state.cursor,
          ptmc_state.pids[ptmc_state.cursor]);
   show_syscall_history();
   show_udp_buffers();
@@ -388,14 +393,14 @@ static int cmd_batch(char *args)
   static int in_call = 0;
   if (in_call)
   {
-    printf("cmd_batch is not designed for nested invoke\n");
+    detsim::ui::ui_printf("cmd_batch is not designed for nested invoke\n");
     return 1;
   }
   in_call = 1;
 
   if (args == NULL)
   {
-    printf("No arguments!\n");
+    detsim::ui::ui_printf("No arguments!\n");
     in_call = 0;
     return 1;
   }
@@ -403,7 +408,7 @@ static int cmd_batch(char *args)
   FILE *fp = fopen(args, "r");
   if (!fp)
   {
-    printf("Cannot open file: %s\n", args);
+    detsim::ui::ui_printf("Cannot open file: %s\n", args);
     in_call = 0;
     return 1;
   }
@@ -411,13 +416,13 @@ static int cmd_batch(char *args)
 
   int saved_fd = dup(fileno(stdin));
   if (saved_fd < 0) {
-    printf("Failed to dup stdin\n");
+    detsim::ui::ui_printf("Failed to dup stdin\n");
     in_call = 0;
     return 1;
   }
   
   if (!freopen(args, "r", stdin)) {
-    printf("Failed to reopen stdin with file: %s\n", args);
+    detsim::ui::ui_printf("Failed to reopen stdin with file: %s\n", args);
     close(saved_fd);
     in_call = 0;
     return 1;
@@ -436,7 +441,7 @@ static int cmd_p(char *args)
 {
   if (!args || (args[0] == 0))
   {
-    printf("Give an expression\n");
+    detsim::ui::ui_printf("Give an expression\n");
     return 1;
   }
   expr_print(args);
@@ -447,20 +452,20 @@ static int cmd_x(char *args)
 {
   if (!args)
   {
-    printf("Usage: x <addr>\n");
+    detsim::ui::ui_printf("Usage: x <addr>\n");
     return 0;
   }
   long addr = strtol(args, NULL, 0);
-  printf("Memory at 0x%lx:\n", addr);
+  detsim::ui::ui_printf("Memory at 0x%lx:\n", addr);
   for (int i = 0; i < 4; i++)
   {
-    printf("  0x%016lx: ", addr + i * 8);
+    detsim::ui::ui_printf("  0x%016lx: ", addr + i * 8);
     for (int j = 0; j < 8; j++)
     {
-      printf("%02x ", tracee_read_byte(ptmc_state.pids[ptmc_state.cursor],
+      detsim::ui::ui_printf("%02x ", tracee_read_byte(ptmc_state.pids[ptmc_state.cursor],
                                         (void *)(addr + i * 8 + j)));
     }
-    printf("\n");
+    detsim::ui::ui_printf("\n");
   }
   return 0;
 }
@@ -477,15 +482,15 @@ static int cmd_frame(char *args)
   if (!args || args[0] == '\0') {
     /* Show current frame */
     int frame = dwarf_get_current_frame();
-    printf("Current frame: #%d\n", frame);
+    detsim::ui::ui_printf("Current frame: #%d\n", frame);
     return 0;
   }
   
   int frame_id = atoi(args);
   if (dwarf_set_frame(frame_id)) {
-    printf("Switched to frame #%d\n", frame_id);
+    detsim::ui::ui_printf("Switched to frame #%d\n", frame_id);
   } else {
-    printf("Invalid frame ID: %d\n", frame_id);
+    detsim::ui::ui_printf("Invalid frame ID: %d\n", frame_id);
   }
   return 0;
 }
@@ -501,10 +506,10 @@ static int cmd_ls(char *args)
 {
   int cursor = ptmc_state.cursor;
   auto &fs = ptmc_state.dest_state.child[cursor].fs_state.filesystem;
-  printf("Files in process %d filesystem:\n", cursor);
+  detsim::ui::ui_printf("Files in process %d filesystem:\n", cursor);
   for (const auto &pair : fs)
   {
-    printf("  %s\n", pair.first.c_str());
+    detsim::ui::ui_printf("  %s\n", pair.first.c_str());
   }
   return 0;
 }
@@ -513,7 +518,7 @@ static int cmd_stat(char *args)
 {
   if (!args)
   {
-    printf("Usage: stat <pattern>\n");
+    detsim::ui::ui_printf("Usage: stat <pattern>\n");
     return 0;
   }
   int cursor = ptmc_state.cursor;
@@ -526,38 +531,38 @@ static int cmd_stat(char *args)
       found = true;
       const auto &node = pair.second;
 
-      printf("File: %s\n", pair.first.c_str());
-      printf("  Size: %-10ld\n", node.metadata.st_size);
-      printf("  Access: (%04o)\n", (node.metadata.st_mode & 0777));
+      detsim::ui::ui_printf("File: %s\n", pair.first.c_str());
+      detsim::ui::ui_printf("  Size: %-10ld\n", node.metadata.st_size);
+      detsim::ui::ui_printf("  Access: (%04o)\n", (node.metadata.st_mode & 0777));
 
 #ifdef FSSTATE_DETAILED_METADATA
       const struct stat &st = node.metadata;
-      printf("  Blocks: %-10ld IO Block: %-10ld\n", st.st_blocks, st.st_blksize);
-      printf("  Device: %-8ld Inode: %-11ld Links: %-10ld\n", st.st_dev,
+      detsim::ui::ui_printf("  Blocks: %-10ld IO Block: %-10ld\n", st.st_blocks, st.st_blksize);
+      detsim::ui::ui_printf("  Device: %-8ld Inode: %-11ld Links: %-10ld\n", st.st_dev,
              st.st_ino, st.st_nlink);
-      printf("  Uid: %-10d Gid: %-10d\n", st.st_uid, st.st_gid);
+      detsim::ui::ui_printf("  Uid: %-10d Gid: %-10d\n", st.st_uid, st.st_gid);
 
       char buffer[80];
       struct tm *tm_info;
 
       tm_info = localtime(&st.st_atime);
       strftime(buffer, 80, "%Y-%m-%d %H:%M:%S", tm_info);
-      printf("  Access: %s\n", buffer);
+      detsim::ui::ui_printf("  Access: %s\n", buffer);
 
       tm_info = localtime(&st.st_mtime);
       strftime(buffer, 80, "%Y-%m-%d %H:%M:%S", tm_info);
-      printf("  Modify: %s\n", buffer);
+      detsim::ui::ui_printf("  Modify: %s\n", buffer);
 
       tm_info = localtime(&st.st_ctime);
       strftime(buffer, 80, "%Y-%m-%d %H:%M:%S", tm_info);
-      printf("  Change: %s\n", buffer);
+      detsim::ui::ui_printf("  Change: %s\n", buffer);
 #endif
-      printf("----------------------------------------\n");
+      detsim::ui::ui_printf("----------------------------------------\n");
     }
   }
   if (!found)
   {
-    printf("No files found matching pattern: %s\n", args);
+    detsim::ui::ui_printf("No files found matching pattern: %s\n", args);
   }
   return 0;
 }
@@ -566,7 +571,7 @@ static int cmd_hexdump(char *args)
 {
   if (!args)
   {
-    printf("Usage: hexdump <filepath>\n");
+    detsim::ui::ui_printf("Usage: hexdump <filepath>\n");
     return 0;
   }
   int cursor = ptmc_state.cursor;
@@ -575,7 +580,7 @@ static int cmd_hexdump(char *args)
   auto it = fs.find(args);
   if (it == fs.end())
   {
-    printf("File not found: %s\n", args);
+    detsim::ui::ui_printf("File not found: %s\n", args);
     return 0;
   }
 
@@ -588,23 +593,23 @@ static int cmd_hexdump(char *args)
   {
     for (size_t line = 0; line < lines_per_page && offset < len; ++line)
     {
-      printf("%08lx  ", offset);
+      detsim::ui::ui_printf("%08lx  ", offset);
 
       // Hex bytes
       for (size_t j = 0; j < 16; ++j)
       {
-        if (j == 8) printf(" ");
+        if (j == 8) detsim::ui::ui_printf(" ");
         if (offset + j < len)
         {
-          printf("%02x ", (unsigned char)content[offset + j]);
+          detsim::ui::ui_printf("%02x ", (unsigned char)content[offset + j]);
         }
         else
         {
-          printf("   ");
+          detsim::ui::ui_printf("   ");
         }
       }
 
-      printf(" |");
+      detsim::ui::ui_printf(" |");
       // ASCII
       for (size_t j = 0; j < 16; ++j)
       {
@@ -612,18 +617,18 @@ static int cmd_hexdump(char *args)
         {
           char c = content[offset + j];
           if (c >= 32 && c <= 126)
-            printf("%c", c);
+            detsim::ui::ui_printf("%c", c);
           else
-            printf(".");
+            detsim::ui::ui_printf(".");
         }
       }
-      printf("|\n");
+      detsim::ui::ui_printf("|\n");
       offset += 16;
     }
 
     if (offset < len)
     {
-      printf("--More-- (c: continue, q: quit) ");
+      detsim::ui::ui_printf("--More-- (c: continue, q: quit) ");
       char buf[10];
       if (fgets(buf, sizeof(buf), stdin))
       {
@@ -677,15 +682,15 @@ static void diff_syscall_info(const syscall_info &a, const syscall_info &b, int 
   if (a.nr != b.nr || a.rval != b.rval ||
       memcmp(a.args, b.args, sizeof(a.args)) != 0)
   {
-    printf("  [Process %d - Syscall Info]\n", proc_id);
+    detsim::ui::ui_printf("  [Process %d - Syscall Info]\n", proc_id);
     if (a.nr != b.nr)
-      printf("    nr:   %d != %d\n", a.nr, b.nr);
+      detsim::ui::ui_printf("    nr:   %d != %d\n", a.nr, b.nr);
     if (a.rval != b.rval)
-      printf("    rval: %ld != %ld\n", (long)a.rval, (long)b.rval);
+      detsim::ui::ui_printf("    rval: %ld != %ld\n", (long)a.rval, (long)b.rval);
     for (int i = 0; i < 6; i++)
     {
       if (a.args[i] != b.args[i])
-        printf("    args[%d]: 0x%lx != 0x%lx\n", i, (long)a.args[i], (long)b.args[i]);
+        detsim::ui::ui_printf("    args[%d]: 0x%lx != 0x%lx\n", i, (long)a.args[i], (long)b.args[i]);
     }
     has_diff = true;
   }
@@ -701,7 +706,7 @@ static void diff_tracee_state(const tracee_state &a, const tracee_state &b, int 
   auto print_header = [&]() {
     if (!proc_header)
     {
-      printf("  [Process %d]\n", proc_id);
+      detsim::ui::ui_printf("  [Process %d]\n", proc_id);
       proc_header = true;
     }
   };
@@ -710,28 +715,28 @@ static void diff_tracee_state(const tracee_state &a, const tracee_state &b, int 
   if (a.ts_hash != b.ts_hash)
   {
     print_header();
-    printf("    ts_hash: %s != %s\n", format_hash(a.ts_hash).c_str(), format_hash(b.ts_hash).c_str());
+    detsim::ui::ui_printf("    ts_hash: %s != %s\n", format_hash(a.ts_hash).c_str(), format_hash(b.ts_hash).c_str());
     has_diff = true;
   }
   
   if (a.pid != b.pid)
   {
     print_header();
-    printf("    pid: %d != %d\n", a.pid, b.pid);
+    detsim::ui::ui_printf("    pid: %d != %d\n", a.pid, b.pid);
     has_diff = true;
   }
   
   if (a.brk != b.brk)
   {
     print_header();
-    printf("    brk: 0x%lx != 0x%lx\n", (long)a.brk, (long)b.brk);
+    detsim::ui::ui_printf("    brk: 0x%lx != 0x%lx\n", (long)a.brk, (long)b.brk);
     has_diff = true;
   }
   
   if (a.tv.tv_sec != b.tv.tv_sec || a.tv.tv_usec != b.tv.tv_usec)
   {
     print_header();
-    printf("    tv: %ld.%06ld != %ld.%06ld\n", 
+    detsim::ui::ui_printf("    tv: %ld.%06ld != %ld.%06ld\n", 
            (long)a.tv.tv_sec, (long)a.tv.tv_usec,
            (long)b.tv.tv_sec, (long)b.tv.tv_usec);
     has_diff = true;
@@ -748,15 +753,15 @@ static void diff_tracee_state(const tracee_state &a, const tracee_state &b, int 
       a.raft_state.last_log_term != b.raft_state.last_log_term)
   {
     print_header();
-    printf("    raft_state: different\n");
+    detsim::ui::ui_printf("    raft_state: different\n");
     if (a.raft_state.current_term != b.raft_state.current_term)
-      printf("      current_term: %ld != %ld\n", 
+      detsim::ui::ui_printf("      current_term: %ld != %ld\n", 
              a.raft_state.current_term, b.raft_state.current_term);
     if (a.raft_state.is_leader != b.raft_state.is_leader)
-      printf("      is_leader: %d != %d\n", 
+      detsim::ui::ui_printf("      is_leader: %d != %d\n", 
              a.raft_state.is_leader, b.raft_state.is_leader);
     if (a.raft_state.last_log_term != b.raft_state.last_log_term)
-      printf("      last_log_term: %ld != %ld\n", 
+      detsim::ui::ui_printf("      last_log_term: %ld != %ld\n", 
              a.raft_state.last_log_term, b.raft_state.last_log_term);
     has_diff = true;
   }
@@ -765,15 +770,15 @@ static void diff_tracee_state(const tracee_state &a, const tracee_state &b, int 
   if (!(a.fd_manager_state == b.fd_manager_state))
   {
     print_header();
-    printf("    fd_manager_state: different\n");
+    detsim::ui::ui_printf("    fd_manager_state: different\n");
     if (a.fd_manager_state.get_next_fd() != b.fd_manager_state.get_next_fd())
-      printf("      next_fd: %d != %d\n", 
+      detsim::ui::ui_printf("      next_fd: %d != %d\n", 
              a.fd_manager_state.get_next_fd(), b.fd_manager_state.get_next_fd());
     // Count allocated fds for comparison
     auto fds_a = a.fd_manager_state.get_allocated_fds();
     auto fds_b = b.fd_manager_state.get_allocated_fds();
     if (fds_a.size() != fds_b.size())
-      printf("      allocated_fds count: %zu != %zu\n", fds_a.size(), fds_b.size());
+      detsim::ui::ui_printf("      allocated_fds count: %zu != %zu\n", fds_a.size(), fds_b.size());
     has_diff = true;
   }
 }
@@ -837,7 +842,7 @@ static void diff_registers(hash_type ts_a, hash_type ts_b, int proc_id, bool &ha
   
   if (!read_regs_from_dump(ts_a, &regs_a) || !read_regs_from_dump(ts_b, &regs_b))
   {
-    printf("  [Process %d - Registers] Failed to read registers\n", proc_id);
+    detsim::ui::ui_printf("  [Process %d - Registers] Failed to read registers\n", proc_id);
     return;
   }
   
@@ -882,13 +887,13 @@ static void diff_registers(hash_type ts_a, hash_type ts_b, int proc_id, bool &ha
     {
       if (first_diff)
       {
-        printf("  [Process %d - Registers]\n", proc_id);
-        printf("    %-12s %-20s %-20s\n", "Register", "State A", "State B");
-        printf("    %-12s %-20s %-20s\n", "--------", "-------", "-------");
+        detsim::ui::ui_printf("  [Process %d - Registers]\n", proc_id);
+        detsim::ui::ui_printf("    %-12s %-20s %-20s\n", "Register", "State A", "State B");
+        detsim::ui::ui_printf("    %-12s %-20s %-20s\n", "--------", "-------", "-------");
         first_diff = false;
         has_diff = true;
       }
-      printf("    %-12s 0x%016lx   0x%016lx\n", regs[i].name, regs[i].a, regs[i].b);
+      detsim::ui::ui_printf("    %-12s 0x%016lx   0x%016lx\n", regs[i].name, regs[i].a, regs[i].b);
     }
   }
 }
@@ -1029,7 +1034,7 @@ static void diff_memory_content(hash_type ts_a, hash_type ts_b,
         
         if (!header_printed)
         {
-          printf("  [Process %d - Memory: %s 0x%lx-0x%lx]\n", 
+          detsim::ui::ui_printf("  [Process %d - Memory: %s 0x%lx-0x%lx]\n", 
                  proc_id, map_a.name[0] ? map_a.name : "[anonymous]", 
                  map_a.start, map_a.end);
           header_printed = true;
@@ -1041,9 +1046,9 @@ static void diff_memory_content(hash_type ts_a, hash_type ts_b,
         hexdump_line(buf_a.data() + i, line_len, addr, hex_a, ascii_a);
         hexdump_line(buf_b.data() + i, line_len, addr, hex_b, ascii_b);
         
-        printf("    0x%016lx:\n", addr);
-        printf("      A: %s |%s|\n", hex_a.str().c_str(), ascii_a.str().c_str());
-        printf("      B: %s |%s|\n", hex_b.str().c_str(), ascii_b.str().c_str());
+        detsim::ui::ui_printf("    0x%016lx:\n", addr);
+        detsim::ui::ui_printf("      A: %s |%s|\n", hex_a.str().c_str(), ascii_a.str().c_str());
+        detsim::ui::ui_printf("      B: %s |%s|\n", hex_b.str().c_str(), ascii_b.str().c_str());
         
         diff_count++;
       }
@@ -1054,12 +1059,12 @@ static void diff_memory_content(hash_type ts_a, hash_type ts_b,
   {
     if (diff_count >= max_diff)
     {
-      printf("    ... (showing first %d of %d differences, use --max-diff=N to show more)\n", 
+      detsim::ui::ui_printf("    ... (showing first %d of %d differences, use --max-diff=N to show more)\n", 
              max_diff, total_diff_in_region);
     }
     else if (total_diff_in_region > 0)
     {
-      printf("    (total %d differences in this region)\n", total_diff_in_region);
+      detsim::ui::ui_printf("    (total %d differences in this region)\n", total_diff_in_region);
     }
   }
 }
@@ -1172,7 +1177,7 @@ static void diff_memory(hash_type ts_a, hash_type ts_b, int proc_id,
   auto print_header = [&]() {
     if (!header_printed)
     {
-      printf("  [Process %d - Memory Mappings]\n", proc_id);
+      detsim::ui::ui_printf("  [Process %d - Memory Mappings]\n", proc_id);
       header_printed = true;
       has_diff = true;
     }
@@ -1184,7 +1189,7 @@ static void diff_memory(hash_type ts_a, hash_type ts_b, int proc_id,
     if (starts_b.find(start) == starts_b.end())
     {
       print_header();
-      printf("    [Removed] 0x%lx-0x%lx %s\n", 
+      detsim::ui::ui_printf("    [Removed] 0x%lx-0x%lx %s\n", 
              map_a_by_start[start].start, map_a_by_start[start].end,
              map_a_by_start[start].name);
     }
@@ -1196,7 +1201,7 @@ static void diff_memory(hash_type ts_a, hash_type ts_b, int proc_id,
     if (starts_a.find(start) == starts_a.end())
     {
       print_header();
-      printf("    [Added] 0x%lx-0x%lx %s\n", 
+      detsim::ui::ui_printf("    [Added] 0x%lx-0x%lx %s\n", 
              map_b_by_start[start].start, map_b_by_start[start].end,
              map_b_by_start[start].name);
     }
@@ -1233,7 +1238,7 @@ static void diff_fs_state(const FileSystemState &a, const FileSystemState &b,
   auto print_header = [&]() {
     if (!header_printed)
     {
-      printf("  [Process %d - FileSystemState]\n", proc_id);
+      detsim::ui::ui_printf("  [Process %d - FileSystemState]\n", proc_id);
       header_printed = true;
     }
   };
@@ -1245,7 +1250,7 @@ static void diff_fs_state(const FileSystemState &a, const FileSystemState &b,
     if (it == b.filesystem.end())
     {
       print_header();
-      printf("    [Removed] %s\n", pair.first.c_str());
+      detsim::ui::ui_printf("    [Removed] %s\n", pair.first.c_str());
       has_diff = true;
     }
     else
@@ -1259,13 +1264,13 @@ static void diff_fs_state(const FileSystemState &a, const FileSystemState &b,
           node_a.content != node_b.content)
       {
         print_header();
-        printf("    [Modified] %s\n", pair.first.c_str());
+        detsim::ui::ui_printf("    [Modified] %s\n", pair.first.c_str());
         if (node_a.metadata.st_size != node_b.metadata.st_size)
-          printf("      size: %ld != %ld\n", (long)node_a.metadata.st_size, (long)node_b.metadata.st_size);
+          detsim::ui::ui_printf("      size: %ld != %ld\n", (long)node_a.metadata.st_size, (long)node_b.metadata.st_size);
         if (node_a.metadata.st_mode != node_b.metadata.st_mode)
-          printf("      mode: 0%o != 0%o\n", (unsigned)node_a.metadata.st_mode, (unsigned)node_b.metadata.st_mode);
+          detsim::ui::ui_printf("      mode: 0%o != 0%o\n", (unsigned)node_a.metadata.st_mode, (unsigned)node_b.metadata.st_mode);
         if (node_a.content.size() != node_b.content.size())
-          printf("      content size: %zu != %zu\n", node_a.content.size(), node_b.content.size());
+          detsim::ui::ui_printf("      content size: %zu != %zu\n", node_a.content.size(), node_b.content.size());
         has_diff = true;
       }
     }
@@ -1277,7 +1282,7 @@ static void diff_fs_state(const FileSystemState &a, const FileSystemState &b,
     if (a.filesystem.find(pair.first) == a.filesystem.end())
     {
       print_header();
-      printf("    [Added] %s\n", pair.first.c_str());
+      detsim::ui::ui_printf("    [Added] %s\n", pair.first.c_str());
       has_diff = true;
     }
   }
@@ -1290,8 +1295,8 @@ static void diff_sock_list(const std::unordered_map<int, Socket> &a,
 {
   if (a.size() != b.size())
   {
-    printf("  [Process %d - Socket State]\n", proc_id);
-    printf("    socket count: %zu != %zu\n", a.size(), b.size());
+    detsim::ui::ui_printf("  [Process %d - Socket State]\n", proc_id);
+    detsim::ui::ui_printf("    socket count: %zu != %zu\n", a.size(), b.size());
     has_diff = true;
   }
 }
@@ -1308,8 +1313,8 @@ static void diff_udp_buffers(const std::unordered_map<int, std::deque<UdpDatagra
   
   if (keys_a != keys_b)
   {
-    printf("  [Process %d - UDP Buffers]\n", proc_id);
-    printf("    fd sets differ\n");
+    detsim::ui::ui_printf("  [Process %d - UDP Buffers]\n", proc_id);
+    detsim::ui::ui_printf("    fd sets differ\n");
     has_diff = true;
     return;
   }
@@ -1323,8 +1328,8 @@ static void diff_udp_buffers(const std::unordered_map<int, std::deque<UdpDatagra
     
     if (buf_a.size() != buf_b.size())
     {
-      printf("  [Process %d - UDP Buffer fd=%d]\n", proc_id, fd);
-      printf("    queue size: %zu != %zu\n", buf_a.size(), buf_b.size());
+      detsim::ui::ui_printf("  [Process %d - UDP Buffer fd=%d]\n", proc_id, fd);
+      detsim::ui::ui_printf("    queue size: %zu != %zu\n", buf_a.size(), buf_b.size());
       has_diff = true;
       continue;
     }
@@ -1343,12 +1348,12 @@ static void diff_udp_buffers(const std::unordered_map<int, std::deque<UdpDatagra
       {
         if (!printed_header)
         {
-          printf("  [Process %d - UDP Buffer fd=%d]\n", proc_id, fd);
+          detsim::ui::ui_printf("  [Process %d - UDP Buffer fd=%d]\n", proc_id, fd);
           printed_header = true;
           has_diff = true;
         }
-        printf("    datagram[%zu]: content or from addr differ\n", idx);
-        printf("      size: %zu vs %zu\n", it_a->content.size(), it_b->content.size());
+        detsim::ui::ui_printf("    datagram[%zu]: content or from addr differ\n", idx);
+        detsim::ui::ui_printf("      size: %zu vs %zu\n", it_a->content.size(), it_b->content.size());
       }
       ++it_a;
       ++it_b;
@@ -1369,8 +1374,8 @@ static void diff_tcp_connections(const std::unordered_map<int, TcpConnection> &a
   
   if (keys_a != keys_b)
   {
-    printf("  [Process %d - TCP Connections]\n", proc_id);
-    printf("    fd sets differ\n");
+    detsim::ui::ui_printf("  [Process %d - TCP Connections]\n", proc_id);
+    detsim::ui::ui_printf("    fd sets differ\n");
     has_diff = true;
     return;
   }
@@ -1385,8 +1390,8 @@ static void diff_tcp_connections(const std::unordered_map<int, TcpConnection> &a
     if (conn_a.send_buffer.size() != conn_b.send_buffer.size() ||
         conn_a.recv_buffer.size() != conn_b.recv_buffer.size())
     {
-      printf("  [Process %d - TCP Connection fd=%d]\n", proc_id, fd);
-      printf("    buffer sizes differ\n");
+      detsim::ui::ui_printf("  [Process %d - TCP Connection fd=%d]\n", proc_id, fd);
+      detsim::ui::ui_printf("    buffer sizes differ\n");
       has_diff = true;
     }
   }
@@ -1399,11 +1404,11 @@ static int cmd_diff(char *args)
   {
   if (!args || !*args)
   {
-    printf("Usage: diff [options] <hash_prefix1> <hash_prefix2>\n");
-    printf("Options:\n");
-    printf("  --brief, -b       Show only overview, skip detailed differences\n");
-    printf("  --memory-only, -m Compare only memory content\n");
-    printf("  --max-diff=N      Maximum differences to show per section (default: 10)\n");
+    detsim::ui::ui_printf("Usage: diff [options] <hash_prefix1> <hash_prefix2>\n");
+    detsim::ui::ui_printf("Options:\n");
+    detsim::ui::ui_printf("  --brief, -b       Show only overview, skip detailed differences\n");
+    detsim::ui::ui_printf("  --memory-only, -m Compare only memory content\n");
+    detsim::ui::ui_printf("  --max-diff=N      Maximum differences to show per section (default: 10)\n");
     return 0;
   }
   
@@ -1429,7 +1434,7 @@ static int cmd_diff(char *args)
   
   if (hash_args.size() < 2)
   {
-    printf("Error: Two hash prefixes required\n");
+    detsim::ui::ui_printf("Error: Two hash prefixes required\n");
     return 0;
   }
   
@@ -1439,29 +1444,29 @@ static int cmd_diff(char *args)
   
   if (matches_a.empty())
   {
-    printf("No state found with prefix '%s'\n", hash_args[0]);
+    detsim::ui::ui_printf("No state found with prefix '%s'\n", hash_args[0]);
     return 0;
   }
   if (matches_a.size() > 1)
   {
-    printf("Multiple states match prefix '%s':\n", hash_args[0]);
+    detsim::ui::ui_printf("Multiple states match prefix '%s':\n", hash_args[0]);
     for (auto h : matches_a)
-      printf("  %s\n", format_hash(h).c_str());
-    printf("Please specify the full hash\n");
+      detsim::ui::ui_printf("  %s\n", format_hash(h).c_str());
+    detsim::ui::ui_printf("Please specify the full hash\n");
     return 0;
   }
   
   if (matches_b.empty())
   {
-    printf("No state found with prefix '%s'\n", hash_args[1]);
+    detsim::ui::ui_printf("No state found with prefix '%s'\n", hash_args[1]);
     return 0;
   }
   if (matches_b.size() > 1)
   {
-    printf("Multiple states match prefix '%s':\n", hash_args[1]);
+    detsim::ui::ui_printf("Multiple states match prefix '%s':\n", hash_args[1]);
     for (auto h : matches_b)
-      printf("  %s\n", format_hash(h).c_str());
-    printf("Please specify the full hash\n");
+      detsim::ui::ui_printf("  %s\n", format_hash(h).c_str());
+    detsim::ui::ui_printf("Please specify the full hash\n");
     return 0;
   }
   
@@ -1482,16 +1487,16 @@ static int cmd_diff(char *args)
   }
   
   /* Print header */
-  printf("\n=== State Diff: %s vs %s ===\n\n", 
+  detsim::ui::ui_printf("\n=== State Diff: %s vs %s ===\n\n", 
          format_hash(hash_a).c_str(), format_hash(hash_b).c_str());
   
   /* Overview */
-  printf("[Overview]\n");
-  printf("  System state hash: %s != %s %s\n",
+  detsim::ui::ui_printf("[Overview]\n");
+  detsim::ui::ui_printf("  System state hash: %s != %s %s\n",
          format_hash(state_a.ss_hash).c_str(),
          format_hash(state_b.ss_hash).c_str(),
          state_a.ss_hash == state_b.ss_hash ? "✓" : "✗");
-  printf("  Process count: %d\n", NP);
+  detsim::ui::ui_printf("  Process count: %d\n", NP);
   
   bool any_diff = false;
   for (int i = 0; i < NP; i++)
@@ -1501,7 +1506,7 @@ static int cmd_diff(char *args)
     bool ts_same = state_a.ts_hash[i] == state_b.ts_hash[i];
     bool exited_same = state_a.exited[i] == state_b.exited[i];
     
-    printf("  Process %d: ts_hash %s/%s %s, exited=%s/%s %s\n",
+    detsim::ui::ui_printf("  Process %d: ts_hash %s/%s %s, exited=%s/%s %s\n",
            i,
            format_hash(state_a.ts_hash[i]).c_str(),
            format_hash(state_b.ts_hash[i]).c_str(),
@@ -1511,7 +1516,7 @@ static int cmd_diff(char *args)
     
     if (!ts_same || !exited_same) any_diff = true;
   }
-  printf("\n");
+  detsim::ui::ui_printf("\n");
   
   if (brief) return 0;
   
@@ -1555,32 +1560,93 @@ static int cmd_diff(char *args)
   
   if (!any_diff)
   {
-    printf("No differences found between the two states.\n");
+    detsim::ui::ui_printf("No differences found between the two states.\n");
   }
   
-  printf("\n");
+  detsim::ui::ui_printf("\n");
   }
   catch (const std::exception& e)
   {
-    printf("Error comparing states: %s\n", e.what());
+    detsim::ui::ui_printf("Error comparing states: %s\n", e.what());
   }
+  return 0;
+}
+
+/* External declaration for NCursesUI */
+extern "C" detsim::ui::NCursesUI* get_ncurses_ui();
+
+/* Helper to execute a command */
+static int execute_command(char *cmd_line) {
+  char lastbuf[256] = {0};
+  strncpy(lastbuf, cmd_line, sizeof(lastbuf) - 1);
+  lastbuf[sizeof(lastbuf) - 1] = '\0';
+  
+  char *str_end = cmd_line + strlen(cmd_line);
+  /* extract the first token as the command */
+  char *cmd = strtok(cmd_line, " ");
+  if (cmd == NULL) {
+    return 0;  // Empty command
+  }
+
+  /* treat the remaining string as the arguments */
+  char *args = cmd + strlen(cmd) + 1;
+  if (args >= str_end)
+    args = NULL;
+
+  int i;
+  for (i = 0; i < NR_CMD; i++) {
+    if (strcmp(cmd, cmd_table[i].name) == 0) {
+      return cmd_table[i].handler(args);
+    }
+  }
+
+  detsim::ui::ui_printf("Unknown command '%s'\n", cmd);
   return 0;
 }
 
 void ui_mainloop()
 {
-  printf("[DEBUG] ui_mainloop started, auto_mode=%d\n", is_auto_mode());
+  detsim::ui::ui_printf("[DEBUG] ui_mainloop started, auto_mode=%d\n", is_auto_mode());
+  
+  detsim::ui::NCursesUI* ui = get_ncurses_ui();
+  
+  /* Handle auto mode */
+  if (is_auto_mode()) {
+    detsim::ui::ui_printf("[DEBUG] Running cmd_c\n");
+    cmd_c(NULL);
+    detsim::ui::ui_printf("[DEBUG] cmd_c returned\n");
+    return;
+  }
+  
+  /* If UI is available, use it */
+  if (ui) {
+    /* Set up command callback */
+    ui->set_on_command([](const std::string& cmd_line) {
+      // Create modifiable copy for strtok
+      char* cmd_copy = strdup(cmd_line.c_str());
+      int result = execute_command(cmd_copy);
+      free(cmd_copy);
+      if (result < 0) {
+        // Command wants to exit
+        // Note: In NCursesUI mode, we need a way to signal exit
+        // For now, just handle 'q' command specially
+      }
+    });
+    
+    /* Set up selection callback */
+    ui->set_on_selection([](const std::string& text) {
+    });
+    
+    /* Run NCursesUI main loop */
+    ui->run();
+    return;
+  }
+  
+  /* Fallback to readline mode */
   char lastbuf[256] = {0};
   char lastcmd[256] = {0};
-  if (is_auto_mode())
-  {
-    printf("[DEBUG] Running cmd_c\n");
-    cmd_c(NULL);
-    printf("[DEBUG] cmd_c returned\n");
-  }
 
-  for (char *str; (str = rl_gets()) != NULL;)
-  {
+  for (char *str; (str = rl_gets()) != NULL;) {
     if (str[0] != 0)
       strncpy(lastbuf, str, sizeof(lastbuf) - 1);
     lastbuf[sizeof(lastbuf) - 1] = '\0';
@@ -1588,32 +1654,26 @@ void ui_mainloop()
     char *str_end = str + strlen(str);
     /* extract the first token as the command */
     char *cmd = strtok(str, " ");
-    if (cmd == NULL)
-    {
+    if (cmd == NULL) {
       // Copy lastcmd to str buffer safely for strtok
       if (strlen(lastcmd) < 256) {
         strcpy(str, lastcmd);
         cmd = strtok(str, " ");
       }
-      if (cmd == NULL)
-      {
+      if (cmd == NULL) {
         lastbuf[0] = lastcmd[0] = '\0';
         continue;
       }
     }
 
-    /* treat the remaining string as the arguments,
-     * which may need further parsing
-     */
+    /* treat the remaining string as the arguments */
     char *args = cmd + strlen(cmd) + 1;
     if (args >= str_end)
       args = NULL;
 
     int i;
-    for (i = 0; i < NR_CMD; i++)
-    {
-      if (strcmp(cmd, cmd_table[i].name) == 0)
-      {
+    for (i = 0; i < NR_CMD; i++) {
+      if (strcmp(cmd, cmd_table[i].name) == 0) {
         if (cmd_table[i].handler(args) < 0)
           return;
         break;
@@ -1621,7 +1681,7 @@ void ui_mainloop()
     }
 
     if (i == NR_CMD)
-      printf("Unknown command '%s'\n", cmd);
+      detsim::ui::ui_printf("Unknown command '%s'\n", cmd);
     strncpy(lastcmd, lastbuf, sizeof(lastcmd) - 1);
     lastcmd[sizeof(lastcmd) - 1] = '\0';
   }

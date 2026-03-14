@@ -54,13 +54,13 @@ __attribute__((unused)) void print_call_stack()
     unw_get_reg(&cursor, UNW_REG_IP, &pc);
     if (pc == 0)
       break;
-    printf("0x%lx:", pc);
+    detsim::ui::ui_printf("0x%lx:", pc);
 
     char sym[256];
     if (unw_get_proc_name(&cursor, sym, sizeof(sym), &offset) == 0)
-      printf(" (%s+0x%lx)\n", sym, offset);
+      detsim::ui::ui_printf(" (%s+0x%lx)\n", sym, offset);
     else
-      printf(" -- error: unable to obtain symbol name for this frame\n");
+      detsim::ui::ui_printf(" -- error: unable to obtain symbol name for this frame\n");
   }
 }
 
@@ -254,12 +254,12 @@ void log_regs(struct user_regs_struct *regs)
 
 void show_regs(struct user_regs_struct *regs)
 {
-  printf("rax = %016llx rbx = %016llx rcx = %016llx rdx = %016llx\n"
+  detsim::ui::ui_printf("rax = %016llx rbx = %016llx rcx = %016llx rdx = %016llx\n"
          "rsp = %016llx rbp = %016llx rdi = %016llx rsi = %016llx\n"
          "r8  = %016llx r9  = %016llx r10 = %016llx rip = %016llx\n",
          regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsp, regs->rbp,
          regs->rdi, regs->rsi, regs->r8, regs->r9, regs->r10, regs->rip);
-  printf("orig_rax = %016llx\n", regs->orig_rax);
+  detsim::ui::ui_printf("orig_rax = %016llx\n", regs->orig_rax);
 }
 
 /* ======================================================================
@@ -274,7 +274,7 @@ uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
   /* I don't care */
   /* scanf("%*c"); */
 
-  /* printf("%d\n", pid); */
+  /* detsim::ui::ui_printf("%d\n", pid); */
   struct user_regs_struct restore;
   struct user_regs_struct syscall_regs;
 
@@ -402,7 +402,7 @@ void tracee_backtrace(int pid)
 
   do
   {
-    printf("#%d ", frame++);
+    detsim::ui::ui_printf("#%d ", frame++);
     unw_word_t rip, rsp;
     char func[256];
     unw_get_reg(&cursor, UNW_REG_IP, &rip);
@@ -410,11 +410,11 @@ void tracee_backtrace(int pid)
 
     if (unw_get_proc_name(&cursor, func, sizeof(func), NULL) == 0)
     {
-      printf("0x%lx in %s()", (uintptr_t)rip, func);
+      detsim::ui::ui_printf("0x%lx in %s()", (uintptr_t)rip, func);
       resolve_rip_func(ptmc_state.tracee[ptmc_state.cursor].executable, rip);
     }
     else
-      printf("0x%lx in ??\n", (uintptr_t)rip);
+      detsim::ui::ui_printf("0x%lx in ??\n", (uintptr_t)rip);
 
   } while (unw_step(&cursor) > 0);
   _UPT_destroy(ui);

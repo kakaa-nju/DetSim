@@ -5,11 +5,12 @@ CXX = ccache g++
 LD = g++ -L/usr/local/lib
 
 # Include paths
-INCLUDES = -I. -Isrc -Isrc/core -Isrc/subsys -Isrc/utils -Ithird_party -Iexamples/raft/plugins
+INCLUDES = -I. -Isrc -Isrc/core -Isrc/subsys -Isrc/utils -Isrc/ui -Ithird_party -Iexamples/raft/plugins
 
 CXXFLAGS ?= $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2 -D_FORTIFY_SOURCE=0
 LDFLAGS = -g -ldwarf -lreadline -lcjson -ldw -lzstd -rdynamic \
-					-lunwind-ptrace -lunwind-x86_64 -lunwind -lelf -lfmt
+					-lunwind-ptrace -lunwind-x86_64 -lunwind -lelf -lfmt \
+					-lncurses -lpthread
 
 # Source files with new directory structure
 SRCS = src/main.cpp \
@@ -18,7 +19,8 @@ SRCS = src/main.cpp \
        src/utils/utils.cpp src/utils/expr.cpp src/utils/expr_ast.cpp \
        src/utils/expr_lexer.cpp src/utils/expr_parser.cpp \
        src/utils/resolve.cpp src/utils/crc32.cpp \
-       examples/raft/plugins/raft_msg_parser.cpp
+       examples/raft/plugins/raft_msg_parser.cpp \
+       src/ui/ncurses_ui.cpp src/ui/log_wrapper.cpp
 
 OBJS = $(SRCS:.cpp=.o)
 DEPS = $(SRCS:.cpp=.d)
@@ -33,7 +35,8 @@ all: release
 release: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -msse4.2
 release: tracer
 
-debug: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O0 -g -msse4.2 -DNOCOMPRESS
+debug: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O0 -g -msse4.2 -fsanitize=address
+debug: LDFLAGS += -fsanitize=address
 debug: tracer
 
 tracer: $(OBJS) nr2call.o

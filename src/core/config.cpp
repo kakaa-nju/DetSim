@@ -408,11 +408,11 @@ void parse_args(int argc, char *argv[])
         cfg_file = optarg;
         break;
       default:
-        printf("Usage: %s [OPTION...]\n\n", argv[0]);
-        printf("\t-a,--auto               run with auto mode\n");
-        printf("\t-l,--log=FILE           output log to FILE\n");
-        printf("\t-c,--cfg=FILE   specify configuration FILE\n");
-        printf("\n");
+        detsim::ui::ui_printf("Usage: %s [OPTION...]\n\n", argv[0]);
+        detsim::ui::ui_printf("\t-a,--auto               run with auto mode\n");
+        detsim::ui::ui_printf("\t-l,--log=FILE           output log to FILE\n");
+        detsim::ui::ui_printf("\t-c,--cfg=FILE   specify configuration FILE\n");
+        detsim::ui::ui_printf("\n");
         exit(0);
     }
   }

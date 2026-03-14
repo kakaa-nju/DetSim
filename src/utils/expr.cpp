@@ -5,6 +5,7 @@
  * It uses a lex/yacc-based parser to support complex C expressions.
  */
 
+#include "log_wrapper.h"
 #include "common.h"
 #include "debug.h"
 #include "guest.h"
@@ -138,14 +139,14 @@ static void print_value_recursive(int pid, const char* expr, uint64_t addr,
                                    const std::string& type_name, int indent, 
                                    bool is_member, bool is_toplevel) {
     /* Print indentation for members */
-    for (int i = 0; i < indent; i++) printf("  ");
+    for (int i = 0; i < indent; i++) detsim::ui::ui_printf("  ");
     
     if (type_name.empty()) {
         long val = ptrace(PTRACE_PEEKDATA, pid, addr, nullptr);
         if (is_member) {
-            printf("%s = %ld,\n", expr, val);
+            detsim::ui::ui_printf("%s = %ld,\n", expr, val);
         } else {
-            printf("%s = %ld\n", expr, val);
+            detsim::ui::ui_printf("%s = %ld\n", expr, val);
         }
         return;
     }
@@ -154,54 +155,54 @@ static void print_value_recursive(int pid, const char* expr, uint64_t addr,
     if (info.is_struct) {
         /* Print struct */
         if (is_member) {
-            printf("%s = {\n", expr);
+            detsim::ui::ui_printf("%s = {\n", expr);
         } else if (indent > 0) {
-            printf("{\n");
+            detsim::ui::ui_printf("{\n");
         } else {
-            printf("%s = {\n", expr);
+            detsim::ui::ui_printf("%s = {\n", expr);
         }
         for (const auto& m : info.members) {
             print_member_value(pid, m.name.c_str(), addr + m.offset, m.type_name, indent + 1);
         }
-        for (int i = 0; i < indent; i++) printf("  ");
+        for (int i = 0; i < indent; i++) detsim::ui::ui_printf("  ");
         if (is_member) {
-            printf("},\n");
+            detsim::ui::ui_printf("},\n");
         } else {
-            printf("}\n");
+            detsim::ui::ui_printf("}\n");
         }
     } else if (info.is_array) {
         /* Print array */
         if (is_member) {
-            printf("%s = [\n", expr);
+            detsim::ui::ui_printf("%s = [\n", expr);
         } else if (indent > 0) {
-            printf("[\n");
+            detsim::ui::ui_printf("[\n");
         } else {
-            printf("%s = [\n", expr);
+            detsim::ui::ui_printf("%s = [\n", expr);
         }
         int elem_size = info.element_type.empty() ? 8 : dwarf_type_size(info.element_type.c_str());
         if (elem_size == 0) elem_size = 8;
         int print_count = info.array_elements > 5 ? 5 : info.array_elements;
         for (int i = 0; i < print_count; i++) {
-            for (int j = 0; j < indent + 1; j++) printf("  ");
-            printf("[%d] = ", i);
+            for (int j = 0; j < indent + 1; j++) detsim::ui::ui_printf("  ");
+            detsim::ui::ui_printf("[%d] = ", i);
             /* For struct elements, recursively print the struct */
             type_info elem_info = dwarf_get_type_info(info.element_type.c_str());
             if (elem_info.is_struct) {
-                printf("{\n");
+                detsim::ui::ui_printf("{\n");
                 for (const auto& m : elem_info.members) {
                     print_member_value(pid, m.name.c_str(), addr + i * elem_size + m.offset, m.type_name, indent + 2);
                 }
-                for (int j = 0; j < indent + 1; j++) printf("  ");
-                printf("},\n");
+                for (int j = 0; j < indent + 1; j++) detsim::ui::ui_printf("  ");
+                detsim::ui::ui_printf("},\n");
             } else if (elem_info.is_pointer) {
                 /* For pointer elements, print pointer value */
                 long val = ptrace(PTRACE_PEEKDATA, pid, addr + i * elem_size, nullptr);
                 uint64_t ptr_val = static_cast<uint64_t>(val);
                 if (is_char_pointer(info.element_type) && ptr_val != 0) {
                     std::string str = read_tracee_string(pid, ptr_val, 32);
-                    printf("0x%lx \"%s\"\n", (unsigned long)ptr_val, str.c_str());
+                    detsim::ui::ui_printf("0x%lx \"%s\"\n", (unsigned long)ptr_val, str.c_str());
                 } else {
-                    printf("(%s) 0x%lx\n", info.element_type.c_str(), (unsigned long)ptr_val);
+                    detsim::ui::ui_printf("(%s) 0x%lx\n", info.element_type.c_str(), (unsigned long)ptr_val);
                 }
             } else {
                 /* For basic type elements, print value directly */
@@ -209,18 +210,18 @@ static void print_value_recursive(int pid, const char* expr, uint64_t addr,
                 if (elem_info.size == 1) val = (int8_t)val;
                 else if (elem_info.size == 2) val = (int16_t)val;
                 else if (elem_info.size == 4) val = (int32_t)val;
-                printf("%ld\n", val);
+                detsim::ui::ui_printf("%ld\n", val);
             }
         }
         if (info.array_elements > 5) {
-            for (int j = 0; j < indent + 1; j++) printf("  ");
-            printf("... (%zu more elements)\n", info.array_elements - 5);
+            for (int j = 0; j < indent + 1; j++) detsim::ui::ui_printf("  ");
+            detsim::ui::ui_printf("... (%zu more elements)\n", info.array_elements - 5);
         }
-        for (int i = 0; i < indent; i++) printf("  ");
+        for (int i = 0; i < indent; i++) detsim::ui::ui_printf("  ");
         if (is_member) {
-            printf("],\n");
+            detsim::ui::ui_printf("],\n");
         } else {
-            printf("]\n");
+            detsim::ui::ui_printf("]\n");
         }
     } else if (info.is_pointer) {
         /* Print pointer */
@@ -230,11 +231,11 @@ static void print_value_recursive(int pid, const char* expr, uint64_t addr,
         /* Special handling for char* - print as string */
         if (is_char_pointer(type_name) && ptr_val != 0 && !is_member) {
             std::string str = read_tracee_string(pid, ptr_val, 64);
-            printf("%s = 0x%lx \"%s\"\n", expr, (unsigned long)ptr_val, str.c_str());
+            detsim::ui::ui_printf("%s = 0x%lx \"%s\"\n", expr, (unsigned long)ptr_val, str.c_str());
         } else if (is_member) {
-            printf("%s = (%s) 0x%lx,\n", expr, type_name.c_str(), (unsigned long)ptr_val);
+            detsim::ui::ui_printf("%s = (%s) 0x%lx,\n", expr, type_name.c_str(), (unsigned long)ptr_val);
         } else {
-            printf("%s = (%s) 0x%lx\n", expr, type_name.c_str(), (unsigned long)ptr_val);
+            detsim::ui::ui_printf("%s = (%s) 0x%lx\n", expr, type_name.c_str(), (unsigned long)ptr_val);
         }
     } else {
         /* Basic type */
@@ -244,9 +245,9 @@ static void print_value_recursive(int pid, const char* expr, uint64_t addr,
         else if (info.size == 2) val = (int16_t)val;
         else if (info.size == 4) val = (int32_t)val;
         if (is_member) {
-            printf("%s = %ld,\n", expr, val);
+            detsim::ui::ui_printf("%s = %ld,\n", expr, val);
         } else {
-            printf("%s = %ld\n", expr, val);
+            detsim::ui::ui_printf("%s = %ld\n", expr, val);
         }
     }
 }
@@ -263,7 +264,7 @@ void expr_print(const char *e) {
     
     ExprNode* ast = parse_expression(e);
     if (!ast) {
-        printf("Error parsing expression: %s\n", e);
+        detsim::ui::ui_printf("Error parsing expression: %s\n", e);
         return;
     }
     
@@ -279,9 +280,9 @@ void expr_print(const char *e) {
         bool ok;
         EvalResult result = ast->eval(target_pid, ok);
         if (ok && !result.type_name.empty()) {
-            printf("type = %s\n", result.type_name.c_str());
+            detsim::ui::ui_printf("type = %s\n", result.type_name.c_str());
         } else {
-            printf("type = unknown\n");
+            detsim::ui::ui_printf("type = unknown\n");
         }
         delete ast;
         return;
@@ -298,9 +299,9 @@ void expr_print(const char *e) {
         /* Just a value */
         result = ast->eval(target_pid, ok);
         if (ok) {
-            printf("%ld\n", result.as_value());
+            detsim::ui::ui_printf("%ld\n", result.as_value());
         } else {
-            printf("Error evaluating expression\n");
+            detsim::ui::ui_printf("Error evaluating expression\n");
         }
     }
     

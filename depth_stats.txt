@@ -69,3 +69,326 @@
 5 232
 6 675
 7 1119
+# depth total_states_searched
+6 229
+# depth total_states_searched
+6 231
+# depth total_states_searched
+5 265
+# depth total_states_searched
+5 242
+# depth total_states_searched
+7 146
+9 493
+10 834
+11 1815
+12 3101
+# depth total_states_searched
+20 678
+21 1243
+22 2126
+23 3433
+# depth total_states_searched
+4 232
+6 709
+7 1141
+8 3410
+9 7559
+10 18146
+# depth total_states_searched
+5 232
+6 722
+7 1179
+8 3091
+9 7255
+# depth total_states_searched
+7 237
+8 683
+9 1115
+10 2535
+11 5997
+# depth total_states_searched
+8 199
+9 623
+# depth total_states_searched
+13 226
+15 631
+16 1443
+# depth total_states_searched
+5 252
+6 699
+7 1587
+# depth total_states_searched
+5 237
+7 1097
+# depth total_states_searched
+11 227
+13 1062
+14 1844
+# depth total_states_searched
+5 260
+7 1197
+# depth total_states_searched
+12 149
+13 426
+# depth total_states_searched
+4 128
+5 621
+# depth total_states_searched
+10 90
+11 273
+12 461
+13 639
+# depth total_states_searched
+# depth total_states_searched
+4 139
+5 384
+6 865
+# depth total_states_searched
+8 107
+9 328
+11 538
+12 947
+# depth total_states_searched
+16 108
+17 327
+18 538
+19 1168
+# depth total_states_searched
+22 87
+23 383
+# depth total_states_searched
+26 81
+29 527
+# depth total_states_searched
+# depth total_states_searched
+4 123
+5 354
+6 805
+# depth total_states_searched
+11 109
+12 528
+13 730
+# depth total_states_searched
+17 70
+19 223
+# depth total_states_searched
+20 73
+23 215
+24 466
+26 737
+27 2784
+28 3476
+# depth total_states_searched
+# depth total_states_searched
+4 260
+6 699
+# depth total_states_searched
+9 227
+11 674
+12 1095
+# depth total_states_searched
+16 189
+17 585
+18 967
+19 1373
+# depth total_states_searched
+25 179
+27 469
+28 760
+29 1358
+# depth total_states_searched
+# depth total_states_searched
+6 735
+# depth total_states_searched
+16 211
+17 604
+# depth total_states_searched
+23 170
+24 527
+# depth total_states_searched
+34 430
+# depth total_states_searched
+# depth total_states_searched
+5 217
+6 683
+# depth total_states_searched
+10 210
+11 620
+# depth total_states_searched
+16 126
+18 628
+19 1134
+# depth total_states_searched
+25 369
+# depth total_states_searched
+34 121
+# depth total_states_searched
+# depth total_states_searched
+1 1
+3 26
+4 53
+# depth total_states_searched
+6 11
+7 42
+# depth total_states_searched
+9 10
+10 32
+# depth total_states_searched
+12 7
+13 33
+# depth total_states_searched
+17 20
+# depth total_states_searched
+20 7
+21 21
+# depth total_states_searched
+# depth total_states_searched
+2 4
+3 39
+4 74
+# depth total_states_searched
+7 40
+# depth total_states_searched
+9 10
+10 34
+# depth total_states_searched
+11 12
+12 56
+14 84
+# depth total_states_searched
+16 9
+17 60
+18 111
+# depth total_states_searched
+18 11
+20 35
+22 55
+# depth total_states_searched
+24 10
+26 58
+# depth total_states_searched
+28 13
+30 35
+31 86
+# depth total_states_searched
+34 13
+35 38
+36 87
+# depth total_states_searched
+38 11
+40 60
+# depth total_states_searched
+42 8
+44 21
+45 74
+# depth total_states_searched
+48 10
+49 28
+# depth total_states_searched
+52 10
+54 49
+55 86
+# depth total_states_searched
+# depth total_states_searched
+# depth total_states_searched
+3 34
+4 97
+# depth total_states_searched
+7 35
+8 91
+9 139
+# depth total_states_searched
+11 32
+12 91
+13 153
+# depth total_states_searched
+14 22
+16 109
+17 151
+19 191
+# depth total_states_searched
+21 23
+22 70
+23 104
+24 189
+# depth total_states_searched
+27 23
+29 112
+30 155
+# depth total_states_searched
+37 153
+# depth total_states_searched
+41 25
+42 73
+44 118
+45 208
+46 241
+# depth total_states_searched
+49 22
+50 64
+51 103
+52 142
+# depth total_states_searched
+5 260
+6 718
+7 1175
+# depth total_states_searched
+12 147
+13 697
+15 988
+# depth total_states_searched
+20 144
+23 683
+24 953
+# depth total_states_searched
+# depth total_states_searched
+5 237
+6 694
+7 1119
+8 3256
+9 7473
+10 17908
+# depth total_states_searched
+# depth total_states_searched
+5 232
+6 680
+# depth total_states_searched
+9 233
+10 699
+# depth total_states_searched
+16 691
+# depth total_states_searched
+23 139
+26 715
+# depth total_states_searched
+32 448
+33 725
+# depth total_states_searched
+40 151
+# depth total_states_searched
+47 148
+# depth total_states_searched
+54 152
+# depth total_states_searched
+# depth total_states_searched
+5 247
+# depth total_states_searched
+# depth total_states_searched
+4 123
+# depth total_states_searched
+8 120
+# depth total_states_searched
+12 75
+# depth total_states_searched
+19 68
+# depth total_states_searched
+26 80
+# depth total_states_searched
+# depth total_states_searched
+4 118
+# depth total_states_searched
+# depth total_states_searched
+# depth total_states_searched
+13 101
+# depth total_states_searched

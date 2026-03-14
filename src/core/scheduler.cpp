@@ -11,6 +11,13 @@
 #include "utils.h"
 #include "expr_eval.hpp"
 
+/* NCursesUI integration */
+#include "ui/ncurses_ui.h"
+#include "ui/log_wrapper.h"
+
+// 外部声明：get_ncurses_ui 定义在 main.cpp
+extern "C" detsim::ui::NCursesUI* get_ncurses_ui();
+
 #include <assert.h>
 #include <cstddef>
 #include <cstdlib>
@@ -48,7 +55,7 @@ static void start_tracee(int id)
 {
   signal(SIGINT, SIG_IGN);
   ptrace_right(PTRACE_TRACEME, 0, NULL, NULL);
-  // printf("Will start executable %s\n", ptmc_state.tracee[id].executable);
+  // detsim::ui::ui_printf("Will start executable %s\n", ptmc_state.tracee[id].executable);
   if (log_fp != stdout)
     fclose(log_fp);
   raise(SIGSTOP);
@@ -62,12 +69,16 @@ static void start_tracee(int id)
 
 static void exit_all(int _)
 {
+  /* Shutdown StateStore to flush pending writes */
+  StateStore::instance().shutdown();
   kill(0, SIGTERM);
   exit(EXIT_SUCCESS);
 }
 
 static void exit_all(void)
 {
+  /* Shutdown StateStore to flush pending writes */
+  StateStore::instance().shutdown();
   kill(0, SIGTERM);
   exit(EXIT_SUCCESS);
 }
@@ -188,18 +199,28 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
   /* calculate choose_n from context */
   ptmc_state.n_choose = analyze_choose(info);
 
-  static char *line_read;
   if (!is_auto_mode() && ptmc_state.n_choose != 0) /* ask for choose */
   {
-    printf("Here comes with %d choices.\n", ptmc_state.n_choose);
-    line_read = readline("You choose? [0, N): ");
-    while (sscanf(line_read, "%d", &ptmc_state.choose) != 1 ||
-           ptmc_state.choose < 0 || ptmc_state.choose >= ptmc_state.n_choose)
-    {
+    detsim::ui::NCursesUI* ui = get_ncurses_ui();
+    if (ui) {
+      /* Use NCursesUI prompt */
+      char prompt_buf[256];
+      snprintf(prompt_buf, sizeof(prompt_buf), 
+               "Choose from %d options", ptmc_state.n_choose);
+      ptmc_state.choose = ui->prompt_int(prompt_buf, 0, 0, ptmc_state.n_choose - 1);
+    } else {
+      /* Fallback to readline */
+      static char *line_read;
+      UI_LOG_INFO("Here comes with %d choices.", ptmc_state.n_choose);
+      line_read = readline("You choose? [0, N): ");
+      while (sscanf(line_read, "%d", &ptmc_state.choose) != 1 ||
+             ptmc_state.choose < 0 || ptmc_state.choose >= ptmc_state.n_choose)
+      {
+        free(line_read);
+        line_read = readline("Please make legal choice: ");
+      }
       free(line_read);
-      line_read = readline("Please make legal choice: ");
     }
-    free(line_read);
   } else if (is_auto_mode() && ptmc_state.n_choose != 0 && ptmc_state.mode == PTMC_STATE::MODE_RAND) {
     ptmc_state.choose = rand() % ptmc_state.n_choose; 
   }
@@ -467,7 +488,7 @@ static int check_state()
       LOG_ERROR("Failed to evaluate expression \"%s\"", assertion.c_str());
     if (val == false)
     {
-      printf("Assertion \"%s\" fail at sys_state " HASH_FORMAT "!\n",
+      detsim::ui::ui_printf("Assertion \"%s\" fail at sys_state " HASH_FORMAT "!\n",
              assertion.c_str(), ptmc_state.dest_state.ss_hash);
       return 1;
     }
@@ -522,7 +543,7 @@ int exec_store()
   int ret = exec_once(info + index);
   if (ret == -1)
   {
-    printf("Tracee #%d has exited. Please do something else.\n", index);
+    detsim::ui::ui_printf("Tracee #%d has exited. Please do something else.\n", index);
     return 0;
   }
   LOG_TRACE("Tracee #%d do %s", index, syscalls[info[index].nr]);
@@ -537,7 +558,7 @@ int exec_store()
   if (check_state() != 0)
   {
     stop_status_monitor();
-    printf("Reach illegal state.\n");
+    detsim::ui::ui_printf("Reach illegal state.\n");
     show_syscall_history();
   }
   stop_status_monitor();
@@ -704,12 +725,17 @@ static void status_monitor_thread() {
   /* Wait a bit for initial states to be processed */
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
   
+  /* Get NCursesUI instance */
+  detsim::ui::NCursesUI* ui = get_ncurses_ui();
+  
   int rows, cols;
   get_terminal_size(rows, cols);
   
-  /* Hide cursor */
-  printf(ANSI_HIDE_CURSOR);
-  fflush(stdout);
+  /* Hide cursor (only if not using UI) */
+  if (!ui) {
+    detsim::ui::ui_printf(ANSI_HIDE_CURSOR);
+    fflush(stdout);
+  }
   
   while (g_monitor_running.load()) {
     auto &store = StateStore::instance();
@@ -761,143 +787,142 @@ static void status_monitor_thread() {
         sock_state_total += ptmc_state.sock_states[i].udp_recv_buffers().size();
     }
     
-    /* Save cursor and move to status area (bottom 9 lines) */
-    printf(ANSI_SAVE_CURSOR);
-    
-    /* Calculate status area starting row (reserve bottom 11 lines) */
-    int status_start = rows - 11;
-    if (status_start < 1) status_start = 1;
-    
-    /* Print separator line */
-    printf("\033[%d;1H" ANSI_CLEAR_LINE "═══════════════════════════════════════════════════════════════════════════════", status_start - 1);
-    
-    /* Line 1: Basic stats */
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " 🚀 States: %zu searched | %zu unique | %zu queued | Depth: %zu | %.1f states/s", 
-           status_start, 
-           g_states_searched.load(), 
-           unique_states, 
-           queue_size,
-           depth,
-           states_per_sec);
-    
-    /* Line 2: Worker queues (NEW) */
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " 📥 Queues: IO=[%zu/%zu] | Prefetch=[%zu]", 
-           status_start + 1, io_queue_size, io_queue_cap, prefetch_queue_size);
-    
-    /* Line 3: Cache L1 with entry count */
-    double l1_pct = l1_cap > 0 ? 100.0 * l1_usage / l1_cap : 0;
-    int l1_bar = (int)(50 * l1_usage / l1_cap);
-    if (l1_bar > 50) l1_bar = 50;
-    char l1_bar_str[51];
-    for (int i = 0; i < 50; i++) l1_bar_str[i] = (i < l1_bar) ? '#' : '-';
-    l1_bar_str[50] = '\0';
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " L1 Hot:   [%s] %s / %s (%.1f%%) | %zu entries", 
-           status_start + 2, l1_bar_str, format_bytes(l1_usage).c_str(), format_bytes(l1_cap).c_str(), l1_pct, l1_entries);
-    
-    /* Line 4: Cache L2 with entry count */
-    double l2_pct = l2_cap > 0 ? 100.0 * l2_usage / l2_cap : 0;
-    int l2_bar = (int)(50 * l2_usage / l2_cap);
-    if (l2_bar > 50) l2_bar = 50;
-    char l2_bar_str[51];
-    for (int i = 0; i < 50; i++) l2_bar_str[i] = (i < l2_bar) ? '#' : '-';
-    l2_bar_str[50] = '\0';
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " L2 Warm:  [%s] %s / %s (%.1f%%) | %zu entries", 
-           status_start + 3, l2_bar_str, format_bytes(l2_usage).c_str(), format_bytes(l2_cap).c_str(), l2_pct, l2_entries);
-    
-    /* Line 5: Save/dedup statistics */
-    uint64_t total_dedup = stats.save_dedup_hot + stats.save_dedup_warm + stats.save_dedup_disk;
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " Save: %zu calls | %zu new | dedup: H=%zu W=%zu D=%zu (%.1f%%)", 
-           status_start + 4,
-           stats.save_calls,
-           stats.save_new,
-           stats.save_dedup_hot,
-           stats.save_dedup_warm,
-           stats.save_dedup_disk,
-           stats.dedup_rate());
-    
-    /* Line 6: Time and throughput */
-    int hours = (int)(elapsed / 3600);
-    int minutes = ((int)elapsed % 3600) / 60;
-    int seconds = (int)elapsed % 60;
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " Elapsed:  %02d:%02d:%02d | Total SysStates: %zu", 
-           status_start + 5,
-           hours, minutes, seconds,
-           total_sysstates);
-    
-    /* Line 7: Exponential fit for depth vs states */
-    double fit_a, fit_b;
-    {
-      std::lock_guard<std::mutex> fit_lock(g_fit_mutex);
-      fit_a = g_fit_a;
-      fit_b = g_fit_b;
-    }
-    if (fit_a > 0 && fit_b > 0 && g_depth_data_points.size() >= 3) {
-      // Predict total states at depth+1 and depth+5
-      double pred_next = fit_a * exp(fit_b * (depth + 1));
-      double pred_5more = fit_a * exp(fit_b * (depth + 5));
-      printf("\033[%d;1H" ANSI_CLEAR_LINE " DepthFit: N=%zu | states=%.2f*e^(%.4f*depth) | d+1:%.0f d+5:%.0f",
-             status_start + 6,
-             g_depth_data_points.size(), fit_a, fit_b, pred_next, pred_5more);
+    /* Update status display */
+    if (ui) {
+      /* Use NCursesUI status window */
+      char buf[256];
+      
+      /* Line 1: Basic stats */
+      snprintf(buf, sizeof(buf), "States: %zu | Unique: %zu | Queued: %zu | Depth: %zu | %.1f/s", 
+               g_states_searched.load(), unique_states, queue_size, depth, states_per_sec);
+      ui->set_status_line(1, buf);
+      
+      /* Line 2: Queues */
+      snprintf(buf, sizeof(buf), "IO: %zu/%zu | Prefetch: %zu", 
+               io_queue_size, io_queue_cap, prefetch_queue_size);
+      ui->set_status_line(2, buf);
+      
+      /* Line 3: Cache L1 */
+      snprintf(buf, sizeof(buf), "L1: %s/%s (%zu entries)", 
+               format_bytes(l1_usage).c_str(), format_bytes(l1_cap).c_str(), l1_entries);
+      ui->set_status_line(3, buf);
+      
+      /* Line 4: Cache L2 */
+      snprintf(buf, sizeof(buf), "L2: %s/%s (%zu entries)", 
+               format_bytes(l2_usage).c_str(), format_bytes(l2_cap).c_str(), l2_entries);
+      ui->set_status_line(4, buf);
+      
+      /* Line 5: Time */
+      int hours = (int)(elapsed / 3600);
+      int minutes = ((int)elapsed % 3600) / 60;
+      int seconds = (int)elapsed % 60;
+      snprintf(buf, sizeof(buf), "Time: %02d:%02d:%02d | Total: %zu", 
+               hours, minutes, seconds, total_sysstates);
+      ui->set_status_line(5, buf);
+      
+      /* Line 6: Mode */
+      const char *mode_str = "DFS";
+      if (ptmc_state.mode == PTMC_STATE::MODE_RAND) mode_str = "RAND";
+      else if (ptmc_state.mode == PTMC_STATE::MODE_BFS) mode_str = "BFS";
+      snprintf(buf, sizeof(buf), "Mode: %s | Auto: %s | SIGINT: %s", 
+               mode_str,
+               is_auto_mode() ? "ON" : "OFF",
+               sigint_received ? "YES" : "NO");
+      ui->set_status_line(6, buf);
+      
+      /* Line 7: Process status */
+      int running = 0, exited = 0;
+      for (int i = 0; i < NP; i++) {
+        if (ptmc_state.exited[i]) exited++;
+        else running++;
+      }
+      snprintf(buf, sizeof(buf), "Procs: %d run | %d exit | Cursor: %d", 
+               running, exited, ptmc_state.cursor);
+      ui->set_status_line(7, buf);
+      
+      /* Line 8: Current hash */
+      snprintf(buf, sizeof(buf), "Hash: %016lx", ptmc_state.dest_state.ss_hash);
+      ui->set_status_line(8, buf);
+      
     } else {
-      printf("\033[%d;1H" ANSI_CLEAR_LINE " DepthFit: collecting data... (%zu points)",
-             status_start + 6, g_depth_data_points.size());
+      /* Use ANSI escape sequences (original code) */
+      /* Save cursor and move to status area (bottom 9 lines) */
+      detsim::ui::ui_printf(ANSI_SAVE_CURSOR);
+      
+      /* Calculate status area starting row (reserve bottom 11 lines) */
+      int status_start = rows - 11;
+      if (status_start < 1) status_start = 1;
+      
+      /* Print separator line */
+      detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE "═══════════════════════════════════════════════════════════════════════════════", status_start - 1);
+      
+      /* Line 1: Basic stats */
+      detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE " States: %zu searched | %zu unique | %zu queued | Depth: %zu | %.1f states/s", 
+             status_start, 
+             g_states_searched.load(), 
+             unique_states, 
+             queue_size,
+             depth,
+             states_per_sec);
+      
+      /* Line 2: Worker queues */
+      detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE " Queues: IO=[%zu/%zu] | Prefetch=[%zu]", 
+             status_start + 1, io_queue_size, io_queue_cap, prefetch_queue_size);
+      
+      /* Line 3: Cache L1 */
+      double l1_pct = l1_cap > 0 ? 100.0 * l1_usage / l1_cap : 0;
+      detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE " L1 Hot: %s / %s (%.1f%%) | %zu entries", 
+             status_start + 2, format_bytes(l1_usage).c_str(), format_bytes(l1_cap).c_str(), l1_pct, l1_entries);
+      
+      /* Line 4: Cache L2 */
+      double l2_pct = l2_cap > 0 ? 100.0 * l2_usage / l2_cap : 0;
+      detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE " L2 Warm: %s / %s (%.1f%%) | %zu entries", 
+             status_start + 3, format_bytes(l2_usage).c_str(), format_bytes(l2_cap).c_str(), l2_pct, l2_entries);
+      
+      /* Line 5: Time */
+      int hours = (int)(elapsed / 3600);
+      int minutes = ((int)elapsed % 3600) / 60;
+      int seconds = (int)elapsed % 60;
+      detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE " Elapsed: %02d:%02d:%02d | Total SysStates: %zu", 
+             status_start + 4, hours, minutes, seconds, total_sysstates);
+      
+      /* Line 6: Mode */
+      const char *mode_str = "DFS";
+      if (ptmc_state.mode == PTMC_STATE::MODE_RAND) mode_str = "RAND";
+      else if (ptmc_state.mode == PTMC_STATE::MODE_DFS) mode_str = "DFS";
+      else if (ptmc_state.mode == PTMC_STATE::MODE_BFS) mode_str = "BFS";
+      detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE " Mode: %s | Auto: %s | SIGINT: %s", 
+             status_start + 5, mode_str,
+             is_auto_mode() ? "ON" : "OFF",
+             sigint_received ? "YES" : "NO");
+      
+      /* Line 7: Process status */
+      int running = 0, exited = 0;
+      for (int i = 0; i < NP; i++) {
+        if (ptmc_state.exited[i]) exited++;
+        else running++;
+      }
+      detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE " Processes: %d running | %d exited | Current: %d", 
+             status_start + 6, running, exited, ptmc_state.cursor);
+      
+      /* Line 8: Current hash */
+      detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE " Current: %016lx", 
+             status_start + 7, ptmc_state.dest_state.ss_hash);
+      
+      /* Restore cursor */
+      detsim::ui::ui_printf(ANSI_RESTORE_CURSOR);
+      fflush(stdout);
     }
-    
-    /* Line 8: Process status */
-    int running = 0, exited = 0;
-    for (int i = 0; i < NP; i++) {
-      if (ptmc_state.exited[i]) exited++;
-      else running++;
-    }
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " Processes: %d running | %d exited | Current: %d", 
-           status_start + 7, running, exited, ptmc_state.cursor);
-    
-    /* Line 8: Mode info */
-    const char *mode_str = "DFS";
-    if (ptmc_state.mode == PTMC_STATE::MODE_RAND) mode_str = "RAND";
-    else if (ptmc_state.mode == PTMC_STATE::MODE_DFS) mode_str = "DFS";
-    else if (ptmc_state.mode == PTMC_STATE::MODE_BFS) mode_str = "BFS";
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " Mode:     %s | Auto: %s | SIGINT: %s", 
-           status_start + 8,
-           mode_str,
-           is_auto_mode() ? "ON" : "OFF",
-           sigint_received ? "YES" : "NO");
-    
-    /* Line 9: Global containers (NEW - potential memory hogs) */
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " TREE=%zu SET=%zu SOCKS=%zu", 
-           status_start + 9,
-           state_tree_size, total_sysstates, sock_state_total);
-    
-    /* Line 10: Current state hash */
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " Current:  %016lx", 
-           status_start + 10,
-           ptmc_state.dest_state.ss_hash);
-    
-    /* Performance diagnostics */
-    size_t save_count = g_save_count.load();
-    size_t restore_count = g_restore_count.load();
-    uint64_t total_save_us = g_save_time_us.load();
-    uint64_t total_restore_us = g_restore_time_us.load();
-    
-    double avg_save_ms = save_count > 0 ? (total_save_us / 1000.0) / save_count : 0;
-    double avg_restore_ms = restore_count > 0 ? (total_restore_us / 1000.0) / restore_count : 0;
-    
-    /* Line 9: Performance (avoid accessing state_set from monitor thread) */
-    printf("\033[%d;1H" ANSI_CLEAR_LINE " Save: %.2fms | Restore: %.2fms | Count: %zu", 
-           status_start + 7,
-           avg_save_ms, avg_restore_ms, save_count + restore_count);
-    
-    /* Restore cursor */
-    printf(ANSI_RESTORE_CURSOR);
-    fflush(stdout);
     
     /* Sleep 1 second */
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
   
-  /* Show cursor again */
-  printf(ANSI_SHOW_CURSOR);
-  fflush(stdout);
+  /* Show cursor again (only if not using UI) */
+  if (!ui) {
+    detsim::ui::ui_printf(ANSI_SHOW_CURSOR);
+    fflush(stdout);
+  }
 }
 
 static void start_status_monitor() {
@@ -947,15 +972,22 @@ static void stop_status_monitor() {
   }
   g_max_depth_recorded = 0;
   
-  /* Clear status area */
-  int rows, cols;
-  get_terminal_size(rows, cols);
-  printf(ANSI_SAVE_CURSOR);
-  for (int i = rows - 10; i <= rows; i++) {
-    printf("\033[%d;1H" ANSI_CLEAR_LINE, i);
+  /* If not using UI, clear status area and show cursor */
+  detsim::ui::NCursesUI* ui = get_ncurses_ui();
+  if (!ui) {
+    int rows, cols;
+    get_terminal_size(rows, cols);
+    detsim::ui::ui_printf(ANSI_SAVE_CURSOR);
+    for (int i = rows - 10; i <= rows; i++) {
+      detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE, i);
+    }
+    detsim::ui::ui_printf(ANSI_RESTORE_CURSOR);
+    fflush(stdout);
+    
+    /* Show cursor again */
+    detsim::ui::ui_printf(ANSI_SHOW_CURSOR);
+    fflush(stdout);
   }
-  printf(ANSI_RESTORE_CURSOR);
-  fflush(stdout);
 }
 
 bool state_to_be_discarded(int index, syscall_info *infos) {
@@ -1093,11 +1125,11 @@ int exec_cont()
       if (check_state() != 0)
       {
         stop_status_monitor();
-        printf("Stopped for illegal state. Searched for %zu sys_states (new: %zu)\n",
+        detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu sys_states (new: %zu)\n",
                states_searched_this_run, states_new_this_run);
         show_syscall_history();
         double time_used = gettime() - start_time;
-        printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
+        detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
                states_searched_this_run / time_used);
         StateStore::instance().print_stats();
         state_fetched->clear();
@@ -1131,13 +1163,16 @@ int exec_cont()
     if (sigint_received)
     {
       stop_status_monitor();
-      printf("Program received signal SIGINT, Interrupt.\n");
-      printf("Searched for %zu sys_states (new: %zu), total unique: %zu\n", 
+      detsim::ui::ui_printf("Program received signal SIGINT, Interrupt.\n");
+      /* Wait for pending StateStore writes to complete to ensure data consistency */
+      detsim::ui::ui_printf("Flushing pending state writes...\n");
+      StateStore::instance().wait_for_completion();
+      detsim::ui::ui_printf("Searched for %zu sys_states (new: %zu), total unique: %zu\n", 
              states_searched_this_run, states_new_this_run, state_set.size());
       show_syscall_history();
       stop_status_monitor();
       double time_used = gettime() - start_time;
-      printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
+      detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
              states_searched_this_run / time_used);
       StateStore::instance().print_stats();
       sigint_received = 0;
@@ -1146,11 +1181,11 @@ int exec_cont()
     }
   }
   stop_status_monitor();
-  printf("Complete explore all %zu sys_states (new: %zu), total unique: %zu\n", 
+  detsim::ui::ui_printf("Complete explore all %zu sys_states (new: %zu), total unique: %zu\n", 
          states_searched_this_run, states_new_this_run, state_set.size());
   show_syscall_history();
   double time_used = gettime() - start_time;
-  printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
+  detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
          states_searched_this_run / time_used);
   StateStore::instance().print_stats();
   return 0;
@@ -1181,7 +1216,7 @@ void init_state()
   if (!pids[NP - 1])
     start_tracee(NP - 1);
 
-  printf("Instance #pid = %d\n", getpid());
+  detsim::ui::ui_printf("Instance #pid = %d\n", getpid());
 
   /* Initialize FdManagers and link to states */
   for (int i = 0; i < NP; i++)

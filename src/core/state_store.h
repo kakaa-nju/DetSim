@@ -135,6 +135,9 @@ public:
     // Wait for persistence
     bool wait_persisted(hash_type hash, uint64_t timeout_ms = 0);
     
+    // Wait for all pending IO operations to complete
+    void wait_for_completion();
+    
     // Get entry (advanced usage)
     StateEntryPtr get_entry(hash_type hash);
     
