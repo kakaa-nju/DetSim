@@ -41,8 +41,16 @@ std::string parse_requestvote(const void* buf, size_t len) {
     msg_requestvote_t msg;
     if (!read_value(ptr, remaining, msg.term)) return "REQUEST_VOTE[malformed]";
     if (!read_value(ptr, remaining, msg.candidate_id)) return "REQUEST_VOTE[malformed]";
+    // Skip 4 bytes padding that exists in C struct after candidate_id
+    if (remaining < 4) return "REQUEST_VOTE[malformed]";
+    ptr += 4;
+    remaining -= 4;
     if (!read_value(ptr, remaining, msg.last_log_idx)) return "REQUEST_VOTE[malformed]";
     if (!read_value(ptr, remaining, msg.last_log_term)) return "REQUEST_VOTE[malformed]";
+    // Skip 4 bytes padding between msg struct and sender
+    if (remaining < 4) return "REQUEST_VOTE[malformed]";
+    ptr += 4;
+    remaining -= 4;
     
     // Read sender id if present
     int sender = -1;
@@ -67,6 +75,10 @@ std::string parse_requestvote_response(const void* buf, size_t len) {
     msg_requestvote_response_t msg;
     if (!read_value(ptr, remaining, msg.term)) return "REQUEST_VOTE_RSP[malformed]";
     if (!read_value(ptr, remaining, msg.vote_granted)) return "REQUEST_VOTE_RSP[malformed]";
+    // Skip 4 bytes padding that exists in C struct after vote_granted
+    if (remaining < 4) return "REQUEST_VOTE_RSP[malformed]";
+    ptr += 4;
+    remaining -= 4;
     
     // Read sender id if present
     int sender = -1;
@@ -92,6 +104,11 @@ std::string parse_appendentries(const void* buf, size_t len) {
     if (!read_value(ptr, remaining, msg.prev_log_term)) return "APPEND_ENTRIES[malformed]";
     if (!read_value(ptr, remaining, msg.leader_commit)) return "APPEND_ENTRIES[malformed]";
     if (!read_value(ptr, remaining, msg.n_entries)) return "APPEND_ENTRIES[malformed]";
+    
+    // Skip padding that exists in C struct (4 bytes on 64-bit systems)
+    // This padding exists between n_entries and the entries pointer in the original C struct
+    int padding;
+    if (!read_value(ptr, remaining, padding)) return "APPEND_ENTRIES[malformed]";
     
     std::ostringstream oss;
     oss << "APPEND_ENTRIES{term=" << msg.term 
@@ -130,8 +147,14 @@ std::string parse_appendentries_response(const void* buf, size_t len) {
     msg_appendentries_response_t msg;
     if (!read_value(ptr, remaining, msg.term)) return "APPEND_ENTRIES_RSP[malformed]";
     if (!read_value(ptr, remaining, msg.success)) return "APPEND_ENTRIES_RSP[malformed]";
+    // Skip 4 bytes padding that exists in C struct after success
+    if (remaining < 4) return "APPEND_ENTRIES_RSP[malformed]";
+    ptr += 4;
+    remaining -= 4;
     if (!read_value(ptr, remaining, msg.current_idx)) return "APPEND_ENTRIES_RSP[malformed]";
     if (!read_value(ptr, remaining, msg.first_idx)) return "APPEND_ENTRIES_RSP[malformed]";
+    // Skip padding at end of struct (if any)
+    // Note: AER doesn't have sender field in main.c, but we need to account for struct padding
     
     std::ostringstream oss;
     oss << "APPEND_ENTRIES_RSP{term=" << msg.term 

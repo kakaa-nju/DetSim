@@ -411,6 +411,21 @@ int poll_msg() {
         
         /* Load the snapshot */
         raft_begin_load_snapshot(raft, snap_term, snap_idx);
+        
+        /* Restore membership: re-add all peer nodes.
+         * raft_begin_load_snapshot removes all nodes except self from the
+         * nodes array. We need to re-add them to prevent single-node bootstrap.
+         * Note: raft_add_node will check if node exists; since nodes were
+         * removed from array but may still exist in memory, we simply add
+         * them back. raft_add_node handles duplicates gracefully. */
+        for (int i = 0; i < NP; i++) {
+          if (i != self) {
+            /* Active node back; it will be voting by default */
+            nodes[i] = raft_add_node(raft, (void *)&addrs[i], i, 0);
+            raft_node_set_active(nodes[i], 1);
+          }
+        }
+        
         raft_end_load_snapshot(raft);
       }
       break;

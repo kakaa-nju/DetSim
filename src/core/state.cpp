@@ -621,6 +621,9 @@ sys_state *state_queue_extract()
   hash_type hash = StateStore::instance().queue_front();
   StateStore::instance().queue_pop_front();
   sys_state *s = new sys_state(hash);
+  for (int i = 0; i < NP; i++)
+    if (s->ts_hash[i] == 0)
+      LOG_CRIT("Child state hash is 0 for tracee %d. This should not happen if the state is properly saved.", i);
   return s;
 }
 

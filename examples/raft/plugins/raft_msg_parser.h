@@ -35,6 +35,7 @@ using raft_node_id_t = int;
 struct msg_requestvote_t {
     raft_term_t term;
     raft_node_id_t candidate_id;
+    // Note: C struct has 4 bytes padding here (offset 12-15)
     raft_index_t last_log_idx;
     raft_term_t last_log_term;
 };
@@ -42,6 +43,7 @@ struct msg_requestvote_t {
 struct msg_requestvote_response_t {
     raft_term_t term;
     int vote_granted;
+    // Note: C struct has 4 bytes padding here (offset 12-15)
 };
 
 struct msg_appendentries_t {
@@ -50,12 +52,15 @@ struct msg_appendentries_t {
     raft_term_t prev_log_term;
     raft_index_t leader_commit;
     int n_entries;
+    // Explicit padding to match C struct layout (entries pointer follows)
+    int padding;
     // entries pointer is not serialized directly
 };
 
 struct msg_appendentries_response_t {
     raft_term_t term;
     int success;
+    // Note: C struct has 4 bytes padding here (offset 12-15)
     raft_index_t current_idx;
     raft_index_t first_idx;
 };

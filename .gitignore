@@ -10,7 +10,6 @@
 !*.md
 !*.rst
 !*.sh
-!*.txt
 !*.py
 !LICENSE
 

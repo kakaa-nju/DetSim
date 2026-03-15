@@ -675,13 +675,13 @@ int raft_recv_requestvote_response(raft_server_t* me_,
         me->current_leader = NULL;
         return 0;
     }
-    else if (raft_get_current_term(me_) != r->term)
-    {
+    // else if (raft_get_current_term(me_) != r->term)
+    // {
         /* The node who voted for us would have obtained our term.
          * Therefore this is an old message we should ignore.
          * This happens if the network is pretty choppy. */
-        return 0;
-    }
+    //     return 0;
+    // }
 
     __log(me_, node, "node responded to requestvote status:%s ct:%d rt:%d",
           r->vote_granted == 1 ? "granted" :

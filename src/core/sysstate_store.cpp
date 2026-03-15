@@ -426,13 +426,13 @@ std::vector<hash_type> SysStateStore::find_by_prefix(const std::string& prefix) 
     }
     
     // Calculate mask based on prefix length
-    // Each hex digit = 4 bits
+    // Each hex digit = 4 bits, hash is 64-bit (16 hex digits max)
     size_t hex_digits = prefix.length();
-    if (hex_digits > 8) hex_digits = 8;  // hash is 32-bit (8 hex digits max)
+    if (hex_digits > 16) hex_digits = 16;  // hash is 64-bit (16 hex digits max)
     
-    uint32_t shift_bits = 32 - (hex_digits * 4);
-    hash_type prefix_masked = prefix_hash << shift_bits;
-    hash_type mask = shift_bits >= 32 ? 0xFFFFFFFFu : (0xFFFFFFFFu << shift_bits);
+    int shift_bits = 64 - (hex_digits * 4);
+    hash_type prefix_masked = (shift_bits >= 64) ? 0 : (prefix_hash << shift_bits);
+    hash_type mask = (shift_bits >= 64) ? 0xFFFFFFFFFFFFFFFFull : (0xFFFFFFFFFFFFFFFFull << shift_bits);
     
     // Search in main index
     for (const auto& [hash, entry] : index_) {
