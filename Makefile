@@ -4,11 +4,14 @@ CC = gcc
 CXX = ccache g++
 LD = g++ -L/usr/local/lib
 
+# Build directory
+BUILD_DIR = build
+
 # Include paths
 INCLUDES = -I. -Isrc -Isrc/core -Isrc/subsys -Isrc/utils -Isrc/ui -Ithird_party -Iexamples/raft/plugins
 
 CXXFLAGS ?= $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2 -D_FORTIFY_SOURCE=0
-LDFLAGS = -g -ldwarf -lreadline -lcjson -ldw -lzstd -rdynamic \
+LDFLAGS = -g -ldwarf -lreadline -ldw -lzstd -rdynamic \
 					-lunwind-ptrace -lunwind-x86_64 -lunwind -lelf -lfmt \
 					-lncurses -lpthread
 
@@ -22,8 +25,9 @@ SRCS = src/main.cpp \
        examples/raft/plugins/raft_msg_parser.cpp \
        src/ui/ncurses_ui.cpp src/ui/log_wrapper.cpp
 
-OBJS = $(SRCS:.cpp=.o)
-DEPS = $(SRCS:.cpp=.d)
+# Object files in build directory
+OBJS = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(SRCS))
+DEPS = $(patsubst %.cpp,$(BUILD_DIR)/%.d,$(SRCS))
 
 # Lex/Yacc generated files
 LEX_SRC = src/utils/expr_lexer.cpp
@@ -39,12 +43,12 @@ debug: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O0 -g 
 debug: LDFLAGS += -fsanitize=address
 debug: tracer
 
-tracer: $(OBJS) nr2call.o
+tracer: $(OBJS) $(BUILD_DIR)/nr2call.o
 	$(LD) $^ $(LDFLAGS) -o tracer
 	-mkdir memory sstate
 
-nr2call.o: nr2call.c
-	gcc -c $< -O3 -g
+$(BUILD_DIR)/nr2call.o: nr2call.c | $(BUILD_DIR)
+	gcc -c $< -O3 -g -o $@
 
 $(LEX_SRC): src/utils/expr_lexer.l $(YACC_HDR)
 	flex -o $@ $<
@@ -52,16 +56,22 @@ $(LEX_SRC): src/utils/expr_lexer.l $(YACC_HDR)
 $(YACC_SRC) $(YACC_HDR): src/utils/expr_parser.y
 	bison -d -o $(YACC_SRC) $<
 
-%.o: %.cpp
+# Compile C++ files to build directory
+$(BUILD_DIR)/%.o: %.cpp | $(BUILD_DIR)
 	@if [ -z "$(NP)" ]; then \
 		echo "NP not set"; exit 1; \
 	fi
+	@mkdir -p $(dir $@)
 	@echo "Compiling $<"
 	@start=$$(date +%s.%N); \
 	$(CXX) $< $(CXXFLAGS) -c -o $@ -DNP=$(NP); \
 	end=$$(date +%s.%N); \
 	dur=$$(echo "$$end - $$start" | bc); \
 	echo "Compiled $< in $$dur seconds"
+
+# Create build directory
+$(BUILD_DIR):
+	mkdir -p $(BUILD_DIR)/src/core $(BUILD_DIR)/src/subsys $(BUILD_DIR)/src/utils $(BUILD_DIR)/src/ui $(BUILD_DIR)/examples/raft/plugins
 
 -include $(DEPS)
 
@@ -73,48 +83,48 @@ clear:
 	-mkdir memory sstate
 
 clean:
-	-/bin/rm -f $(OBJS) $(DEPS) nr2call.o tracer *.so
+	-/bin/rm -rf $(BUILD_DIR) tracer *.so
 	-/bin/rm -f $(LEX_SRC) $(YACC_SRC) $(YACC_HDR) src/utils/expr_parser.output
-	-/bin/rm -f $(BENCH_EXE) $(BENCH_OBJ) $(BENCH_SRC:.cpp=.d)
 
 # --- Benchmark Targets ---
 # Exclude the main tracer entry point from the object list for linking the benchmark
-TRACER_OBJS_NO_MAIN = $(filter-out src/main.o, $(OBJS))
+TRACER_OBJS_NO_MAIN = $(filter-out $(BUILD_DIR)/src/main.o, $(OBJS))
 
 # StateStore benchmark
 BENCH1_SRC = perf/state_store_benchmark.cpp
-BENCH1_OBJ = $(BENCH1_SRC:.cpp=.o)
+BENCH1_OBJ = $(BUILD_DIR)/perf/state_store_benchmark.o
 BENCH1_EXE = ss_bench
 
 # SysStateStore benchmark  
 BENCH2_SRC = perf/sysstate_store_benchmark.cpp
-BENCH2_OBJ = $(BENCH2_SRC:.cpp=.o)
+BENCH2_OBJ = $(BUILD_DIR)/perf/sysstate_store_benchmark.o
 BENCH2_EXE = sys_bench
 
 # XXHash benchmark
 BENCH3_SRC = perf/xxhash_benchmark.cpp
-BENCH3_OBJ = $(BENCH3_SRC:.cpp=.o)
+BENCH3_OBJ = $(BUILD_DIR)/perf/xxhash_benchmark.o
 BENCH3_EXE = xxh_bench
 
 benchmark: $(BENCH1_EXE) $(BENCH2_EXE) $(BENCH3_EXE)
 
-$(BENCH1_EXE): $(BENCH1_OBJ) $(TRACER_OBJS_NO_MAIN) nr2call.o
+$(BENCH1_EXE): $(BENCH1_OBJ) $(TRACER_OBJS_NO_MAIN) $(BUILD_DIR)/nr2call.o
 	@echo "==> Linking Benchmark: $(BENCH1_EXE)"
 	$(LD) $^ $(LDFLAGS) -o $@
 
-$(BENCH2_EXE): $(BENCH2_OBJ) $(TRACER_OBJS_NO_MAIN) nr2call.o
+$(BENCH2_EXE): $(BENCH2_OBJ) $(TRACER_OBJS_NO_MAIN) $(BUILD_DIR)/nr2call.o
 	@echo "==> Linking Benchmark: $(BENCH2_EXE)"
 	$(LD) $^ $(LDFLAGS) -o $@
 
-$(BENCH3_EXE): $(BENCH3_OBJ) nr2call.o
+$(BENCH3_EXE): $(BENCH3_OBJ) $(BUILD_DIR)/nr2call.o
 	@echo "==> Linking Benchmark: $(BENCH3_EXE)"
 	$(CXX) $^ -O3 -o $@
 
-# Compile benchmark files
-perf/%.o: perf/%.cpp
+# Compile benchmark files to build directory
+$(BUILD_DIR)/perf/%.o: perf/%.cpp | $(BUILD_DIR)
 	@if [ -z "$(NP)" ]; then \
 		echo "NP not set"; exit 1; \
 	fi
+	@mkdir -p $(dir $@)
 	@echo "Compiling benchmark $<"
 	@start=$$(date +%s.%N); \
 	$(CXX) $< $(CXXFLAGS) -c -o $@ -DNP=$(NP); \
