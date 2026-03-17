@@ -57,7 +57,7 @@ void dwarf_print_local_vars(int pid);
 extern int choose_many[450];
 
 /* Forward declarations for command handlers */
-static int cmd_c(char *args);
+static int cmd_bfs(char *args);
 static int cmd_q(char *args);
 static int cmd_help(char *args);
 static int cmd_sw(char *args);
@@ -74,6 +74,8 @@ static int cmd_ls(char *args);
 static int cmd_stat(char *args);
 static int cmd_hexdump(char *args);
 static int cmd_diff(char *args);
+static int cmd_dfs(char *args);
+static int cmd_rand(char *args);
 
 static struct
 {
@@ -82,8 +84,9 @@ static struct
   int (*handler)(char *);
 } cmd_table[] = {
     {"help", "Display informations about all supported commands", cmd_help},
-    {"c", "Continue the execution of the program, start from current state",
-     cmd_c},
+    {"bfs", "Perform breadth-first search from current state", cmd_bfs},
+    {"dfs", "Perform depth-first search from current state", cmd_dfs},
+    {"rand", "Perform random search from current state", cmd_rand},
     {"q", "Exit ptraceMC", cmd_q},
     {"si", "Step from current state, on focused process", cmd_si},
     {"sw", "Switch control focus on the n-th process", cmd_sw},
@@ -172,12 +175,57 @@ void cleanup_readline()
   clear_history();
 }
 
-static int cmd_c(char *args)
+static int cmd_rand(char *args)
 {
   auto_mode = 1;
-  exec_cont();
+  char *arg = strtok(args, " ");
+  if (arg == NULL)
+  {
+    detsim::ui::ui_printf("No Arguments! Please specify depth.\n");
+    return 1;
+  }
+  
+  int depth = atoi(arg);
+  if (depth <= 0)
+  {
+    detsim::ui::ui_printf("Invalid depth %d. Please specify a positive integer.\n", depth);
+    return 1;
+  }
+  
+  // TODO()
+  exec_rand(depth);
   auto_mode = 0;
   return 0;
+}
+
+static int cmd_bfs(char *args)
+{
+  auto_mode = 1;
+  exec_bfs();
+  auto_mode = 0;
+  return 0;
+}
+
+static int cmd_dfs(char *args)
+{
+  auto_mode = 1;
+  char *arg = strtok(args, " ");
+  if (arg == NULL)
+  {
+    detsim::ui::ui_printf("No Arguments! Please specify depth.\n");
+    return 1;
+  }
+  
+  int depth = atoi(arg);
+  if (depth <= 0)
+  {
+    detsim::ui::ui_printf("Invalid depth %d. Please specify a positive integer.\n", depth);
+    return 1;
+  }
+  
+  int ret =  exec_dfs(depth);
+  auto_mode = 0;
+  return ret;
 }
 
 static int cmd_q(char *args)
@@ -1610,11 +1658,11 @@ void ui_mainloop()
   
   detsim::ui::NCursesUI* ui = get_ncurses_ui();
   
-  /* Handle auto mode */
+  /* Handle auto mode, default to bfs */
   if (is_auto_mode()) {
-    detsim::ui::ui_printf("[DEBUG] Running cmd_c\n");
-    cmd_c(NULL);
-    detsim::ui::ui_printf("[DEBUG] cmd_c returned\n");
+    detsim::ui::ui_printf("[DEBUG] Running cmd_bfs\n");
+    cmd_bfs(NULL);
+    detsim::ui::ui_printf("[DEBUG] cmd_bfs returned\n");
     return;
   }
   

@@ -140,6 +140,10 @@ public:
     
     // Get entry (advanced usage)
     StateEntryPtr get_entry(hash_type hash);
+
+    // Queue management for transparent prefetch
+    void disable_prefetch(void);
+    void enable_prefetch(int prefetch_window);
     
     // Shutdown
     void shutdown();

@@ -225,6 +225,10 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
     }
   } else if (is_auto_mode() && ptmc_state.n_choose != 0 && ptmc_state.mode == PTMC_STATE::MODE_RAND) {
     ptmc_state.choose = rand() % ptmc_state.n_choose; 
+  } else if (is_auto_mode() && ptmc_state.n_choose != 0 && ptmc_state.mode == PTMC_STATE::MODE_DFS) {
+    if (ptmc_state.choose < 0) {
+      ptmc_state.choose = rand() % ptmc_state.n_choose; 
+    }
   }
 
   /* Check and dump for each generated next state */
@@ -957,15 +961,6 @@ static void start_status_monitor() {
   
   /* Open depth statistics file for append */
   std::lock_guard<std::mutex> lock(g_depth_stat_mutex);
-  if (g_depth_stat_file) {
-    fclose(g_depth_stat_file);
-  }
-  g_depth_stat_file = fopen("depth_stats.txt", "a");
-  if (g_depth_stat_file) {
-    fprintf(g_depth_stat_file, "# depth total_states_searched\n");
-    fflush(g_depth_stat_file);
-  }
-  
   g_monitor_thread = std::thread(status_monitor_thread);
 }
 
@@ -973,15 +968,6 @@ static void stop_status_monitor() {
   g_monitor_running = false;
   if (g_monitor_thread.joinable()) {
     g_monitor_thread.join();
-  }
-  
-  /* Close depth statistics file */
-  {
-    std::lock_guard<std::mutex> lock(g_depth_stat_mutex);
-    if (g_depth_stat_file) {
-      fclose(g_depth_stat_file);
-      g_depth_stat_file = nullptr;
-    }
   }
   
   /* Clear depth data points for next run */
@@ -1037,7 +1023,7 @@ bool state_to_be_discarded(int index, syscall_info *infos) {
 }
 
 /* auto mode: */
-int exec_cont()
+int exec_bfs()
 {
   double start_time = gettime();
   // srand(time(NULL));
@@ -1050,6 +1036,7 @@ int exec_cont()
   
   /* Reset StateStore statistics for this run */
   StateStore::instance().reset_stats();
+  StateStore::instance().enable_prefetch(100);
   
   /* Initialize global statistics */
   g_states_searched = 0;
@@ -1137,7 +1124,7 @@ int exec_cont()
       if (ckpt != CKPT_DISCARD && !state_to_be_discarded(i, syscall_info))
       {
         bool is_new = !state_set.count(ptmc_state.dest_state.ss_hash);
-        if (is_new || ptmc_state.mode == PTMC_STATE::MODE_RAND)
+        if (is_new)
         {
           state_queue_append(&ptmc_state.dest_state);
           state_set.emplace(ptmc_state.dest_state.ss_hash);
@@ -1218,6 +1205,184 @@ int exec_cont()
          states_searched_this_run / time_used);
   StateStore::instance().print_stats();
   return 0;
+}
+
+double start_time = 0.0;
+
+static int states_searched_this_run = 0;
+static int states_new_this_run = 0;
+int do_dfs(hash_type ss_hash, int depth)
+{
+  states_searched_this_run++;
+  bool is_new = !state_set.count(ss_hash);
+  if (is_new)
+  {
+    state_set.emplace(ss_hash);
+    states_new_this_run++;
+  }
+  else
+    return 0;
+
+  if (depth <= 0)
+    return 0;
+
+  /* already at this state */
+  sys_state s = sys_state(ss_hash);
+  ptmc_state.source_state = s;
+  syscall_info syscall_info[NP];
+
+  std::vector<int> indexes;
+  for (int i = 0; i < NP; i++)
+  {
+    ptmc_state.status[i] = s.status[i];
+    indexes.push_back(i);
+    if (ptmc_state.source_state.ts_hash[i] == 0)
+    {
+      LOG_CRIT("Child state hash is 0 for tracee %d. This should not happen if the state is properly saved.", i);
+      print_call_stack();
+    }
+  }
+  shuffle(indexes.begin(), indexes.end(), std::default_random_engine(rand()));
+
+  for (auto &i : indexes)
+  {
+    if (DISDEAD(s.status[i]))
+      continue;
+
+    std::vector<int> choices;  
+    ptmc_state.n_choose = 0;
+    ptmc_state.choose = -1;
+    int choosed = 0;
+    int n_choose = -1;
+
+    do {
+      ptmc_state.cursor = i;
+      ptmc_state.source_state = s;
+      for (int j = 0; j < NP; j++)
+      {
+        ptmc_state.status[j] = s.status[j];
+      }
+      auto t_restore_start = std::chrono::high_resolution_clock::now();
+      ptmc_state.source_state.recover_running_state();
+      auto t_restore_end = std::chrono::high_resolution_clock::now();
+      g_restore_time_us += std::chrono::duration_cast<std::chrono::microseconds>(
+          t_restore_end - t_restore_start).count();
+      g_restore_count++;
+      g_states_searched = states_searched_this_run;
+      g_states_new = states_new_this_run;
+      g_queue_size = 0;
+
+      if (choosed)
+      {
+        ptmc_state.n_choose = n_choose;
+        ptmc_state.choose = choices.back();
+        choices.pop_back();
+      }
+
+      for (int j = 0; j < NP; j++)
+        syscall_info[j] = s.child[j].si;
+
+      int ckpt = exec_once(syscall_info + i);
+
+      n_choose = ptmc_state.n_choose;
+      if (!choosed && choices.empty() && n_choose > 1)
+      {
+        choosed = 1;
+        for (int c = 0; c < ptmc_state.n_choose; c++)
+          if (c != ptmc_state.choose)
+            choices.push_back(c);
+        shuffle(choices.begin(), choices.end(), std::default_random_engine(rand()));
+      }
+
+      // save
+      ptmc_state.dest_state = sys_state(syscall_info);
+
+      auto t_save_start = std::chrono::high_resolution_clock::now();
+      ptmc_state.dest_state.save_metadata();
+      auto t_save_end = std::chrono::high_resolution_clock::now();
+      g_save_time_us += std::chrono::duration_cast<std::chrono::microseconds>(
+          t_save_end - t_save_start).count();
+      g_save_count++;
+      state_tree_add(&s, &ptmc_state.dest_state, i,
+                     ptmc_state.n_choose ? ptmc_state.choose : -1);
+      if (check_state() != 0)
+      {
+        stop_status_monitor();
+        detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu sys_states (new: %zu)\n",
+               states_searched_this_run, states_new_this_run);
+        show_syscall_history();
+        double time_used = gettime() - start_time;
+        detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
+               states_searched_this_run / time_used);
+        StateStore::instance().print_stats();
+        return 1;
+      }
+
+      if (ckpt != CKPT_DISCARD && !state_to_be_discarded(i, syscall_info))
+      {
+        LOG_DEBUG("DFS depth %d, tracee %d, choose %d, hash %016lx", depth, i, ptmc_state.choose, ptmc_state.dest_state.ss_hash);
+        if (do_dfs(ptmc_state.dest_state.ss_hash, depth - 1) == 1)
+          return 1;
+      }
+    } while (!choices.empty());
+  }
+  
+  if (sigint_received)
+  {
+    stop_status_monitor();
+    detsim::ui::ui_printf("Program received signal SIGINT, Interrupt.\n");
+    /* Wait for pending StateStore writes to complete to ensure data consistency */
+    detsim::ui::ui_printf("Flushing pending state writes...\n");
+    StateStore::instance().wait_for_completion();
+    /* Flush SysStateStore index to merge incremental entries */
+    SysStateStore::instance().flush_index();
+    detsim::ui::ui_printf("Searched for %zu sys_states (new: %zu), total unique: %zu\n", 
+           states_searched_this_run, states_new_this_run, state_set.size());
+    if (ptmc_state.dest_state.ss_hash == 0)
+      LOG_CRIT("Current state hash is 0. This should not happen if states are properly saved.");
+    show_syscall_history();
+    stop_status_monitor();
+    double time_used = gettime() - start_time;
+    detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
+           states_searched_this_run / time_used);
+    StateStore::instance().print_stats();
+    sigint_received = 0;
+    state_set.clear();
+    return 1;
+  }
+
+  return 0;
+}
+
+int exec_dfs(int depth)
+{
+  srand(time(NULL));
+  ptmc_state.mode = PTMC_STATE::MODE_DFS;
+  StateStore::instance().reset_stats();
+  g_states_searched = 0;
+  g_states_new = 0;
+  states_searched_this_run = 0;
+  states_new_this_run = 0;
+  start_status_monitor();
+
+  StateStore::instance().queue_clear();
+  start_time = gettime();
+
+  do_dfs(ptmc_state.dest_state.ss_hash, depth);
+
+  stop_status_monitor();
+  detsim::ui::ui_printf("Complete explore all %zu sys_states (new: %zu), total unique: %zu\n", 
+         states_searched_this_run, states_new_this_run, state_set.size());
+  show_syscall_history();
+  double time_used = gettime() - start_time;
+  detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
+         states_searched_this_run / time_used);
+  StateStore::instance().print_stats();
+  return 0;
+}
+
+int exec_rand(int depth) {
+    return 0;
 }
 
 /* start tracees, and execute to a FIRST state */

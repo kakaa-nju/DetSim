@@ -83,6 +83,14 @@ void StateStore::init() {
     init(default_config);
 }
 
+void StateStore::disable_prefetch() {
+    config_.prefetch_window = 0;
+}
+
+void StateStore::enable_prefetch(int prefetch_window) {
+    config_.prefetch_window = prefetch_window;
+}
+
 void StateStore::shutdown() {
     if (shutdown_.exchange(true)) return;
     
