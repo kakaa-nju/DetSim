@@ -21,7 +21,7 @@ SRCS = src/main.cpp \
        src/subsys/serialize.cpp src/subsys/sockstate.cpp src/subsys/fsstate.cpp src/subsys/emu.cpp src/subsys/fd_manager.cpp \
        src/utils/utils.cpp src/utils/expr.cpp src/utils/expr_ast.cpp \
        src/utils/expr_lexer.cpp src/utils/expr_parser.cpp \
-       src/utils/resolve.cpp src/utils/crc32.cpp \
+       src/utils/resolve.cpp src/utils/crc32.cpp src/utils/file_lock.cpp \
        examples/raft/plugins/raft_msg_parser.cpp \
        src/ui/ncurses_ui.cpp src/ui/log_wrapper.cpp
 

@@ -8,6 +8,9 @@
 #include "ui/ncurses_ui.h"
 #include "ui/log_wrapper.h"
 
+// File lock
+#include "utils/file_lock.h"
+
 void init_monitor(int argc, char *argv[]);
 void ui_mainloop();
 void init_state();
@@ -22,13 +25,32 @@ extern "C" detsim::ui::NCursesUI* get_ncurses_ui() { return g_ui; }
 
 int main(int argc, char *argv[])
 {
-  /* 解析参数，检查是否有 --no-ui */
+  /* 解析参数，检查是否有 --no-ui 或 --force */
   bool use_ui = true;
+  bool force_lock = false;
   
   for (int i = 1; i < argc; i++) {
     if (strcmp(argv[i], "--no-ui") == 0) {
       use_ui = false;
     }
+    if (strcmp(argv[i], "--force") == 0) {
+      force_lock = true;
+    }
+  }
+  
+  /* 尝试获取文件锁 */
+  if (force_lock) {
+    detsim::utils::FileLock::force_release();
+  }
+  
+  detsim::utils::FileLock::init_signal_handlers();
+  
+  if (!detsim::utils::FileLock::acquire()) {
+    pid_t locker_pid = detsim::utils::FileLock::get_locker_pid();
+    fprintf(stderr, "Error: Another tracer is already running in this directory (PID: %d)\n", 
+            locker_pid);
+    fprintf(stderr, "Use --force to override (will kill the other instance's lock)\n");
+    return 1;
   }
   
   /* 先解析参数（设置 loglevel） */
@@ -82,6 +104,9 @@ int main(int argc, char *argv[])
   /* 清理 */
   g_ui = nullptr;
   detsim::ui::init_log_wrapper(nullptr);
+  
+  /* 释放文件锁 */
+  detsim::utils::FileLock::release();
   
   return 0;
 }
