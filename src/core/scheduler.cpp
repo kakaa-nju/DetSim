@@ -617,6 +617,7 @@ static double gettime()
  * ====================================================================== */
 
 /* Global statistics for status monitor */
+static std::atomic<size_t> g_traces_searched{0};
 static std::atomic<size_t> g_states_searched{0};
 static std::atomic<size_t> g_states_new{0};
 static std::atomic<size_t> g_queue_size{0};
@@ -786,6 +787,7 @@ static void status_monitor_thread() {
     size_t total_sysstates = state_set.size();
     size_t unique_states = g_states_new.load();
     size_t queue_size = g_queue_size.load();
+    size_t traces_searched = g_traces_searched.load();
     /* Calculate real depth from state tree */
     size_t depth = calculate_state_depth(ptmc_state.dest_state.ss_hash);
     
@@ -821,8 +823,8 @@ static void status_monitor_thread() {
       char buf[256];
       
       /* Line 1: Basic stats */
-      snprintf(buf, sizeof(buf), "States: %zu | Unique: %zu | Queued: %zu | Depth: %zu | %.1f/s", 
-               g_states_searched.load(), unique_states, queue_size, depth, states_per_sec);
+      snprintf(buf, sizeof(buf), "States: %zu | Unique: %zu | Queued: %zu | Traces: %zu | Depth: %zu | %.1f/s", 
+               g_states_searched.load(), unique_states, queue_size, traces_searched, depth, states_per_sec);
       ui->set_status_line(1, buf);
       
       /* Line 2: Queues */
@@ -1025,8 +1027,9 @@ bool state_to_be_discarded(int index, syscall_info *infos) {
 /* auto mode: */
 int exec_bfs()
 {
+  ptmc_state.mode = PTMC_STATE::MODE_BFS;
   double start_time = gettime();
-  // srand(time(NULL));
+  srand(time(NULL));
   sys_state *state_fetched = NULL;
   syscall_info syscall_info[NP];
   
@@ -1382,7 +1385,145 @@ int exec_dfs(int depth)
 }
 
 int exec_rand(int depth) {
-    return 0;
+  ptmc_state.mode = PTMC_STATE::MODE_RAND;
+  double start_time = gettime();
+  srand(time(NULL));
+  hash_type current_hash = ptmc_state.dest_state.ss_hash;
+  sys_state s(current_hash);
+
+  /* Statistics for this execution only */
+  size_t states_searched_this_run = 0;
+  size_t states_new_this_run = 0;
+  
+  /* Reset StateStore statistics for this run */
+  StateStore::instance().reset_stats();
+  StateStore::instance().disable_prefetch();
+
+  /* Initialize global statistics */
+  g_queue_size = 0;
+
+  StateStore::instance().queue_clear();
+  state_queue_append(&ptmc_state.dest_state);
+  
+  /* Check if this is a new state or was already in state_set */
+  if (!state_set.count(ptmc_state.dest_state.ss_hash))
+  {
+    states_new_this_run++;
+  }
+  state_set.emplace(ptmc_state.dest_state.ss_hash);
+  states_searched_this_run++;
+  /* Update global stats */
+  g_traces_searched = 0;
+  g_states_searched = states_searched_this_run;
+  g_states_new = states_new_this_run;
+  
+  start_status_monitor();
+
+
+  while (true)
+  {
+    ptmc_state.source_state = s;
+    syscall_info syscall_info[NP];
+    /* Time state restore */
+    auto t_restore_start = std::chrono::high_resolution_clock::now();
+    s.recover_running_state();
+    auto t_restore_end = std::chrono::high_resolution_clock::now();
+    g_restore_time_us += std::chrono::duration_cast<std::chrono::microseconds>(
+        t_restore_end - t_restore_start).count();
+    g_restore_count++;
+
+    for (int k = 0; k < depth; k++) {
+      int i = rand() % NP;
+      if (DISDEAD(ptmc_state.source_state.status[i]))
+        continue;
+
+      for (int j = 0; j < NP; j++)
+      {
+        ptmc_state.status[j] = ptmc_state.source_state.status[j];
+        if (ptmc_state.source_state.ts_hash[j] == 0)
+        {
+          LOG_CRIT("Child state hash is 0 for tracee %d. This should not happen if the state is properly saved.", j);
+          print_call_stack();
+        }
+        syscall_info[j] = ptmc_state.source_state.child[j].si;
+      }
+      ptmc_state.cursor = i;
+
+      int ckpt = exec_once(syscall_info + i);
+
+      ptmc_state.dest_state = sys_state(syscall_info);
+      /* Time state save */
+      auto t_save_start = std::chrono::high_resolution_clock::now();
+      ptmc_state.dest_state.save_metadata();
+      auto t_save_end = std::chrono::high_resolution_clock::now();
+      g_save_time_us += std::chrono::duration_cast<std::chrono::microseconds>(
+          t_save_end - t_save_start).count();
+      g_save_count++;
+      if (ckpt != CKPT_DISCARD && !state_to_be_discarded(i, syscall_info))
+      {
+        bool is_new = !state_set.count(ptmc_state.dest_state.ss_hash);
+        if (is_new)
+        {
+          state_set.emplace(ptmc_state.dest_state.ss_hash);
+          states_new_this_run++;
+        }
+      }
+      states_searched_this_run++;
+      state_tree_add(&ptmc_state.source_state, &ptmc_state.dest_state, i,
+                     ptmc_state.n_choose ? ptmc_state.choose : -1);
+      if (check_state() != 0)
+      {
+        stop_status_monitor();
+        detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu sys_states (new: %zu)\n",
+               states_searched_this_run, states_new_this_run);
+        show_syscall_history();
+        double time_used = gettime() - start_time;
+        detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
+               states_searched_this_run / time_used);
+        StateStore::instance().print_stats();
+        return 0;
+      }
+      g_states_searched = states_searched_this_run;
+      g_states_new = states_new_this_run;
+
+      ptmc_state.source_state = ptmc_state.dest_state;
+    }
+
+    if (sigint_received)
+    {
+      stop_status_monitor();
+      detsim::ui::ui_printf("Program received signal SIGINT, Interrupt.\n");
+      /* Wait for pending StateStore writes to complete to ensure data consistency */
+      detsim::ui::ui_printf("Flushing pending state writes...\n");
+      StateStore::instance().wait_for_completion();
+      /* Flush SysStateStore index to merge incremental entries */
+      SysStateStore::instance().flush_index();
+      detsim::ui::ui_printf("Searched for %zu sys_states (new: %zu), total unique: %zu\n", 
+             states_searched_this_run, states_new_this_run, state_set.size());
+      if (ptmc_state.dest_state.ss_hash == 0)
+        LOG_CRIT("Current state hash is 0. This should not happen if states are properly saved.");
+      show_syscall_history();
+      stop_status_monitor();
+      double time_used = gettime() - start_time;
+      detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
+             states_searched_this_run / time_used);
+      StateStore::instance().print_stats();
+      sigint_received = 0;
+      state_set.clear();
+      return 0;
+    }
+    g_traces_searched++;
+  }
+  stop_status_monitor();
+  detsim::ui::ui_printf("Complete explore all %zu sys_states (new: %zu), total unique: %zu\n", 
+         states_searched_this_run, states_new_this_run, state_set.size());
+  show_syscall_history();
+  double time_used = gettime() - start_time;
+  detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
+         states_searched_this_run / time_used);
+  StateStore::instance().print_stats();
+  
+  return 0;
 }
 
 /* start tracees, and execute to a FIRST state */

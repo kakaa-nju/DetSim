@@ -422,6 +422,9 @@ int poll_msg() {
           if (i != self) {
             /* Active node back; it will be voting by default */
             nodes[i] = raft_add_node(raft, (void *)&addrs[i], i, 0);
+            if (nodes[i] == NULL) {
+              nodes[i] = raft_get_node(raft, i);
+            }
             raft_node_set_active(nodes[i], 1);
           }
         }
