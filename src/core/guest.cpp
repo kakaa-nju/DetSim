@@ -11,11 +11,7 @@
  */
 
 #include "guest.h"
-#include "common.h"
-#include "debug.h"
-#include "emu.h"
 #include "monitor.h"
-#include "utils.h"
 #include <cstdint>
 #include <fcntl.h>
 #include <fmt/format.h>
@@ -33,6 +29,9 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
+
+const uintptr_t available_memory = 0x0000600000000000;
+const uintptr_t syscall_instr = 0x0000600000000ff0;
 
 /* ======================================================================
  * Section 1: Backtrace (Local Unwinding)
@@ -267,7 +266,7 @@ void show_regs(struct user_regs_struct *regs)
  * ====================================================================== */
 
 #define PTRACE_TRAP_SIG (SIGTRAP | 0x80)
-uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
+uint64_t tracee_do_syscall_in_place(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
                            uint64_t rdx, uint64_t r10, uint64_t r8, uint64_t r9)
 {
   /* after last syscall exits */
@@ -327,6 +326,66 @@ uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
 
   return syscall_regs.rax;
 }
+uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
+                           uint64_t rdx, uint64_t r10, uint64_t r8, uint64_t r9)
+{
+  /* after last syscall exits */
+  /* I don't care */
+  /* scanf("%*c"); */
+
+  /* detsim::ui::ui_printf("%d\n", pid); */
+  struct user_regs_struct restore;
+  struct user_regs_struct syscall_regs;
+
+  ptrace_right(PTRACE_GETREGS, pid, NULL, &restore);
+  syscall_regs = restore;
+
+  syscall_regs.rip = syscall_instr;
+  LOG_TRACE("rip syscall enter: %p", (void *)syscall_regs.rip);
+  syscall_regs.orig_rax = SYS_which;
+  syscall_regs.rax = SYS_which;
+  syscall_regs.rdi = rdi;
+  syscall_regs.rsi = rsi;
+  syscall_regs.rdx = rdx;
+  syscall_regs.r10 = r10;
+  syscall_regs.r8 = r8;
+  syscall_regs.r9 = r9;
+  ptrace_right(PTRACE_SETREGS, pid, NULL, &syscall_regs);
+
+  int wstatus = 0;
+  ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
+  waitpid(pid, &wstatus, 0);
+  if (WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) != PTRACE_TRAP_SIG))
+  {
+    LOG_INFO(
+        "ptrace_syscall has wrong stop status. WIFSTOPPED=%s and WSTOPSIG=%s.",
+        WIFSTOPPED(wstatus) ? "true" : "false", strsignal(WSTOPSIG(wstatus)));
+
+    ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
+    waitpid(pid, &wstatus, 0);
+    assert(WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) == PTRACE_TRAP_SIG));
+  }
+
+  /* before syscall enter */
+  /* syscall modified already */
+  LOG_TRACE("To do syscall:");
+  log_regs(&syscall_regs);
+
+  /* push syscall to exit */
+  ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
+  waitpid(pid, &wstatus, 0);
+  assert(WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == PTRACE_TRAP_SIG);
+
+  ptrace_right(PTRACE_GETREGS, pid, NULL, &syscall_regs);
+  LOG_TRACE("Syscall returns %p", (void *)syscall_regs.rax);
+  LOG_TRACE("rip syscall return: %p", (void *)syscall_regs.rip);
+
+  /* restore for another syscall */
+  ptrace_right(PTRACE_SETREGS, pid, NULL, &restore);
+  /* it may stop */
+
+  return syscall_regs.rax;
+}
 
 /* ======================================================================
  * Section 8: Memory Mapping Operations
@@ -340,6 +399,18 @@ void tracee_do_munmap(int pid, uint64_t start, uint64_t end)
 void *tracee_do_mmap(int pid, uint64_t start, uint64_t end, int prot)
 {
   void *ret = (void *)tracee_do_syscall(pid, SYS_mmap, start, end - start,
+                                        prot,
+                                        MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+  if (ret == MAP_FAILED) {
+    LOG_ERROR("mmap failed for %p-%p (prot=%x): %s", 
+              (void*)start, (void*)end, prot, strerror(errno));
+  }
+  return ret;
+}
+
+void *tracee_do_mmap_in_place(int pid, uint64_t start, uint64_t end, int prot)
+{
+  void *ret = (void *)tracee_do_syscall_in_place(pid, SYS_mmap, start, end - start,
                                         prot,
                                         MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
   if (ret == MAP_FAILED) {
@@ -425,12 +496,10 @@ void tracee_backtrace(int pid)
  * Section 10: Temporary Memory Page
  * ====================================================================== */
 
-const uintptr_t available_memory = 0x0000600000000000;
-
 /* Only once for each process */
 void tracee_reserve_temp_page(int pid)
 {
-  tracee_do_mmap(pid, available_memory, available_memory + PAGE_SIZE);
+  tracee_do_mmap_in_place(pid, available_memory, available_memory + PAGE_SIZE);
 }
 
 int tracee_do_open(int pid, const char *filename, uint64_t flags)

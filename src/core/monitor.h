@@ -5,7 +5,6 @@
 #ifndef __MONITOR_H
 #define __MONITOR_H
 
-#include "common.h"
 #include "types.h"
 #include "sockstate.h"
 #include "state.h"
@@ -36,7 +35,7 @@ struct PTMC_STATE {
   hash_type sysstate_hash = 0; /* state in operating system */
   hash_type toload = 0;
 
-  int exited[NP] = {};
+  int status[NP] = {};
   
   SockState sock_states[NP];
   std::shared_ptr<FdManager> fd_managers[NP];  /* Per-process fd allocation */

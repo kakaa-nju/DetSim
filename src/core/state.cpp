@@ -2,6 +2,7 @@
  * state.cpp - State management
  */
 
+#include "proc_status.h"
 #include "state.h"
 #include "config.h"
 #include "guest.h"
@@ -18,6 +19,7 @@
 #include "state_store.h"
 #include "sysstate_store.h"
 #include <assert.h>
+#include <cstdlib>
 #include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
@@ -121,7 +123,7 @@ sys_state::sys_state(struct syscall_info *info)
   {
     child[j] = tracee_state(j, &info[j]);
     child[j].save_full_state();
-    exited[j] = ptmc_state.exited[j];
+    status[j] = ptmc_state.status[j];
     ts_hash[j] = child[j].ts_hash;
     /* Copy Raft check state from ptmc_state to tracee_state for serialization */
     child[j].raft_state = ptmc_state.raft_states[j];
@@ -319,7 +321,7 @@ sys_state::sys_state(hash_type hash)
   
   // Load child states from integrated data (only for valid hashes)
   for (int i = 0; i < NP; i++) {
-    if (!exited[i] && ts_hash[i] != 0) {
+    if (DISALIVE(status[i]) && ts_hash[i] != 0) {
       child[i] = tracee_state(ts_hash[i]);
     }
   }
@@ -1096,7 +1098,7 @@ void sys_state::recover_shared_files()
 void sys_state::recover_running_state()
 {
   for (int i = 0; i < NP; i++) {
-    if (!exited[i]) {
+    if (DISALIVE(status[i])) {
       child[i].recover_running_state(i);
     }
     /* Restore Raft check state from tracee_state to ptmc_state */

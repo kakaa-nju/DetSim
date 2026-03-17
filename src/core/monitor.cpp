@@ -13,7 +13,7 @@
 
 #include "config.h"
 #include "fsstate.h"
-#include "debug.h"
+#include "proc_status.h"
 #include "state.h"
 #include "guest.h"
 #include "scheduler.h"
@@ -1501,10 +1501,10 @@ static int cmd_diff(char *args)
   bool any_diff = false;
   for (int i = 0; i < NP; i++)
   {
-    const char *status_a = state_a.exited[i] ? "exited" : "running";
-    const char *status_b = state_b.exited[i] ? "exited" : "running";
+    const char *status_a = DISDEAD(state_a.status[i]) ? "exited" : "running";
+    const char *status_b = DISDEAD(state_b.status[i]) ? "exited" : "running";
     bool ts_same = state_a.ts_hash[i] == state_b.ts_hash[i];
-    bool exited_same = state_a.exited[i] == state_b.exited[i];
+    bool exited_same = DISDEAD(state_a.status[i]) == DISDEAD(state_b.status[i]);
     
     detsim::ui::ui_printf("  Process %d: ts_hash %s/%s %s, exited=%s/%s %s\n",
            i,
@@ -1526,7 +1526,7 @@ static int cmd_diff(char *args)
     bool proc_has_diff = false;
     
     /* Skip exited processes */
-    if (state_a.exited[i] && state_b.exited[i]) continue;
+    if (DISDEAD(state_a.status[i]) && DISDEAD(state_b.status[i])) continue;
     
     /* Compare tracee_state fields */
     diff_tracee_state(state_a.child[i], state_b.child[i], i, 

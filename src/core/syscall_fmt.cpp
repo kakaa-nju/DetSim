@@ -8,7 +8,6 @@
 #include "state.h"
 #include "guest.h"
 #include <arpa/inet.h>
-#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <string.h>
@@ -283,12 +282,17 @@ void format_recvfrom(char *buf, tracee_state *t, syscall_info *info)
   format_ret(buf + pos, info->rval);
 }
 
-
 /* Format: void *addr (brk/mmap style) */
 void format_addr(char *buf, syscall_info *info)
 {
   int pos = sprintf(buf, "%s(0x%lx) ", syscalls[info->nr], info->args[0]);
   format_ret(buf + pos, info->rval);
+}
+
+void format_tgkill(char *buf, syscall_info *info)
+{
+  sprintf(buf, "%s(%ld, %ld, %ld(%s)) = ?", syscalls[info->nr], info->args[0],
+      info->args[1], info->args[2], strsignal(info->args[2]));
 }
 
 /* Format: int status (exit style) */
@@ -477,6 +481,11 @@ void format(char *buf, tracee_state *t, syscall_info *info)
       break;
     case SYS_clock_nanosleep:
       format_clock_nanosleep(buf, t, info);
+      break;
+
+    /* Exception */
+    case SYS_tgkill:
+      format_tgkill(buf, info);
       break;
 
     /* Process */

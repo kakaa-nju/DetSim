@@ -1,5 +1,5 @@
+#include "proc_status.h"
 #include "scheduler.h"
-#include "common.h"
 #include "debug.h"
 #include "emu.h"
 #include "fsstate.h"
@@ -15,6 +15,7 @@
 /* NCursesUI integration */
 #include "ui/ncurses_ui.h"
 #include "ui/log_wrapper.h"
+#include <csignal>
 
 // 外部声明：get_ncurses_ui 定义在 main.cpp
 extern "C" detsim::ui::NCursesUI* get_ncurses_ui();
@@ -176,8 +177,7 @@ static void on_syscall_enter(pid_t pid, int nr)
     /* Do not allow process quit. While still allow thread quit(TODO). */
     case SYS_exit_group:
     case SYS_exit:
-      /* After yield, rip += 2; mark tracee as EXITED and never get scheduled */
-      tracee_switch_syscall(pid, SYS_sched_yield, 0, 0, 0, 0, 0, 0);
+      do_nosys(pid);
       break;
 
     /* act normally. SYS_sched_yield is preserved for state check */
@@ -191,6 +191,7 @@ static void on_syscall_enter(pid_t pid, int nr)
 #define CKPT_YES 1
 #define CKPT_DISCARD 2
 #define CKPT_EXIT 3
+#define CKPT_STOP 4
 
 int analyze_choose(struct syscall_info *info) { return choose_many[info->nr]; }
 
@@ -378,13 +379,23 @@ int do_one_syscall(pid_t pid, syscall_info *si)
   waitpid(pid, &wstatus, 0);
   if (WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) != PTRACE_TRAP_SIG))
   {
-    LOG_INFO(
-        "ptrace_syscall has wrong stop status. WIFSTOPPED=%s and WSTOPSIG=%s.",
-        WIFSTOPPED(wstatus) ? "true" : "false", strsignal(WSTOPSIG(wstatus)));
-    show_syscall_history();
-    ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
-    waitpid(pid, &wstatus, 0);
-    assert(WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) == PTRACE_TRAP_SIG));
+    switch (WSTOPSIG(wstatus)) {
+      case SIGSEGV:
+      case SIGABRT:
+        LOG_INFO(
+            "ptrace_syscall has wrong stop status. WIFSTOPPED=%s and WSTOPSIG=%s.",
+            WIFSTOPPED(wstatus) ? "true" : "false", strsignal(WSTOPSIG(wstatus)));
+        show_syscall_history();
+        tracee_backtrace(pid);
+        ptmc_state.status[ptmc_state.cursor] = dstatus_crash(WSTOPSIG(wstatus));
+        
+        return CKPT_STOP;
+      default:
+        /* non fatal signal. dismiss */
+        ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
+        waitpid(pid, &wstatus, 0);
+        assert(WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) == PTRACE_TRAP_SIG));
+    }
   }
 
   ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(info), &info);
@@ -394,6 +405,9 @@ int do_one_syscall(pid_t pid, syscall_info *si)
   si->nr = info.entry.nr;
   for (int i = 0; i < 6; i++)
     si->args[i] = info.entry.args[i];
+
+  if (si->nr == SYS_exit || si->nr == SYS_exit_group)
+    ptmc_state.status[ptmc_state.cursor] = dstatus_exit(info.entry.args[0]);
 
   /* exit */
   ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
@@ -440,6 +454,7 @@ static void init_tracee_state(int index)
   /* Preserve memory for parameters. Need recover registers *
    * for the original first syscall. */
   tracee_reserve_temp_page(pid);
+  tracee_write_mem(pid, (void *)(available_memory + 0xff0), "\x0f\x05\x0f\x05\x0f\x05\x0f\x05", 8);
 }
 
 /* loaded, exec 1 STEP, not stored. Save Last syscall into `info` *
@@ -450,7 +465,7 @@ int exec_once(syscall_info *info)
   int index = ptmc_state.cursor;
   pid_t pid = pids[index];
 
-  if (s.exited[index] == 1)
+  if (DISDEAD(s.status[index]))
     return -1;
   LOG_DEBUG("exec_once from state " HASH_FORMAT ":" HASH_FORMAT, s.ss_hash,
             s.child[index].ts_hash);
@@ -467,9 +482,11 @@ int exec_once(syscall_info *info)
       case CKPT_YES:
         return result;
       case CKPT_EXIT:
-        ptmc_state.exited[index] = 1;
-        LOG_DEBUG("Tracee %d set exited", index);
-        return CKPT_YES;
+        UI_LOG_INFO("Tracee %d exited with status %d", index, DEXITSTATUS(ptmc_state.status[index]));
+        return result;
+      case CKPT_STOP:
+        UI_LOG_INFO("Tracee %d stopped for signal %s", index, strsignal(DSTOPSIG(ptmc_state.status[index])));
+        return result;
     }
   }
   return 0;
@@ -519,7 +536,7 @@ void load(hash_type hash)
   ptmc_state.source_state = sys_state(ptmc_state.sysstate_hash);
   for (int i = 0; i < NP; i++)
   {
-    ptmc_state.exited[i] = ptmc_state.source_state.exited[i];
+    ptmc_state.status[i] = ptmc_state.source_state.status[i];
     if (ptmc_state.source_state.ts_hash[i] == 0)
     {
       LOG_CRIT("Child state hash is 0 for tracee %d. This should not happen if the state is properly saved.", i);
@@ -840,7 +857,7 @@ static void status_monitor_thread() {
       /* Line 7: Process status */
       int running = 0, exited = 0;
       for (int i = 0; i < NP; i++) {
-        if (ptmc_state.exited[i]) exited++;
+        if (DISDEAD(ptmc_state.status[i])) exited++;
         else running++;
       }
       snprintf(buf, sizeof(buf), "Procs: %d run | %d exit | Cursor: %d", 
@@ -906,7 +923,7 @@ static void status_monitor_thread() {
       /* Line 7: Process status */
       int running = 0, exited = 0;
       for (int i = 0; i < NP; i++) {
-        if (ptmc_state.exited[i]) exited++;
+        if (DISDEAD(ptmc_state.status[i])) exited++;
         else running++;
       }
       detsim::ui::ui_printf("\033[%d;1H" ANSI_CLEAR_LINE " Processes: %d running | %d exited | Current: %d", 
@@ -1071,10 +1088,7 @@ int exec_cont()
       break;
     default:
       for (int k = 0; k < NP; k++)
-      {
-        if (!ptmc_state.source_state.exited[k])
-          indexes.push_back(k);
-      }
+        indexes.push_back(k);
       shuffle(indexes.begin(), indexes.end(), std::default_random_engine(rand()));
     }
     
@@ -1084,11 +1098,11 @@ int exec_cont()
       ptmc_state.source_state = *state_fetched;
       auto &s = ptmc_state.source_state;
 
-      for (int j = 0; j < NP; j++)
-        ptmc_state.exited[j] = s.exited[j];
-
-      if (ptmc_state.exited[i])
+      if (DISDEAD(s.status[i]))
         continue;
+
+      for (int j = 0; j < NP; j++)
+        ptmc_state.status[j] = s.status[j];
 
       for (int j = 0; j < NP; j++)
         if (s.ts_hash[j] == 0)

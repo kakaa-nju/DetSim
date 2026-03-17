@@ -26,7 +26,7 @@ void tracee_state::serialize(Archive &ar)
 template <class Archive>
 void sys_state::serialize(Archive &ar)
 {
-  ar(ts_hash, exited);
+  ar(ts_hash, status);
 }
 
 template void syscall_info::serialize<cereal::BinaryInputArchive>(

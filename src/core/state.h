@@ -5,13 +5,10 @@
 #ifndef __STATE_H
 #define __STATE_H
 
-#include "common.h"
 #include <sys/user.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
-#include <list>
-#include <cstring>
 #include "sockstate.h"
 #include "fsstate.h"
 
@@ -166,8 +163,8 @@ typedef struct tracee_state
   /* Recover process files */
   void recover_proc_files();
 
-  /* ---------------------------------------------------------
-   * Memory Access
+
+  /* Memory Access
    * --------------------------------------------------------- */
 
   /* Read memory from snapshot */
@@ -196,14 +193,14 @@ typedef struct sys_state
   hash_type ss_hash;
   hash_type ts_hash[NP];
   tracee_state child[NP];
-  int exited[NP];
+  int status[NP];
 
   // Default constructor - value-initialize all members
   sys_state() 
     : ss_hash(0), 
       ts_hash{}, 
       child{}, 
-      exited{} 
+      status{} 
   {}
   
   // Copy control
