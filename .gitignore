@@ -29,6 +29,8 @@
 !src/subsys/*
 !src/utils/
 !src/utils/*
+!src/ui/
+!src/ui/*
 
 # Perf benchmarks
 !perf/
