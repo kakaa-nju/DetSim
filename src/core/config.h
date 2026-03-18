@@ -32,6 +32,12 @@ extern FILE *log_fp;
 /* Auto mode flag (defined in config.cpp) */
 extern int auto_mode;
 
+/* UI mode flag (0 = no UI, 1 = use NCursesUI) */
+extern int use_ui;
+
+/* Batch mode: command script file */
+extern char *batch_file;
+
 /* Cleanup allocated configuration memory */
 void cleanup_config();
 

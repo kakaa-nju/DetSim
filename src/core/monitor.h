@@ -5,10 +5,10 @@
 #ifndef __MONITOR_H
 #define __MONITOR_H
 
-#include "types.h"
+#include "fd_manager.h"
 #include "sockstate.h"
 #include "state.h"
-#include "fd_manager.h"
+#include "types.h"
 #include <memory>
 #include <string>
 #include <unordered_set>
@@ -24,21 +24,29 @@ enum
   PTMC_QUIT
 };
 
-struct PTMC_STATE {
-  enum { MODE_DFS, MODE_BFS, MODE_RAND } mode = MODE_BFS;
+struct PTMC_STATE
+{
+  enum
+  {
+    MODE_DFS,
+    MODE_BFS,
+    MODE_RAND
+  } mode = MODE_BFS;
   int state = PTMC_PRELOAD;
   int cursor = -1;
   int n_choose = 0;
   int choose = -1;
+  int batch_choice_preset =
+      -1; /* Preset choice value from batch file (-1 = not set) */
   sys_state source_state;
   sys_state dest_state;
   hash_type sysstate_hash = 0; /* state in operating system */
   hash_type toload = 0;
 
   int status[NP] = {};
-  
+
   SockState sock_states[NP];
-  std::shared_ptr<FdManager> fd_managers[NP];  /* Per-process fd allocation */
+  std::shared_ptr<FdManager> fd_managers[NP]; /* Per-process fd allocation */
   FileSystemState fs_states[NP];
 
   int pids[NP] = {};
@@ -57,10 +65,10 @@ struct PTMC_STATE {
 
   std::unordered_set<std::string> assertions;
   std::vector<int (*)()> user_checks;
-  
+
   /* Raft consensus checking state - stored per-process */
   raft_check_state raft_states[NP];
-  
+
   // Constructor to ensure proper initialization
   PTMC_STATE() = default;
 };

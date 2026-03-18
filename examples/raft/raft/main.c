@@ -455,17 +455,15 @@ void leader_generate_entries() {
   
   /* Create a new log entry - use static buffer to avoid dangling pointer */
   snprintf(entry_data_storage, sizeof(entry_data_storage), 
-           "entry_%d_from_node_%d", entry_counter++, self);
+           "entry_%d_from_node_%d", entry_counter, self);
   
-  raft_entry_t entry = {
-    .data = {
-      .buf = entry_data_storage,
-      .len = strlen(entry_data_storage) + 1
-    }
-  };
+  raft_entry_t *entry = (raft_entry_t *)malloc(sizeof(raft_entry_t));
+  entry->data.buf = strdup(entry_data_storage);
+  entry->data.len = strlen(entry_data_storage) + 1;
+  entry->id = entry_counter++;
   
   msg_entry_response_t response;
-  int e = raft_recv_entry(raft, &entry, &response);
+  int e = raft_recv_entry(raft, entry, &response);
   
   if (e != 0) {
     /* Entry not accepted (maybe not leader anymore) */
@@ -535,11 +533,11 @@ int main(int argc, const char *argv[]) {
     struct timeval tv_new;
     gettimeofday(&tv_new, NULL);
     int elapsed = ((tv_new.tv_sec - tv_old.tv_sec) * 1000000 + (tv_new.tv_usec - tv_old.tv_usec)) / 1000;
-    raft_periodic(raft, elapsed);
-    tv_old = tv_new;
-    
     /* Leader generates entries periodically */
     leader_generate_entries();
+
+    raft_periodic(raft, elapsed);
+    tv_old = tv_new;
     
     /* Maybe create snapshot */
     maybe_create_snapshot();

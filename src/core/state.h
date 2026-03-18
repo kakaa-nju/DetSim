@@ -5,34 +5,36 @@
 #ifndef __STATE_H
 #define __STATE_H
 
+#include "fsstate.h"
+#include "sockstate.h"
 #include <sys/user.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
-#include "sockstate.h"
-#include "fsstate.h"
 
 /* ======================================================================
  * State Data Format (shared with StateStore)
  * ====================================================================== */
 
-struct StateDataHeader {
-    uint32_t magic;           // 'DSTM' = 0x4453544D
-    uint32_t version;         // 3 (updated for integrated mappings)
-    uint32_t num_regions;     // number of memory regions
-    uint64_t tstate_offset;   // offset to serialized tracee_state
-    uint64_t tstate_size;     // size of serialized tracee_state
-    uint64_t maps_offset;     // offset to mappings data (text format)
-    uint64_t maps_size;       // size of mappings data
-    uint64_t regs_offset;     // offset to register data
+struct StateDataHeader
+{
+  uint32_t magic;         // 'DSTM' = 0x4453544D
+  uint32_t version;       // 3 (updated for integrated mappings)
+  uint32_t num_regions;   // number of memory regions
+  uint64_t tstate_offset; // offset to serialized tracee_state
+  uint64_t tstate_size;   // size of serialized tracee_state
+  uint64_t maps_offset;   // offset to mappings data (text format)
+  uint64_t maps_size;     // size of mappings data
+  uint64_t regs_offset;   // offset to register data
 };
 
-struct RegionInfo {
-    uint64_t start;
-    uint64_t end;
-    uint64_t offset;  // offset in data buffer
-    uint32_t prot;    // protection flags (PROT_READ/WRITE/EXEC)
-    char flags[5];    // original flags string from /proc/pid/maps (e.g., "rwxp")
+struct RegionInfo
+{
+  uint64_t start;
+  uint64_t end;
+  uint64_t offset; // offset in data buffer
+  uint32_t prot;   // protection flags (PROT_READ/WRITE/EXEC)
+  char flags[5];   // original flags string from /proc/pid/maps (e.g., "rwxp")
 };
 
 /* ======================================================================
@@ -55,14 +57,30 @@ struct syscall_info
  * ====================================================================== */
 
 /* Raft-specific state stored per tracee for safety checking */
-struct raft_check_state {
+struct raft_check_state
+{
   long current_term = 0;
   int is_leader = 0;
   long last_log_term = 0;
-  
+
+  /* Extended state for comprehensive bug detection */
+  long commit_idx = 0;
+  long applied_idx = 0;
+  long last_idx = 0;
+
+  /* Vote integrity checking */
+  long voted_for = -1;
+
+  /* Leader state tracking */
+  long match_idx[3] = {0, 0, 0};
+  long next_idx[3] = {0, 0, 0};
+
   template <class Archive>
-  void serialize(Archive &ar) {
-    ar(current_term, is_leader, last_log_term);
+  void serialize(Archive &ar)
+  {
+    ar(current_term, is_leader, last_log_term, commit_idx, applied_idx,
+       last_idx, voted_for, match_idx[0], match_idx[1], match_idx[2],
+       next_idx[0], next_idx[1], next_idx[2]);
   }
 };
 
@@ -77,10 +95,10 @@ typedef struct tracee_state
   struct timeval tv;
   FileSystemState fs_state;
   SockState sock_state;
-  
+
   /* Raft consensus checking state - stored per state for BFS correctness */
   raft_check_state raft_state;
-  
+
   /* FdManager state - saved to preserve fd allocation state */
   FdManager fd_manager_state;
 
@@ -96,26 +114,21 @@ typedef struct tracee_state
 
   // Default constructor - value-initialize all members
   tracee_state()
-    : ts_hash(0),
-      si{},
-      pid(0),
-      brk(0),
-      tv{0, 0},
-      fs_state(),
-      sock_state(),
-      raft_state()
-  {}
-  
+      : ts_hash(0), si{}, pid(0), brk(0), tv{0, 0}, fs_state(), sock_state(),
+        raft_state()
+  {
+  }
+
   ~tracee_state() = default;
-  
+
   // Copy control
-  tracee_state(const tracee_state& other) = default;
-  tracee_state& operator=(const tracee_state& other) = default;
-  
+  tracee_state(const tracee_state &other) = default;
+  tracee_state &operator=(const tracee_state &other) = default;
+
   // Move control - explicitly default
-  tracee_state(tracee_state&& other) noexcept = default;
-  tracee_state& operator=(tracee_state&& other) noexcept = default;
-  
+  tracee_state(tracee_state &&other) noexcept = default;
+  tracee_state &operator=(tracee_state &&other) noexcept = default;
+
   // Explicit memory cleanup - call after copying to ptmc_state to free source
   void clear();
 
@@ -163,7 +176,6 @@ typedef struct tracee_state
   /* Recover process files */
   void recover_proc_files();
 
-
   /* Memory Access
    * --------------------------------------------------------- */
 
@@ -196,20 +208,15 @@ typedef struct sys_state
   int status[NP];
 
   // Default constructor - value-initialize all members
-  sys_state() 
-    : ss_hash(0), 
-      ts_hash{}, 
-      child{}, 
-      status{} 
-  {}
-  
+  sys_state() : ss_hash(0), ts_hash{}, child{}, status{} {}
+
   // Copy control
-  sys_state(const sys_state& other) = default;
-  sys_state& operator=(const sys_state& other) = default;
-  
+  sys_state(const sys_state &other) = default;
+  sys_state &operator=(const sys_state &other) = default;
+
   // Move control - explicitly default
-  sys_state(sys_state&& other) noexcept = default;
-  sys_state& operator=(sys_state&& other) noexcept = default;
+  sys_state(sys_state &&other) noexcept = default;
+  sys_state &operator=(sys_state &&other) noexcept = default;
 
   /* From running processes */
   sys_state(struct syscall_info *info);
@@ -218,7 +225,7 @@ typedef struct sys_state
   sys_state(hash_type hash);
 
   ~sys_state(){};
-  
+
   // Explicit memory cleanup - call after copying to ptmc_state to free source
   void clear();
 
