@@ -4,3 +4,6 @@
 [submodule "third_party/cereal"]
 	path = third_party/cereal
 	url = https://github.com/USCiLab/cereal.git
+[submodule "examples/redisraft/raft"]
+	path = examples/redisraft/raft
+	url = https://github.com/redislabs/raft

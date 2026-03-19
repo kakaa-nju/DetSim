@@ -19,21 +19,6 @@
 #include <cstring>
 #include <fmt/format.h>
 
-/* Forward declaration of log structure to access internals
- * This matches the layout in raft/src/raft_log.c
- */
-typedef struct
-{
-  int size;
-  int count;
-  int front;
-  int back;
-  int base;
-  void *entries;
-  void *cb;
-  void *raft;
-} log_private_t;
-
 extern "C"
 {
 
@@ -53,7 +38,7 @@ extern "C"
       return 0;
     }
     std::string term_expr =
-        fmt::format("((raft_server_private_t*)raft)->current_term");
+        fmt::format("((raft_server*)raft)->current_term");
     return eval<long>(term_expr.c_str(), node_id, success);
   }
 
@@ -64,10 +49,9 @@ extern "C"
       *success = false;
       return false;
     }
-    std::string state_expr =
-        fmt::format("((raft_server_private_t*)raft)->state");
+    std::string state_expr = fmt::format("((raft_server*)raft)->state");
     int state = eval<int>(state_expr.c_str(), node_id, success);
-    return *success && state == 3;
+    return *success && state == 4; // RAFT_STATE_LEADER = 4 in redisraft
   }
 
   long get_snapshot_term(int node_id, bool *success)
@@ -78,7 +62,7 @@ extern "C"
       return 0;
     }
     std::string snap_term_expr =
-        fmt::format("((raft_server_private_t*)raft)->snapshot_last_term");
+        fmt::format("((raft_server*)raft)->snapshot_last_term");
     return eval<long>(snap_term_expr.c_str(), node_id, success);
   }
 
@@ -89,7 +73,7 @@ extern "C"
       *success = false;
       return -1;
     }
-    std::string expr = fmt::format("((raft_server_private_t*)raft)->voted_for");
+    std::string expr = fmt::format("((raft_server*)raft)->voted_for");
     return eval<long>(expr.c_str(), node_id, success);
   }
 
@@ -100,8 +84,7 @@ extern "C"
       *success = false;
       return 0;
     }
-    std::string expr =
-        fmt::format("((raft_server_private_t*)raft)->commit_idx");
+    std::string expr = fmt::format("((raft_server*)raft)->commit_idx");
     return eval<long>(expr.c_str(), node_id, success);
   }
 
@@ -113,13 +96,11 @@ extern "C"
       return 0;
     }
     std::string expr =
-        fmt::format("((raft_server_private_t*)raft)->last_applied_idx");
+        fmt::format("((raft_server*)raft)->last_applied_idx");
     return eval<long>(expr.c_str(), node_id, success);
   }
 
-  /* Get current log index by accessing log structure directly
-   * current_idx = log->base + log->count
-   */
+  /* Get current log index using redisraft's log_impl interface */
   long get_current_idx(int node_id, bool *success)
   {
     if (!is_node_initialized(node_id))
@@ -127,11 +108,9 @@ extern "C"
       *success = false;
       return 0;
     }
-    // Access log_private_t fields directly
-    // base is at offset 16, count is at offset 4
-    std::string expr = fmt::format(
-        "((log_private_t*)((raft_server_private_t*)raft)->log)->base + "
-        "((log_private_t*)((raft_server_private_t*)raft)->log)->count");
+    // Use raft_get_current_idx function
+    std::string expr =
+        fmt::format("raft_get_current_idx((raft_server*)raft)");
     return eval<long>(expr.c_str(), node_id, success);
   }
 
@@ -142,13 +121,13 @@ extern "C"
       *success = false;
       return 0;
     }
-    std::string expr = fmt::format("((raft_server_private_t*)raft)->num_nodes");
+    std::string expr = fmt::format("((raft_server*)raft)->num_nodes");
     return eval<int>(expr.c_str(), node_id, success);
   }
 
   /* Safe helper to get log entry term at specific index
    * Returns 0 on success, -1 on error
-   * Uses direct structure access instead of function calls
+   * Uses redisraft's log_impl get() function
    */
   int get_log_entry_term(int node_id, long idx, long *term_out)
   {
@@ -157,60 +136,15 @@ extern "C"
 
     bool success = false;
 
-    // Get log pointer
-    std::string log_expr = fmt::format("((raft_server_private_t*)raft)->log");
-    uintptr_t log_ptr = eval<uintptr_t>(log_expr.c_str(), node_id, &success);
-    if (!success)
-      return -1;
-
-    // Read count and base from log_private_t
-    std::string count_expr =
-        fmt::format("((log_private_t*){})->count", log_ptr);
-    long count = eval<long>(count_expr.c_str(), node_id, &success);
-    if (!success)
-      return -1;
-
-    std::string base_expr = fmt::format("((log_private_t*){})->base", log_ptr);
-    long base = eval<long>(base_expr.c_str(), node_id, &success);
-    if (!success)
-      return -1;
-
-    // Check if index is valid
-    // if (idx <= base || idx > base + count)
-    //   return -1;
-
-    // Get entries array and other fields for circular buffer calculation
-    std::string entries_expr =
-        fmt::format("((log_private_t*){})->entries", log_ptr);
-    uintptr_t entries_array =
-        eval<uintptr_t>(entries_expr.c_str(), node_id, &success);
-    if (!success || entries_array == 0)
-      return -1;
-
-    std::string front_expr =
-        fmt::format("((log_private_t*){})->front", log_ptr);
-    long front = eval<long>(front_expr.c_str(), node_id, &success);
-    if (!success)
-      return -1;
-
-    std::string size_expr = fmt::format("((log_private_t*){})->size", log_ptr);
-    long size = eval<long>(size_expr.c_str(), node_id, &success);
-    if (!success || size <= 0)
-      return -1;
-
-    // Calculate position in circular buffer
-    long logical_idx = idx - base - 1;
-    long physical_idx = (front + logical_idx) % size;
-
-    // Access entry pointer from entries array
-    std::string entry_ptr_expr =
-        fmt::format("&((raft_entry_t *){})[{}]", entries_array, physical_idx);
+    // Get the entry using raft_get_entry_from_idx
+    std::string entry_expr = fmt::format(
+        "raft_get_entry_from_idx((raft_server*)raft, {})", idx);
     uintptr_t entry_ptr =
-        eval<uintptr_t>(entry_ptr_expr.c_str(), node_id, &success);
+        eval<uintptr_t>(entry_expr.c_str(), node_id, &success);
     if (!success || entry_ptr == 0)
       return -1;
 
-    // Read term from entry (first field in raft_entry_t is term)
+    // Read term from entry
     std::string term_expr = fmt::format("((raft_entry_t*){})->term", entry_ptr);
     long term = eval<long>(term_expr.c_str(), node_id, &success);
     if (!success)
@@ -290,7 +224,7 @@ extern "C"
 
       bool success = false;
       std::string snap_idx_expr =
-          fmt::format("((raft_server_private_t*)raft)->snapshot_last_idx");
+          fmt::format("((raft_server*)raft)->snapshot_last_idx");
       long snap_idx = eval<long>(snap_idx_expr.c_str(), i, &success);
       long snap_term = get_snapshot_term(i, &success);
       long current_term = get_node_term(i, &success);
@@ -327,14 +261,11 @@ extern "C"
         if (j == i)
           continue;
 
+        // Access raft_node_t fields directly through nodes array
         std::string next_expr =
-            fmt::format("((raft_node_private_t*)((raft_server_private_t*)raft)-"
-                        ">nodes[{}])->next_idx",
-                        j);
+            fmt::format("((raft_server*)raft)->nodes[{}]->next_idx", j);
         std::string match_expr =
-            fmt::format("((raft_node_private_t*)((raft_server_private_t*)raft)-"
-                        ">nodes[{}])->match_idx",
-                        j);
+            fmt::format("((raft_server*)raft)->nodes[{}]->match_idx", j);
 
         long next_idx = eval<long>(next_expr.c_str(), i, &success);
         if (!success)
@@ -454,9 +385,7 @@ extern "C"
         continue;
 
       std::string match_expr =
-          fmt::format("((raft_node_private_t*)((raft_server_private_t*)raft)->"
-                      "nodes[{}])->match_idx",
-                      j);
+          fmt::format("((raft_server*)raft)->nodes[{}]->match_idx", j);
       long match_idx = eval<long>(match_expr.c_str(), node_id, &success);
       if (!success)
         continue;
@@ -474,12 +403,6 @@ extern "C"
     return 0;
   }
 
-  /* Get actual leader - the node with highest term among those claiming
-   * leadership This handles network partition scenarios where an old leader may
-   * still think it's leader (state == 3) but is actually stale. The leader with
-   * highest term is considered the actual leader. Returns node_id of actual
-   * leader, or -1 if no leader found
-   */
   int get_actual_leader()
   {
     int actual_leader = -1;
@@ -489,16 +412,13 @@ extern "C"
     {
       bool success = false;
 
-      // Must claim to be leader
       if (!is_node_leader(i, &success) || !success)
         continue;
 
-      // Get its term
       long term = get_node_term(i, &success);
       if (!success)
         continue;
 
-      // Select leader with highest term
       if (term > max_term)
       {
         max_term = term;
@@ -511,17 +431,17 @@ extern "C"
 
   int check_committed_entries_replicated_to_majority()
   {
-    std::map<long, long> committed_entries;   // idx -> term
-    std::vector<int> committed_entries_quorum; // For quick majority check
+    std::map<long, long> committed_entries;
+    std::vector<int> committed_entries_quorum;
 
     int leader_idx = get_actual_leader();
     if (leader_idx < 0)
-      return 0; // No leader currently, skip check
+      return 0;
 
     bool success = false;
     long commit_idx = get_commit_idx(leader_idx, &success);
     if (commit_idx <= 0)
-      return 0; // No committed entries, skip check
+      return 0;
 
     committed_entries_quorum.resize(commit_idx + 1, 0);
 
@@ -574,11 +494,12 @@ extern "C"
     {
       if (committed_entries_quorum[idx] + 1 < (NP + 1) / 2)
       {
+        detsim::ui::ui_printf("\n[CHECK FAILED] Committed entry did not reach "
+                              "majority at index %ld!\n",
+                              idx);
         detsim::ui::ui_printf(
-            "\n[CHECK FAILED] Committed entry did not reach majority at index %ld!\n",
-            idx);
-        detsim::ui::ui_printf("  idx=%ld, term=%ld, replicated on %d nodes (including leader)\n", idx,
-                              committed_entries[idx], committed_entries_quorum[idx] + 1);
+            "  idx=%ld, term=%ld, replicated on %d nodes (including leader)\n",
+            idx, committed_entries[idx], committed_entries_quorum[idx] + 1);
         detsim::ui::ui_printf(
             "  This violates Raft's commitment safety property!\n");
         return 1;
@@ -589,18 +510,6 @@ extern "C"
 
   int check_leader_completeness()
   {
-    /* Leader Completeness Check (Raft Section 5.4.2):
-     * If a log entry is committed in a given term, then it will be present
-     * in the logs of the leaders for all higher-numbered terms.
-     *
-     * NOTE: This checks for ENTRIES existence, not commit_idx monotonicity.
-     * commit_idx is volatile state that may temporarily be lower on new Leader.
-     *
-     * We only check when there's an actual leader to avoid false positives
-     * during election or network partitions.
-     */
-
-    // Find actual leader (highest term among those claiming leadership)
     int leader_id = -1;
     long max_term = -1;
     for (int i = 0; i < NP; i++)
@@ -617,10 +526,9 @@ extern "C"
     }
 
     if (leader_id < 0)
-      return 0; // No leader currently
+      return 0;
 
-    // Collect all committed entries from all nodes
-    std::map<long, long> committed_entries; // idx -> term
+    std::map<long, long> committed_entries;
     for (int i = 0; i < NP; i++)
     {
       if (!is_node_initialized(i))
@@ -631,7 +539,6 @@ extern "C"
       if (!success || commit_idx <= 0)
         continue;
 
-      // Sample committed entries (up to 20)
       long check_limit = std::min(commit_idx, 20L);
       for (long idx = 1; idx <= check_limit; idx++)
       {
@@ -648,7 +555,6 @@ extern "C"
 
         if (committed_entries.count(idx))
         {
-          // Verify consistency
           if (committed_entries[idx] != entry_term)
           {
             detsim::ui::ui_printf(
@@ -658,15 +564,13 @@ extern "C"
                                   committed_entries[idx]);
             return 1;
           }
-
-          else
-          {
-            committed_entries[idx] = entry_term;
-          }
+        }
+        else
+        {
+          committed_entries[idx] = entry_term;
         }
       }
 
-      // Verify leader has all committed entries (Leader Completeness)
       for (const auto &entry : committed_entries)
       {
         long idx = entry.first;
@@ -676,21 +580,17 @@ extern "C"
 
         if (result != 0)
         {
-          // Entry not in leader's log array - check if it's in snapshot
           bool success = false;
           long snap_idx = 0;
           std::string snap_idx_expr =
-              fmt::format("((raft_server_private_t*)raft)->snapshot_last_idx");
+              fmt::format("((raft_server*)raft)->snapshot_last_idx");
           snap_idx = eval<long>(snap_idx_expr.c_str(), leader_id, &success);
 
           if (success && snap_idx > 0 && idx <= snap_idx)
           {
-            // Entry is in snapshot, consider it as present
             continue;
           }
 
-          // Entry not in log and not in snapshot - violates Leader
-          // Completeness!
           detsim::ui::ui_printf(
               "\n[CHECK FAILED] Leader %d missing committed entry %ld!\n",
               leader_id, idx);
@@ -711,7 +611,6 @@ extern "C"
           return 1;
         }
       }
-
     }
 
     return 0;
@@ -756,14 +655,10 @@ extern "C"
           if (j == i)
             continue;
 
-          std::string match_expr =
-              fmt::format("((raft_node_private_t*)((raft_server_private_t*)"
-                          "raft)->nodes[{}])->match_idx",
-                          j);
-          std::string next_expr =
-              fmt::format("((raft_node_private_t*)((raft_server_private_t*)"
-                          "raft)->nodes[{}])->next_idx",
-                          j);
+          std::string match_expr = fmt::format(
+              "((raft_server*)raft)->nodes[{}]->match_idx", j);
+          std::string next_expr = fmt::format(
+              "((raft_server*)raft)->nodes[{}]->next_idx", j);
 
           long match_idx = eval<long>(match_expr.c_str(), i, &success);
           if (success)
@@ -805,5 +700,4 @@ extern "C"
 
     return result;
   }
-
-} // extern "C"
+}

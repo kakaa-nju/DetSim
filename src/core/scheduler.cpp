@@ -1218,22 +1218,12 @@ int exec_bfs()
                             t_save_end - t_save_start)
                             .count();
       g_save_count++;
-      if (ckpt != CKPT_DISCARD && !state_to_be_discarded(i, syscall_info))
-      {
-        bool is_new = !state_set.count(ptmc_state.dest_state.ss_hash);
-        if (is_new)
-        {
-          state_queue_append(&ptmc_state.dest_state);
-          state_set.emplace(ptmc_state.dest_state.ss_hash);
-          states_new_this_run++;
-        }
-      }
       states_searched_this_run++;
       state_tree_add(&s, &ptmc_state.dest_state, i,
                      ptmc_state.n_choose ? ptmc_state.choose : -1);
-      if (check_state() != 0)
+      int check_result = check_state();
+      if (check_result != 0)
       {
-        stop_status_monitor();
         detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu "
                               "sys_states (new: %zu)\n",
                               states_searched_this_run, states_new_this_run);
@@ -1244,7 +1234,18 @@ int exec_bfs()
         StateStore::instance().print_stats();
         state_fetched->clear();
         delete state_fetched;
-        return 0;
+      }
+
+      if (ckpt != CKPT_DISCARD && !state_to_be_discarded(i, syscall_info))
+      {
+        bool is_new = !state_set.count(ptmc_state.dest_state.ss_hash);
+        if (is_new)
+        {
+          if (check_result == 0)
+            state_queue_append(&ptmc_state.dest_state);
+          state_set.emplace(ptmc_state.dest_state.ss_hash);
+          states_new_this_run++;
+        }
       }
 
       if (ptmc_state.n_choose)
@@ -1255,9 +1256,6 @@ int exec_bfs()
           if (ptmc_state.choose < ptmc_state.n_choose)
             goto again;
           ptmc_state.choose = 0;
-        }
-        else if (ptmc_state.mode == PTMC_STATE::MODE_RAND)
-        {
         }
       }
     }
