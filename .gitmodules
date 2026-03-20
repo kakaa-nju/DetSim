@@ -6,4 +6,4 @@
 	url = https://github.com/USCiLab/cereal.git
 [submodule "examples/redisraft/raft"]
 	path = examples/redisraft/raft
-	url = https://github.com/redislabs/raft
+	url = https://github.com/Tilnel/redisraft
