@@ -109,18 +109,9 @@ std::string parse_requestvote_response(const void *buf, size_t len)
   if (!read_value(ptr, remaining, msg.vote_granted))
     return "REQUEST_VOTE_RSP[malformed]";
 
-  int sender = -1;
-  if (remaining >= 4)
-  {
-    read_value(ptr, remaining, sender);
-  }
-
   std::ostringstream oss;
   oss << "REQUEST_VOTE_RSP{term=" << msg.term
-      << ", granted=" << (msg.vote_granted ? "Y" : "N");
-  if (sender >= 0)
-    oss << ", from=" << sender;
-  oss << "}";
+      << ", granted=" << (msg.vote_granted ? "Y" : "N") << "}";
   return oss.str();
 }
 

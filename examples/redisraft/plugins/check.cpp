@@ -37,8 +37,7 @@ extern "C"
       *success = false;
       return 0;
     }
-    std::string term_expr =
-        fmt::format("((raft_server*)raft)->current_term");
+    std::string term_expr = fmt::format("((raft_server*)raft)->current_term");
     return eval<long>(term_expr.c_str(), node_id, success);
   }
 
@@ -95,12 +94,11 @@ extern "C"
       *success = false;
       return 0;
     }
-    std::string expr =
-        fmt::format("((raft_server*)raft)->last_applied_idx");
+    std::string expr = fmt::format("((raft_server*)raft)->last_applied_idx");
     return eval<long>(expr.c_str(), node_id, success);
   }
 
-  /* Get current log index using redisraft's log_impl interface */
+  /* Get current log index using redisraft's log structure */
   long get_current_idx(int node_id, bool *success)
   {
     if (!is_node_initialized(node_id))
@@ -108,10 +106,21 @@ extern "C"
       *success = false;
       return 0;
     }
-    // Use raft_get_current_idx function
-    std::string expr =
-        fmt::format("raft_get_current_idx((raft_server*)raft)");
-    return eval<long>(expr.c_str(), node_id, success);
+    // Get log pointer first
+    std::string log_expr = fmt::format("((raft_server*)raft)->log");
+    uintptr_t log_ptr = eval<uintptr_t>(log_expr.c_str(), node_id, success);
+    if (!*success)
+      return 0;
+    // Get base and count, then add them
+    std::string base_expr = fmt::format("((raft_log_t*){})->base", log_ptr);
+    std::string count_expr = fmt::format("((raft_log_t*){})->count", log_ptr);
+    long base = eval<long>(base_expr.c_str(), node_id, success);
+    if (!*success)
+      return 0;
+    long count = eval<long>(count_expr.c_str(), node_id, success);
+    if (!*success)
+      return 0;
+    return base + count;
   }
 
   int get_node_count(int node_id, bool *success)
@@ -127,7 +136,7 @@ extern "C"
 
   /* Safe helper to get log entry term at specific index
    * Returns 0 on success, -1 on error
-   * Uses redisraft's log_impl get() function
+   * Uses direct log structure access
    */
   int get_log_entry_term(int node_id, long idx, long *term_out)
   {
@@ -136,11 +145,54 @@ extern "C"
 
     bool success = false;
 
-    // Get the entry using raft_get_entry_from_idx
-    std::string entry_expr = fmt::format(
-        "raft_get_entry_from_idx((raft_server*)raft, {})", idx);
+    // Get log pointer
+    std::string log_expr = fmt::format("((raft_server*)raft)->log");
+    uintptr_t log_ptr = eval<uintptr_t>(log_expr.c_str(), node_id, &success);
+    if (!success)
+      return -1;
+
+    // Read count and base from log
+    std::string count_expr = fmt::format("((raft_log_t*){})->count", log_ptr);
+    long count = eval<long>(count_expr.c_str(), node_id, &success);
+    if (!success)
+      return -1;
+
+    std::string base_expr = fmt::format("((raft_log_t*){})->base", log_ptr);
+    long base = eval<long>(base_expr.c_str(), node_id, &success);
+    if (!success)
+      return -1;
+
+    // Check if index is valid
+    if (idx <= base || idx > base + count)
+      return -1;
+
+    // Get entries array and other fields for circular buffer calculation
+    std::string entries_expr =
+        fmt::format("((raft_log_t*){})->entries", log_ptr);
+    uintptr_t entries_array =
+        eval<uintptr_t>(entries_expr.c_str(), node_id, &success);
+    if (!success || entries_array == 0)
+      return -1;
+
+    std::string front_expr = fmt::format("((raft_log_t*){})->front", log_ptr);
+    long front = eval<long>(front_expr.c_str(), node_id, &success);
+    if (!success)
+      return -1;
+
+    std::string size_expr = fmt::format("((raft_log_t*){})->size", log_ptr);
+    long size = eval<long>(size_expr.c_str(), node_id, &success);
+    if (!success || size <= 0)
+      return -1;
+
+    // Calculate position in circular buffer
+    long logical_idx = idx - base - 1;
+    long physical_idx = (front + logical_idx) % size;
+
+    // Access entry pointer from entries array
+    std::string entry_ptr_expr =
+        fmt::format("((raft_entry_t**){})[{}]", entries_array, physical_idx);
     uintptr_t entry_ptr =
-        eval<uintptr_t>(entry_expr.c_str(), node_id, &success);
+        eval<uintptr_t>(entry_ptr_expr.c_str(), node_id, &success);
     if (!success || entry_ptr == 0)
       return -1;
 
@@ -655,10 +707,10 @@ extern "C"
           if (j == i)
             continue;
 
-          std::string match_expr = fmt::format(
-              "((raft_server*)raft)->nodes[{}]->match_idx", j);
-          std::string next_expr = fmt::format(
-              "((raft_server*)raft)->nodes[{}]->next_idx", j);
+          std::string match_expr =
+              fmt::format("((raft_server*)raft)->nodes[{}]->match_idx", j);
+          std::string next_expr =
+              fmt::format("((raft_server*)raft)->nodes[{}]->next_idx", j);
 
           long match_idx = eval<long>(match_expr.c_str(), i, &success);
           if (success)

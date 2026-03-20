@@ -1097,6 +1097,7 @@ static void stop_status_monitor()
 
 bool state_to_be_discarded(int index, syscall_info *infos)
 {
+  return 0;
   if (index == 0)
   {
     uintptr_t raft = eval<uintptr_t>("((raft_server_private_t *)raft)", 0);

@@ -1,14 +1,14 @@
 .PHONY: all debug release wc clean clear benchmark
 
 CC = gcc
-CXX = ccache g++
+CXX = g++
 LD = g++ -L/usr/local/lib
 
 # Build directory
 BUILD_DIR = build
 
 # Include paths
-INCLUDES = -I. -Isrc -Isrc/core -Isrc/subsys -Isrc/utils -Isrc/ui -Ithird_party -Iexamples/raft/plugins
+INCLUDES = -I. -Isrc -Isrc/core -Isrc/subsys -Isrc/utils -Isrc/ui -Ithird_party -Iexamples/redisraft/plugins
 
 CXXFLAGS ?= $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2 -D_FORTIFY_SOURCE=0
 LDFLAGS = -g -ldwarf -lreadline -ldw -lzstd -rdynamic \
@@ -71,7 +71,7 @@ $(BUILD_DIR)/%.o: %.cpp | $(BUILD_DIR)
 
 # Create build directory
 $(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)/src/core $(BUILD_DIR)/src/subsys $(BUILD_DIR)/src/utils $(BUILD_DIR)/src/ui $(BUILD_DIR)/examples/raft/plugins
+	mkdir -p $(BUILD_DIR)/src/core $(BUILD_DIR)/src/subsys $(BUILD_DIR)/src/utils $(BUILD_DIR)/src/ui $(BUILD_DIR)/examples/redisraft/plugins
 
 -include $(DEPS)
 
