@@ -42,17 +42,32 @@ static bool read_value(const uint8_t *&ptr, size_t &remaining, T &out)
   return true;
 }
 
+static bool skip_bytes(const uint8_t *&ptr, size_t &remaining, size_t n)
+{
+  if (remaining < n)
+    return false;
+  ptr += n;
+  remaining -= n;
+  return true;
+}
+
 std::string parse_requestvote(const void *buf, size_t len)
 {
   const uint8_t *ptr = static_cast<const uint8_t *>(buf);
   size_t remaining = len;
 
+  // C struct layout with padding: prevote(4) + pad(4) + term(8) +
+  // candidate_id(4) + pad(4) + last_log_idx(8) + last_log_term(8)
   raft_requestvote_req_t msg;
   if (!read_value(ptr, remaining, msg.prevote))
+    return "REQUEST_VOTE[malformed]";
+  if (!skip_bytes(ptr, remaining, 4)) // padding after prevote
     return "REQUEST_VOTE[malformed]";
   if (!read_value(ptr, remaining, msg.term))
     return "REQUEST_VOTE[malformed]";
   if (!read_value(ptr, remaining, msg.candidate_id))
+    return "REQUEST_VOTE[malformed]";
+  if (!skip_bytes(ptr, remaining, 4)) // padding after candidate_id
     return "REQUEST_VOTE[malformed]";
   if (!read_value(ptr, remaining, msg.last_log_idx))
     return "REQUEST_VOTE[malformed]";
@@ -80,8 +95,12 @@ std::string parse_requestvote_response(const void *buf, size_t len)
   const uint8_t *ptr = static_cast<const uint8_t *>(buf);
   size_t remaining = len;
 
+  // C struct layout with padding: prevote(4) + pad(4) + request_term(8) +
+  // term(8) + vote_granted(4)
   raft_requestvote_resp_t msg;
   if (!read_value(ptr, remaining, msg.prevote))
+    return "REQUEST_VOTE_RSP[malformed]";
+  if (!skip_bytes(ptr, remaining, 4)) // padding after prevote
     return "REQUEST_VOTE_RSP[malformed]";
   if (!read_value(ptr, remaining, msg.request_term))
     return "REQUEST_VOTE_RSP[malformed]";
@@ -110,8 +129,12 @@ std::string parse_appendentries(const void *buf, size_t len)
   const uint8_t *ptr = static_cast<const uint8_t *>(buf);
   size_t remaining = len;
 
+  // C struct layout with padding: leader_id(4) + pad(4) + msg_id(8) + term(8) +
+  // prev_log_idx(8) + prev_log_term(8) + leader_commit(8) + n_entries(8)
   raft_appendentries_req_t msg;
   if (!read_value(ptr, remaining, msg.leader_id))
+    return "APPEND_ENTRIES[malformed]";
+  if (!skip_bytes(ptr, remaining, 4)) // padding after leader_id
     return "APPEND_ENTRIES[malformed]";
   if (!read_value(ptr, remaining, msg.msg_id))
     return "APPEND_ENTRIES[malformed]";
@@ -138,12 +161,16 @@ std::string parse_appendentries_response(const void *buf, size_t len)
   const uint8_t *ptr = static_cast<const uint8_t *>(buf);
   size_t remaining = len;
 
+  // C struct layout with padding: msg_id(8) + term(8) + success(4) + pad(4) +
+  // current_idx(8)
   raft_appendentries_resp_t msg;
   if (!read_value(ptr, remaining, msg.msg_id))
     return "APPEND_ENTRIES_RSP[malformed]";
   if (!read_value(ptr, remaining, msg.term))
     return "APPEND_ENTRIES_RSP[malformed]";
   if (!read_value(ptr, remaining, msg.success))
+    return "APPEND_ENTRIES_RSP[malformed]";
+  if (!skip_bytes(ptr, remaining, 4)) // padding after success
     return "APPEND_ENTRIES_RSP[malformed]";
   if (!read_value(ptr, remaining, msg.current_idx))
     return "APPEND_ENTRIES_RSP[malformed]";
@@ -160,6 +187,8 @@ std::string parse_snapshot(const void *buf, size_t len)
   const uint8_t *ptr = static_cast<const uint8_t *>(buf);
   size_t remaining = len;
 
+  // C struct layout with padding: term(8) + leader_id(4) + pad(4) + msg_id(8) +
+  // snapshot_index(8) + snapshot_term(8) + chunk(32)
   raft_term_t term;
   raft_node_id_t leader_id;
   unsigned long msg_id;
@@ -169,6 +198,8 @@ std::string parse_snapshot(const void *buf, size_t len)
   if (!read_value(ptr, remaining, term))
     return "SNAPSHOT[malformed]";
   if (!read_value(ptr, remaining, leader_id))
+    return "SNAPSHOT[malformed]";
+  if (!skip_bytes(ptr, remaining, 4)) // padding after leader_id
     return "SNAPSHOT[malformed]";
   if (!read_value(ptr, remaining, msg_id))
     return "SNAPSHOT[malformed]";
