@@ -17,7 +17,7 @@ LDFLAGS = -g -ldwarf -lreadline -ldw -lzstd -rdynamic \
 
 # Source files with new directory structure
 SRCS = src/main.cpp \
-       src/core/scheduler.cpp src/core/guest.cpp src/core/monitor.cpp src/core/state.cpp src/core/config.cpp src/core/syscall_fmt.cpp src/core/dwarf.cpp src/core/state_store.cpp src/core/sysstate_store.cpp \
+       src/core/scheduler.cpp src/core/guest.cpp src/core/monitor.cpp src/core/state.cpp src/core/config.cpp src/core/syscall_fmt.cpp src/core/dwarf.cpp src/core/state_store.cpp src/core/state_store_packed.cpp src/core/sysstate_store.cpp \
        src/subsys/serialize.cpp src/subsys/sockstate.cpp src/subsys/fsstate.cpp src/subsys/emu.cpp src/subsys/fd_manager.cpp \
        src/utils/utils.cpp src/utils/expr.cpp src/utils/expr_ast.cpp \
        src/utils/expr_lexer.cpp src/utils/expr_parser.cpp \

@@ -587,6 +587,34 @@ class MSCVisualizer:
         return svg
 
 
+def generate_linear_trace(parser: TraceParser) -> str:
+    """Generate a linear text trace of all send/recv events in global order."""
+    events = []
+
+    for msg in parser.messages.values():
+        events.append(
+            (
+                msg.sent_step,
+                f"SEND  Node {msg.src_node} -> Node {msg.dst_node}: [{msg.msg_type}] {msg.content}",
+            )
+        )
+        if msg.recv_step is not None:
+            events.append(
+                (
+                    msg.recv_step,
+                    f"RECV  Node {msg.dst_node} <- Node {msg.src_node}: [{msg.msg_type}] {msg.content}",
+                )
+            )
+
+    events.sort(key=lambda x: (x[0], 0 if x[1].startswith("SEND") else 1))
+
+    lines = [f"Linear Trace - {len(parser.messages)} messages", "=" * 80]
+    for step, event in events:
+        lines.append(f"Step {step:4d}: {event}")
+
+    return "\n".join(lines)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Visualize network message flow from tracer logs - Smart Layout Edition"
@@ -594,6 +622,11 @@ def main():
     parser.add_argument("logfile", help="Tracer log file to analyze")
     parser.add_argument("-o", "--output", help="Output file (default: stdout)")
     parser.add_argument("--json", action="store_true", help="Export as JSON")
+    parser.add_argument(
+        "--text",
+        action="store_true",
+        help="Output linear text trace of send/recv events",
+    )
 
     args = parser.parse_args()
 
@@ -625,6 +658,8 @@ def main():
             ]
         }
         output = json.dumps(data, indent=2)
+    elif args.text:
+        output = generate_linear_trace(trace_parser)
     else:
         viz = MSCVisualizer(trace_parser)
         output = viz.generate()

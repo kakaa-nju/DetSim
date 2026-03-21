@@ -86,6 +86,8 @@ std::string parse_requestvote(const void *buf, size_t len)
       << ", last_term=" << msg.last_log_term;
   if (sender >= 0)
     oss << ", from=" << sender;
+  if (msg.prevote)
+    oss << ", prevote=1";
   oss << "}";
   return oss.str();
 }
@@ -111,7 +113,10 @@ std::string parse_requestvote_response(const void *buf, size_t len)
 
   std::ostringstream oss;
   oss << "REQUEST_VOTE_RSP{term=" << msg.term
-      << ", granted=" << (msg.vote_granted ? "Y" : "N") << "}";
+      << ", granted=" << (msg.vote_granted ? "Y" : "N");
+  if (msg.prevote)
+    oss << ", prevote=1";
+  oss << "}";
   return oss.str();
 }
 

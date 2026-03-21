@@ -424,6 +424,9 @@ extern "C"
       return 0;
 
     bool success = false;
+    if (!ptmc_state.raft_states[node_id].is_leader)
+      return 0;
+
     if (!is_node_leader(node_id, &success) || !success)
       return 0;
 
