@@ -7,7 +7,6 @@
 #include "cereal/types/deque.hpp"
 #include "cereal/types/map.hpp"
 #include "cereal/types/string.hpp"
-#include "cereal/types/unordered_map.hpp"
 #include "cereal/types/vector.hpp"
 #include "debug.h"
 #include "monitor.h"

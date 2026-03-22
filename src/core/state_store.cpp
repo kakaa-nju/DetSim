@@ -96,6 +96,8 @@ void StateStore::init(const Config &config)
     prefetch_threads_.emplace_back(&StateStore::prefetch_worker, this);
   }
 
+  eviction_thread_ = std::thread(&StateStore::eviction_worker, this);
+
   LOG_INFO("StateStore initialized: hot=%zuMB, warm=%zuMB, prefetch_window=%zu",
            config_.hot_cache_size / (1024 * 1024),
            config_.warm_cache_size / (1024 * 1024), config_.prefetch_window);
@@ -119,11 +121,25 @@ void StateStore::shutdown()
   if (shutdown_.exchange(true))
     return;
 
-  // Notify all workers and waiting producers
-  io_cv_.notify_all();
-  io_queue_not_full_cv_.notify_all();
-  prefetch_cv_.notify_all();
-  inflight_cv_.notify_all();
+  // Notify all condition variables while holding associated mutexes
+  // to prevent missed wakeups
+  {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    io_cv_.notify_all();
+    io_queue_not_full_cv_.notify_all();
+  }
+  {
+    std::lock_guard<std::mutex> lock(prefetch_mutex_);
+    prefetch_cv_.notify_all();
+  }
+  {
+    std::lock_guard<std::mutex> lock(inflight_mutex_);
+    inflight_cv_.notify_all();
+  }
+  {
+    std::lock_guard<std::mutex> lock(eviction_mutex_);
+    eviction_cv_.notify_all();
+  }
 
   // Join persistence threads
   for (auto &t : io_threads_)
@@ -131,6 +147,10 @@ void StateStore::shutdown()
     if (t.joinable())
       t.join();
   }
+
+  // Join eviction thread
+  if (eviction_thread_.joinable())
+    eviction_thread_.join();
 
   // Join prefetch threads
   for (auto &t : prefetch_threads_)
@@ -227,6 +247,24 @@ void StateStore::queue_pop_front()
   submit_prefetch_tasks();
 }
 
+hash_type StateStore::queue_try_pop_front()
+{
+  std::lock_guard<std::mutex> lock(queue_mutex_);
+  if (state_queue_.empty())
+  {
+    LOG_DEBUG("queue_try_pop_front: queue empty");
+    return 0;
+  }
+  hash_type hash = state_queue_.front();
+  state_queue_.pop_front();
+  if (state_queue_.size() % 100 == 0)
+  {
+    LOG_DEBUG("queue_try_pop_front: popped hash %016lx, remaining=%zu", hash,
+              state_queue_.size());
+  }
+  return hash;
+}
+
 bool StateStore::queue_empty() const
 {
   std::lock_guard<std::mutex> lock(queue_mutex_);
@@ -311,8 +349,8 @@ void StateStore::submit_prefetch_tasks()
     {
       prefetch_queue_.push({h, std::chrono::steady_clock::now()});
     }
+    prefetch_cv_.notify_all();
   }
-  prefetch_cv_.notify_all();
 
   // Update stats
   {
@@ -418,8 +456,8 @@ void StateStore::prefetch_batch(const std::vector<hash_type> &hashes)
     {
       prefetch_queue_.push({h, std::chrono::steady_clock::now()});
     }
+    prefetch_cv_.notify_all();
   }
-  prefetch_cv_.notify_all();
 }
 
 bool StateStore::in_l1(hash_type hash) const
@@ -452,21 +490,37 @@ void StateStore::insert_to_l1(hash_type hash, std::vector<uint8_t> &&raw_data)
   if (raw_data.empty())
     return;
 
-  evict_l1_if_needed(raw_data.size());
+  // Optimization A: Allow 20% overflow before triggering eviction
+  // Reduces eviction frequency during bursts
+  const double overflow_ratio = 1.2;
+  size_t eviction_threshold =
+      static_cast<size_t>(config_.hot_cache_size * overflow_ratio);
+
+  // Optimization C: Batch eviction - evict at least 10% of capacity each time
+  const size_t min_eviction_batch = config_.hot_cache_size / 10;
+
+  if (hot_memory_usage_.load() + raw_data.size() > eviction_threshold)
+  {
+    size_t to_evict =
+        hot_memory_usage_.load() + raw_data.size() - config_.hot_cache_size;
+    to_evict = std::max(to_evict, min_eviction_batch);
+    evict_l1_async(to_evict);
+  }
 
   std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
 
-  // Check if entry already exists
-  auto existing = hot_cache_.find(hash);
-  if (existing != hot_cache_.end())
-  {
-    // Update existing entry: subtract old size, add new size
-    hot_memory_usage_ -= existing->second->raw_data.size();
-    existing->second->raw_data = std::move(raw_data);
-    existing->second->state = StateEntry::State::RAW;
-    existing->second->last_access = ++access_counter_;
+  // Use try_emplace to avoid double lookup for new entries
+  auto [it, inserted] = hot_cache_.try_emplace(hash, nullptr);
 
-    // Update LRU (move to front)
+  if (!inserted)
+  {
+    // Entry exists - update it
+    hot_memory_usage_ -= it->second->raw_data.size();
+    it->second->raw_data = std::move(raw_data);
+    it->second->init_shared_ptr();
+    it->second->state = StateEntry::State::RAW;
+    it->second->last_access = ++access_counter_;
+
     auto idx_it = hot_lru_index_.find(hash);
     if (idx_it != hot_lru_index_.end())
     {
@@ -475,17 +529,18 @@ void StateStore::insert_to_l1(hash_type hash, std::vector<uint8_t> &&raw_data)
     hot_lru_.push_front(hash);
     hot_lru_index_[hash] = hot_lru_.begin();
 
-    hot_memory_usage_ += existing->second->raw_data.size();
+    hot_memory_usage_ += it->second->raw_data.size();
     return;
   }
 
-  // Create new entry
+  // New entry - construct it
   auto entry = std::make_shared<StateEntry>(hash);
   entry->raw_data = std::move(raw_data);
+  entry->init_shared_ptr();
   entry->state = StateEntry::State::RAW;
   entry->last_access = ++access_counter_;
 
-  hot_cache_[hash] = entry;
+  it->second = entry;
   hot_lru_.push_front(hash);
   hot_lru_index_[hash] = hot_lru_.begin();
 
@@ -535,7 +590,9 @@ void StateStore::insert_to_l2(hash_type hash,
 bool StateStore::move_l2_to_l1(hash_type hash)
 {
   StateEntryPtr entry;
+  std::vector<uint8_t> compressed_data;
 
+  // Phase 1: Extract data from L2 (warm_mutex_ only)
   {
     std::lock_guard<std::recursive_mutex> lock(warm_mutex_);
     auto it = warm_cache_.find(hash);
@@ -544,22 +601,72 @@ bool StateStore::move_l2_to_l1(hash_type hash)
       return false;
     }
     entry = it->second;
+    // Copy compressed data while holding lock
+    compressed_data = entry->compressed_data;
   }
 
-  // Decompress
-  std::vector<uint8_t> raw = decompress(entry->compressed_data, 0);
+  // Phase 2: Decompress outside any lock
+  std::vector<uint8_t> raw = decompress(compressed_data, 0);
   if (raw.empty())
   {
     LOG_ERROR("Failed to decompress hash %016lx for L1 promotion", hash);
     return false;
   }
 
-  // Insert to L1
-  insert_to_l1(hash, std::move(raw));
-
-  // Keep in L2 (compressed), update state
+  // Phase 3: Insert to L1 (hot_mutex_ only, NO nested warm_mutex_)
+  bool already_in_l1 = false;
   {
-    std::lock_guard<std::recursive_mutex> lock(warm_mutex_);
+    std::lock_guard<std::recursive_mutex> hot_lock(hot_mutex_);
+
+    // Check if already in L1
+    if (hot_cache_.find(hash) != hot_cache_.end())
+    {
+      already_in_l1 = true;
+    }
+    else
+    {
+      // Evict from L1 if needed
+      size_t required_bytes = raw.size();
+      while (hot_memory_usage_ + required_bytes > config_.hot_cache_size &&
+             !hot_lru_.empty())
+      {
+        hash_type oldest = hot_lru_.back();
+        auto it = hot_cache_.find(oldest);
+        if (it != hot_cache_.end())
+        {
+          size_t freed = it->second->raw_data.size();
+          std::vector<uint8_t>().swap(it->second->raw_data);
+          hot_memory_usage_ -= freed;
+
+          if (it->second->compressed_data.empty())
+            it->second->state = StateEntry::State::PERSISTED;
+          else
+            it->second->state = StateEntry::State::COMPRESSED;
+
+          hot_cache_.erase(it);
+        }
+        hot_lru_.pop_back();
+        hot_lru_index_.erase(oldest);
+      }
+
+      // Create new entry and insert to L1
+      auto new_entry = std::make_shared<StateEntry>(hash);
+      new_entry->raw_data = std::move(raw);
+      new_entry->init_shared_ptr();
+      new_entry->state = StateEntry::State::RAW;
+      new_entry->last_access = ++access_counter_;
+
+      hot_cache_[hash] = new_entry;
+      hot_lru_.push_front(hash);
+      hot_lru_index_[hash] = hot_lru_.begin();
+      hot_memory_usage_ += new_entry->raw_data.size();
+    }
+  } // Release hot_mutex_ before acquiring warm_mutex_
+
+  // Phase 4: Update L2 state (warm_mutex_ only, NO nested locks)
+  // This avoids AB-BA deadlock by never holding both locks simultaneously
+  {
+    std::lock_guard<std::recursive_mutex> warm_lock(warm_mutex_);
     entry->state = StateEntry::State::RAW; // Now also in L1
   }
 
@@ -677,6 +784,149 @@ void StateStore::update_warm_lru(hash_type hash)
   }
 }
 
+void StateStore::evict_l1_async(size_t target_eviction)
+{
+  auto start_time = std::chrono::high_resolution_clock::now();
+
+  std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
+
+  size_t evicted = 0;
+  size_t attempts = 0;
+  size_t max_attempts = hot_lru_.size() * 2;
+
+  while (evicted < target_eviction && !hot_lru_.empty() &&
+         attempts < max_attempts)
+  {
+    hash_type oldest = hot_lru_.back();
+    auto it = hot_cache_.find(oldest);
+    attempts++;
+
+    if (it != hot_cache_.end())
+    {
+      StateEntryPtr entry = it->second;
+      StateEntry::State current_state = entry->state.load();
+
+      // For RAW entries, compress inline (CPU only, no I/O blocking)
+      // Then move to L2 and evict immediately. io_worker will persist async.
+      if (current_state == StateEntry::State::RAW)
+      {
+        std::vector<uint8_t> compressed = compress(entry->raw_data);
+        if (!compressed.empty())
+        {
+          // Move compressed data to L2 immediately
+          insert_to_l2(entry->hash, std::move(compressed));
+
+          // Mark as COMPRESSED (raw_data will be freed during eviction below)
+          {
+            std::lock_guard<std::mutex> entry_lock(entry->mutex);
+            entry->state = StateEntry::State::COMPRESSED;
+          }
+
+          // Submit to io_queue for async disk persistence
+          // io_worker will write L2 data to disk without blocking us
+          {
+            std::lock_guard<std::mutex> io_lock(io_mutex_);
+            if (io_queue_.size() < max_io_queue_size_)
+            {
+              io_queue_.push(entry);
+              io_cv_.notify_one();
+            }
+          }
+
+          current_state = StateEntry::State::COMPRESSED;
+        }
+      }
+
+      // Only evict PERSISTED or COMPRESSED entries
+      if (current_state != StateEntry::State::PERSISTED &&
+          current_state != StateEntry::State::COMPRESSED)
+      {
+        hot_lru_.pop_back();
+        hot_lru_.push_front(oldest);
+        hot_lru_index_[oldest] = hot_lru_.begin();
+        if (hot_lru_.size() == 1)
+          break;
+        continue;
+      }
+
+      size_t to_evict = entry->raw_data.size();
+      evicted += to_evict;
+      hot_memory_usage_ -= to_evict;
+
+      // Free raw_data immediately (compression result is in L2)
+      {
+        std::lock_guard<std::mutex> entry_lock(entry->mutex);
+        std::vector<uint8_t>().swap(entry->raw_data);
+      }
+
+      hot_cache_.erase(it);
+
+      {
+        std::lock_guard<std::mutex> evict_lock(eviction_mutex_);
+        eviction_queue_.push(entry);
+        eviction_cv_.notify_one();
+      }
+    }
+
+    hot_lru_.pop_back();
+    hot_lru_index_.erase(oldest);
+  }
+
+  auto end_time = std::chrono::high_resolution_clock::now();
+  auto elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                        end_time - start_time)
+                        .count();
+  {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_.evict_calls++;
+    stats_.evict_bytes += evicted;
+    stats_.evict_time_us += elapsed_us;
+  }
+}
+
+void StateStore::eviction_worker()
+{
+  while (!shutdown_.load())
+  {
+    StateEntryPtr entry;
+    {
+      std::unique_lock<std::mutex> lock(eviction_mutex_);
+      eviction_cv_.wait(
+          lock,
+          [this] { return !eviction_queue_.empty() || shutdown_.load(); });
+
+      if (shutdown_.load())
+        break;
+      if (eviction_queue_.empty())
+        continue;
+
+      entry = eviction_queue_.front();
+      eviction_queue_.pop();
+    }
+
+    if (!entry || entry->raw_data.empty())
+      continue;
+
+    // Use already compressed data from io_worker (avoid double compression)
+    std::vector<uint8_t> compressed;
+    {
+      std::lock_guard<std::mutex> entry_lock(entry->mutex);
+      compressed = entry->compressed_data;
+    }
+
+    if (!compressed.empty())
+    {
+      insert_to_l2(entry->hash, std::move(compressed));
+
+      {
+        std::lock_guard<std::mutex> entry_lock(entry->mutex);
+        std::vector<uint8_t>().swap(entry->raw_data);
+        entry->state = StateEntry::State::COMPRESSED;
+      }
+    }
+  }
+}
+
 /* ==============================================================================
  * Save / Load
  * ==============================================================================
@@ -735,6 +985,8 @@ hash_type StateStore::save(const void *data, size_t len)
     return hash;
   }
 
+  auto save_start = std::chrono::high_resolution_clock::now();
+
   {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     stats_.save_new++;
@@ -768,6 +1020,20 @@ hash_type StateStore::save(const void *data, size_t len)
     io_queue_.push(entry);
   }
   io_cv_.notify_one();
+
+  auto save_end = std::chrono::high_resolution_clock::now();
+  auto save_elapsed_us = std::chrono::duration_cast<std::chrono::microseconds>(
+                             save_end - save_start)
+                             .count();
+
+  {
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    stats_.save_time_us += save_elapsed_us;
+    if (save_elapsed_us > 1000)
+    {
+      stats_.save_new_slow++;
+    }
+  }
 
   LOG_TRACE("StateStore saved hash %016lx: raw=%zu (async compression)", hash,
             len);
@@ -842,27 +1108,21 @@ ssize_t StateStore::load(hash_type hash, std::vector<uint8_t> &out_data)
       return -1;
     }
 
-    // Promote to L1 if space allows (move to avoid copy)
-    if (hot_memory_usage_ + decompressed.size() <= config_.hot_cache_size)
+    // Always promote to L1 - allow temporary overflow, eviction worker will
+    // clean up
+    insert_to_l1(hash, std::move(decompressed));
+    // Reference L1 data for return (avoid another copy)
     {
-      insert_to_l1(hash, std::move(decompressed));
-      // Reference L1 data for return (avoid another copy)
+      std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
+      auto it = hot_cache_.find(hash);
+      if (it != hot_cache_.end() && !it->second->raw_data.empty())
       {
-        std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
-        auto it = hot_cache_.find(hash);
-        if (it != hot_cache_.end() && !it->second->raw_data.empty())
-        {
-          out_data = it->second->raw_data;
-        }
-        else
-        {
-          out_data = std::move(decompressed);
-        }
+        out_data = it->second->raw_data;
       }
-    }
-    else
-    {
-      out_data = std::move(decompressed);
+      else
+      {
+        out_data = std::move(decompressed);
+      }
     }
 
     // Update stats
@@ -913,6 +1173,51 @@ ssize_t StateStore::load(hash_type hash, std::vector<uint8_t> &out_data)
   return -1;
 }
 
+std::shared_ptr<const std::vector<uint8_t>>
+StateStore::load_shared(hash_type hash)
+{
+  if (hash == 0)
+    return nullptr;
+
+  {
+    std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
+    auto it = hot_cache_.find(hash);
+    if (it != hot_cache_.end() && it->second->raw_data_ptr)
+    {
+      it->second->last_access = ++access_counter_;
+      auto idx_it = hot_lru_index_.find(hash);
+      if (idx_it != hot_lru_index_.end())
+      {
+        hot_lru_.erase(idx_it->second);
+        hot_lru_.push_front(hash);
+        idx_it->second = hot_lru_.begin();
+      }
+      {
+        std::lock_guard<std::mutex> lock(stats_mutex_);
+        stats_.load_requests++;
+        stats_.l1_hits++;
+      }
+      LOG_TRACE("StateStore load_shared %016lx from L1", hash);
+      return it->second->raw_data_ptr;
+    }
+  }
+
+  std::vector<uint8_t> data;
+  if (load(hash, data) > 0)
+  {
+    std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
+    auto it = hot_cache_.find(hash);
+    if (it != hot_cache_.end() && it->second->raw_data_ptr)
+    {
+      return it->second->raw_data_ptr;
+    }
+    // L2/disk path didn't insert to L1 (maybe L1 full), create shared_ptr from
+    // returned data
+    return std::make_shared<std::vector<uint8_t>>(std::move(data));
+  }
+  return nullptr;
+}
+
 bool StateStore::exists(hash_type hash)
 {
   if (in_l1(hash) || in_l2(hash))
@@ -955,8 +1260,7 @@ bool StateStore::wait_persisted(hash_type hash, uint64_t timeout_ms)
   auto check_state = [entry]()
   {
     auto s = entry->state.load();
-    return s == StateEntry::State::PERSISTED ||
-           s == StateEntry::State::PERSISTING;
+    return s == StateEntry::State::PERSISTED;
   };
 
   if (timeout_ms == 0)
@@ -1065,53 +1369,35 @@ void StateStore::io_worker()
 
       if (success)
       {
-        // Move from L1 to L2: keep compressed, free raw
-        size_t freed_bytes = 0;
+        // Keep data in L1 - only mark as PERSISTED and store compressed in
+        // entry Actual eviction to L2 happens via evict_l1_async when L1 is
+        // full
         {
           std::lock_guard<std::mutex> entry_lock(entry->mutex);
           entry->state = StateEntry::State::PERSISTED;
-          freed_bytes = entry->raw_data.size();
-          // Force immediate memory release - swap with empty vector
-          std::vector<uint8_t>().swap(entry->raw_data);
         }
 
-        // Move entry from hot_cache to warm_cache (L1 -> L2)
-        if (freed_bytes > 0)
-        {
-          std::lock_guard<std::recursive_mutex> hot_lock(hot_mutex_);
-          auto it = hot_cache_.find(entry->hash);
-          if (it != hot_cache_.end())
-          {
-            hot_cache_.erase(it);
-            auto lru_it = hot_lru_index_.find(entry->hash);
-            if (lru_it != hot_lru_index_.end())
-            {
-              hot_lru_.erase(lru_it->second);
-              hot_lru_index_.erase(lru_it);
-            }
-            hot_memory_usage_ -= freed_bytes;
-          }
-        }
-
-        // Insert to L2 (warm cache)
-        // Use swap to avoid copy: L2 gets the data, entry keeps empty vector
+        // Insert compressed data to L2 for redundancy (but keep in L1 too)
         std::vector<uint8_t> compressed_for_l2;
         {
           std::lock_guard<std::mutex> entry_lock(entry->mutex);
-          compressed_for_l2.swap(entry->compressed_data);
+          compressed_for_l2 = entry->compressed_data;
         }
         insert_to_l2(entry->hash, std::move(compressed_for_l2));
 
-        LOG_TRACE("Persisted hash %016lx (async), moved to L2, freed %zu bytes "
-                  "from L1",
-                  entry->hash, freed_bytes);
+        LOG_TRACE(
+            "Persisted hash %016lx (async), kept in L1, also stored in L2",
+            entry->hash);
       }
       else
       {
         LOG_ERROR("Failed to persist hash %016lx", entry->hash);
       }
 
-      entry->cv.notify_all();
+      {
+        std::lock_guard<std::mutex> entry_lock(entry->mutex);
+        entry->cv.notify_all();
+      }
     }
   }
 }
@@ -1568,8 +1854,7 @@ void StateStore::reset_stats()
 
 size_t StateStore::get_l1_entry_count() const
 {
-  std::lock_guard<std::recursive_mutex> lock(
-      const_cast<std::recursive_mutex &>(hot_mutex_));
+  std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
   return hot_cache_.size();
 }
 
@@ -1624,6 +1909,31 @@ void StateStore::print_stats() const
                         config_.warm_cache_size / (1024 * 1024),
                         100.0 * l2_usage / config_.warm_cache_size);
   detsim::ui::ui_printf("  Prefetch issued: %lu\n", stats.prefetch_issued);
+
+  detsim::ui::ui_printf("\nEviction Statistics:\n");
+  detsim::ui::ui_printf("  Evict calls:     %lu\n", stats.evict_calls);
+  detsim::ui::ui_printf("  Bytes evicted:   %zu MB\n",
+                        stats.evict_bytes / (1024 * 1024));
+  detsim::ui::ui_printf("  Evict time:      %lu ms\n",
+                        stats.evict_time_us / 1000);
+  if (stats.evict_calls > 0)
+  {
+    detsim::ui::ui_printf("  Avg evict time:  %lu us/call\n",
+                          stats.evict_time_us / stats.evict_calls);
+  }
+
+  detsim::ui::ui_printf("\nSave Path Timing:\n");
+  detsim::ui::ui_printf("  New states saved: %lu\n", stats.save_new);
+  detsim::ui::ui_printf("  Total save time:  %lu ms\n",
+                        stats.save_time_us / 1000);
+  if (stats.save_new > 0)
+  {
+    detsim::ui::ui_printf("  Avg save time:    %lu us/call\n",
+                          stats.save_time_us / stats.save_new);
+  }
+  detsim::ui::ui_printf(
+      "  Slow saves (>1ms): %lu (%.2f%%)\n", stats.save_new_slow,
+      stats.save_new > 0 ? 100.0 * stats.save_new_slow / stats.save_new : 0.0);
   detsim::ui::ui_printf("====================================\n");
 }
 

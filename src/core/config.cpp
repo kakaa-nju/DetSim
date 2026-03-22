@@ -134,16 +134,6 @@ static void parse_addrs(const json &cfg)
   }
 }
 
-/* Parse shared files */
-static void parse_shared_files(const json &cfg)
-{
-  auto shared_files = cfg.value("SharedFiles", json::array());
-  for (const auto &file : shared_files)
-  {
-    ptmc_state.shared_files.insert(file.get<std::string>());
-  }
-}
-
 /* Parse filesystem mappings */
 static void parse_fsmap(const json &cfg, const fs::path &cfg_dir)
 {
@@ -390,7 +380,6 @@ void read_config(const char *cfg_file)
   // Parse all sections
   parse_tracees(cfg, cfg_dir);
   parse_addrs(cfg);
-  parse_shared_files(cfg);
   parse_fsmap(cfg, cfg_dir);
   parse_assertions(cfg);
   parse_user_check(cfg, cfg_dir);

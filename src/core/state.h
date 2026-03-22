@@ -11,6 +11,7 @@
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <optional>
 
 /* ======================================================================
  * State Data Format (shared with StateStore)
@@ -59,6 +60,7 @@ struct syscall_info
 /* Raft-specific state stored per tracee for safety checking */
 struct raft_check_state
 {
+  // Equality comparison for incremental save optimization
   long current_term = 0;
   int is_leader = 0;
   long last_log_term = 0;
@@ -86,11 +88,9 @@ struct raft_check_state
 
 typedef struct tracee_state
 {
-  hash_type ts_hash;
   /* about syscall_info: here the syscall indicates the last DONE syscall */
   syscall_info si;
 
-  int pid;
   uintptr_t brk;
   struct timeval tv;
   FileSystemState fs_state;
@@ -107,14 +107,14 @@ typedef struct tracee_state
    * --------------------------------------------------------- */
 
   /* From running process */
-  tracee_state(int which, struct syscall_info *info);
+  tracee_state(int which, const struct syscall_info &info);
 
   /* From saved state (hash) */
   tracee_state(hash_type hash);
 
   // Default constructor - value-initialize all members
   tracee_state()
-      : ts_hash(0), si{}, pid(0), brk(0), tv{0, 0}, fs_state(), sock_state(),
+      : si{}, brk(0), tv{0, 0}, fs_state(), sock_state(),
         raft_state()
   {
   }
@@ -132,67 +132,41 @@ typedef struct tracee_state
   // Explicit memory cleanup - call after copying to ptmc_state to free source
   void clear();
 
+  // Equality comparison (for incremental save optimization)
+  // Compares all metadata fields to detect state changes
+  bool metadata_equal(const tracee_state &other) const;
+
   /* ---------------------------------------------------------
    * State Capture (running -> struct -> disk)
    * --------------------------------------------------------- */
 
   /* Full state save: memory, mappings, serialization */
-  void save_full_state();
+  hash_type save(int pid);
 
   /* Capture memory and registers */
-  void capture_memory_state();
-
-  /* Save memory mappings */
-  void save_mappings();
-
-  /* Serialize to stream (for memory dump) */
-  void serialize_to_stream(FILE *fp);
-
-  /* Serialize to disk file */
-  void serialize_to_disk();
-
-  /* Save process files */
-  void save_proc_files();
-
-  /* Get file descriptors */
-  void get_file_descriptors();
+  hash_type save_full_state_to_state_store(int pid);
 
   /* ---------------------------------------------------------
    * State Recovery (disk -> struct -> running)
    * --------------------------------------------------------- */
 
   /* Main recovery entry */
-  void recover_running_state(int index);
+  void recover_running_state(int index, hash_type ts_hash) const;
 
   /* Restore memory mappings for brk */
-  void restore_memory_mappings(std::vector<maps_item> &maps_out);
-
-  /* Recover file descriptors */
-  void recover_file_descriptors(int index);
+  void restore_memory_mappings(hash_type ts_hash, int pid, std::vector<maps_item> &maps_out) const;
 
   /* Recover memory and registers */
-  void recover_mem_reg_snapshot(std::vector<maps_item> &maps);
+  void recover_mem_reg_snapshot(std::vector<maps_item> &maps, hash_type ts_hash, int pid) const;
 
-  /* Recover process files */
-  void recover_proc_files();
-
-  /* Memory Access
-   * --------------------------------------------------------- */
-
-  /* Read memory from snapshot */
-  void *read_snapshot_mem(uint64_t addr, long size);
-
-  /* ---------------------------------------------------------
-   * Display
-   * --------------------------------------------------------- */
-
-  void show_syscall(syscall_info *info);
 
   /* ---------------------------------------------------------
    * Serialization
    * --------------------------------------------------------- */
   template <class Archive>
   void serialize(Archive &ar);
+
+  void show_syscall() const;
 
 } tracee_state;
 
@@ -218,8 +192,8 @@ typedef struct sys_state
   sys_state(sys_state &&other) noexcept = default;
   sys_state &operator=(sys_state &&other) noexcept = default;
 
-  /* From running processes */
-  sys_state(struct syscall_info *info);
+  /* From running processes - save */
+  sys_state(const struct syscall_info info[]);
 
   /* From saved state (hash) */
   sys_state(hash_type hash);
@@ -233,15 +207,13 @@ typedef struct sys_state
    * Persistence
    * --------------------------------------------------------- */
 
-  int save_metadata();
-  void save_shared_files();
+  int save_metadata() const;
 
   /* ---------------------------------------------------------
    * Recovery
    * --------------------------------------------------------- */
 
-  void recover_running_state();
-  void recover_shared_files();
+  void recover_running_state() const;
 
   /* ---------------------------------------------------------
    * Serialization
@@ -268,27 +240,28 @@ typedef std::unordered_set<hash_type> SSS;
  * Queue Management
  * ====================================================================== */
 
-void state_queue_append(sys_state *s);
-void state_queue_append_front(sys_state *s);
-sys_state *state_queue_extract();
+void state_queue_append(sys_state &s);
+std::optional<sys_state> state_queue_extract();
 
 /* ======================================================================
  * Tree Management
  * ====================================================================== */
 
-void state_tree_add(sys_state *s, sys_state *t, int which, int choose);
+void state_tree_add(const sys_state &s, sys_state &t, int which, int choose);
 
 /* ======================================================================
  * History Display
  * ====================================================================== */
 
 void show_syscall_history();
+void show_syscall(int pid, hash_type ts_hash);
 
 /* ======================================================================
  * Memory Operations
  * ====================================================================== */
 
-void *read_mem(hash_type ts_hash, int pid, uint64_t addr, long size);
+/* this would malloc a buffer for the memory. free after use */
+void *read_mem(int pid, hash_type ts_hash, uint64_t addr, long size);
 
 /* ======================================================================
  * Helper Functions

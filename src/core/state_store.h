@@ -24,6 +24,7 @@
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <shared_mutex>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
@@ -51,10 +52,15 @@ struct StateEntry
 {
   hash_type hash{0};
 
-  // L1: Uncompressed data (hot)
   std::vector<uint8_t> raw_data;
+  std::shared_ptr<std::vector<uint8_t>> raw_data_ptr;
 
-  // L2: Compressed data (warm)
+  void init_shared_ptr()
+  {
+    raw_data_ptr = std::shared_ptr<std::vector<uint8_t>>(
+        std::shared_ptr<std::vector<uint8_t>>(), &raw_data);
+  }
+
   std::vector<uint8_t> compressed_data;
 
   enum class State
@@ -111,7 +117,7 @@ class StateStore
 
     // Compression settings
     int compression_level = 1;
-    int io_threads = 2;
+    int io_threads = 1;
 
     // Prefetch settings
     size_t prefetch_window = 100;       // Number of upcoming states to prefetch
@@ -146,6 +152,10 @@ class StateStore
   // Load data: check L1 -> L2 -> disk
   ssize_t load(hash_type hash, std::vector<uint8_t> &out_data);
 
+  // Load data returning shared_ptr for zero-copy access (returns nullptr if not
+  // found)
+  std::shared_ptr<const std::vector<uint8_t>> load_shared(hash_type hash);
+
   // Check existence
   bool exists(hash_type hash);
 
@@ -175,6 +185,8 @@ class StateStore
   void queue_push_back(hash_type hash);
   hash_type queue_front();
   void queue_pop_front();
+  hash_type
+  queue_try_pop_front(); // Atomically check and pop, returns 0 if empty
   bool queue_empty() const;
   size_t queue_size() const;
   void queue_clear();
@@ -207,6 +219,15 @@ class StateStore
     uint64_t save_dedup_warm = 0; // Deduplicated at warm cache
     uint64_t save_dedup_disk = 0; // Deduplicated at disk
     uint64_t save_new = 0;        // New states (actually saved)
+
+    // Eviction statistics
+    uint64_t evict_calls = 0;   // Total evict_l1_async calls
+    uint64_t evict_bytes = 0;   // Total bytes evicted
+    uint64_t evict_time_us = 0; // Total time spent in eviction (microseconds)
+
+    // Save path timing statistics
+    uint64_t save_time_us = 0;  // Total time spent in save() for new states
+    uint64_t save_new_slow = 0; // Count of saves taking >1ms
 
     double hit_rate() const
     {
@@ -309,6 +330,20 @@ class StateStore
   std::vector<std::thread> io_threads_;
 
   void io_worker();
+
+  // ==================================================================
+  // Async Eviction (L1 -> L2)
+  // ==================================================================
+
+  std::queue<StateEntryPtr> eviction_queue_;
+  std::mutex eviction_mutex_;
+  std::condition_variable eviction_cv_;
+  std::atomic<size_t> pending_eviction_bytes_{0};
+  std::thread eviction_thread_;
+
+  void eviction_worker();
+  void mark_for_eviction(StateEntryPtr entry);
+  void evict_l1_async(size_t required_bytes);
 
   // ==================================================================
   // Internal Helpers

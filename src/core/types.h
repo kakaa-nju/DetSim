@@ -75,6 +75,9 @@ struct ptrace_syscall_info
  * Global Constants
  * ======================================================================== */
 
+#ifndef NP
+  #define NP 0
+#endif
 static_assert(NP > 0);
 
 #define HASH_LEN 16

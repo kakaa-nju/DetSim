@@ -35,6 +35,9 @@ extern "C" {
 /* Check if status indicates process is dead (exited, signaled, or cra
 shed) */
 #define DISDEAD(status)       ((status) & (DIFEXITED | DIFSIGNALED | DIFCRASHED))
+#define DISCRASHED(status)    ((status) & DIFCRASHED)
+#define DISSIGNALED(status)   ((status) & DIFSIGNALED)
+#define DISEXITED(status)     ((status) & DIFEXITED)
 
 /* Check if status indicates process is alive (running or stopped) */
 #define DISALIVE(status)      (!DISDEAD(status))

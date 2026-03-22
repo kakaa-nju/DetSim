@@ -1,6 +1,7 @@
 #include "core/config.h"
 #include "core/state_store.h"
 #include "core/sysstate_store.h"
+#include "core/state_transition.h"
 #include <cstdio>
 #include <cstring>
 
@@ -97,7 +98,7 @@ int main(int argc, char *argv[])
   init_monitor(argc, argv);
 
   /* 启动 tracee */
-  init_state();
+  state_initialization();
 
   /* 分析变量地址 */
   init_dwarf();

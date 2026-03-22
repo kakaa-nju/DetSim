@@ -1,8 +1,8 @@
 .PHONY: all debug release wc clean clear benchmark
 
-CC = gcc
-CXX = g++
-LD = g++ -L/usr/local/lib
+CC = ccache gcc
+CXX = ccache g++
+LD = ccache g++ -L/usr/local/lib
 
 # Build directory
 BUILD_DIR = build
@@ -23,7 +23,7 @@ SRCS = src/main.cpp \
        src/utils/expr_lexer.cpp src/utils/expr_parser.cpp \
        src/utils/resolve.cpp src/utils/crc32.cpp src/utils/file_lock.cpp \
        examples/redisraft/plugins/raft_msg_parser.cpp \
-       src/ui/ncurses_ui.cpp src/ui/log_wrapper.cpp
+       src/ui/ncurses_ui.cpp src/ui/log_wrapper.cpp src/core/state_transition.cpp
 
 # Object files in build directory
 OBJS = $(patsubst %.cpp,$(BUILD_DIR)/%.o,$(SRCS))
@@ -39,8 +39,8 @@ all: release
 release: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -msse4.2
 release: tracer
 
-debug: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O0 -g -msse4.2 -fsanitize=address
-debug: LDFLAGS += -fsanitize=address
+debug: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
+debug: LDFLAGS += 
 debug: tracer
 
 tracer: $(OBJS) $(BUILD_DIR)/nr2call.o

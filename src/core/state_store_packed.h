@@ -108,10 +108,11 @@ class StateStorePacked
   /* Shutdown and cleanup */
   void shutdown();
 
-  /* Statistics */
   size_t get_entry_count() const { return index_.size(); }
   size_t get_segment_count() const { return segments_.size(); }
   size_t get_total_data_size() const;
+  bool verify_and_repair();
+  void dump_debug_info();
 
   /* Find hashes by prefix (for auto-completion) */
   std::vector<hash_type> find_by_prefix(const std::string &prefix);

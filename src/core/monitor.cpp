@@ -38,7 +38,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <unordered_map>
+#include <map>
 #include <vector>
 
 /* Defined in config.cpp */
@@ -291,22 +291,9 @@ static int cmd_si(char *args)
     }
   }
 
-  switch (ptmc_state.state)
-  {
-    case PTMC_LOADED:
-      exec_store();
-      break;
-    case PTMC_PRELOAD:
-      load_exec_store();
-      break;
-    default:
-      ptmc_state.source_state = ptmc_state.dest_state;
-      ptmc_state.sysstate_hash = ptmc_state.dest_state.ss_hash;
-      ptmc_state.state = PTMC_LOADED;
-      exec_store();
-  }
-  ptmc_state.dest_state.child[cursor].show_syscall(
-      &ptmc_state.dest_state.child[cursor].si);
+  load_exec_store();
+
+  show_syscall(ptmc_state.pids[cursor], ptmc_state.running_state.ts_hash[cursor]);
 
   return 0;
 }
@@ -348,9 +335,8 @@ static int cmd_load(char *args)
 
   if (s.size() == 1)
   {
-    ptmc_state.sysstate_hash = s[0];
-    ptmc_state.state = PTMC_PRELOAD;
-    load(s[0]);
+    ptmc_state.running_state = sys_state(s[0]);
+    ptmc_state.running_state.recover_running_state(); 
     detsim::ui::ui_printf("Loaded state %016lx\n", s[0]);
   }
   else if (s.size() == 0)
@@ -585,7 +571,7 @@ static int cmd_locals(char *args)
 static int cmd_ls(char *args)
 {
   int cursor = ptmc_state.cursor;
-  auto &fs = ptmc_state.dest_state.child[cursor].fs_state.filesystem;
+  auto &fs = ptmc_state.running_state.child[cursor].fs_state.filesystem;
   detsim::ui::ui_printf("Files in process %d filesystem:\n", cursor);
   for (const auto &pair : fs)
   {
@@ -602,7 +588,7 @@ static int cmd_stat(char *args)
     return 0;
   }
   int cursor = ptmc_state.cursor;
-  auto &fs = ptmc_state.dest_state.child[cursor].fs_state.filesystem;
+  auto &fs = ptmc_state.running_state.child[cursor].fs_state.filesystem;
   bool found = false;
   for (const auto &pair : fs)
   {
@@ -657,7 +643,7 @@ static int cmd_hexdump(char *args)
     return 0;
   }
   int cursor = ptmc_state.cursor;
-  auto &fs = ptmc_state.dest_state.child[cursor].fs_state.filesystem;
+  auto &fs = ptmc_state.running_state.child[cursor].fs_state.filesystem;
 
   auto it = fs.find(args);
   if (it == fs.end())
@@ -806,22 +792,6 @@ static void diff_tracee_state(const tracee_state &a, const tracee_state &b,
   };
 
   /* Compare basic fields */
-  if (a.ts_hash != b.ts_hash)
-  {
-    print_header();
-    detsim::ui::ui_printf("    ts_hash: %s != %s\n",
-                          format_hash(a.ts_hash).c_str(),
-                          format_hash(b.ts_hash).c_str());
-    has_diff = true;
-  }
-
-  if (a.pid != b.pid)
-  {
-    print_header();
-    detsim::ui::ui_printf("    pid: %d != %d\n", a.pid, b.pid);
-    has_diff = true;
-  }
-
   if (a.brk != b.brk)
   {
     print_header();
@@ -1324,7 +1294,7 @@ static void diff_memory(hash_type ts_a, hash_type ts_b, int proc_id,
 
   for (auto &m : maps_a)
   {
-    if (m.flags[1] == 'w' && m.start != available_memory)
+    if (m.flags[1] == 'w' && m.start != scratch_page)
     {
       starts_a.insert(m.start);
       map_a_by_start[m.start] = m;
@@ -1332,7 +1302,7 @@ static void diff_memory(hash_type ts_a, hash_type ts_b, int proc_id,
   }
   for (auto &m : maps_b)
   {
-    if (m.flags[1] == 'w' && m.start != available_memory)
+    if (m.flags[1] == 'w' && m.start != scratch_page)
     {
       starts_b.insert(m.start);
       map_b_by_start[m.start] = m;
@@ -1464,8 +1434,8 @@ static void diff_fs_state(const FileSystemState &a, const FileSystemState &b,
 }
 
 /* Helper: Compare socket lists */
-static void diff_sock_list(const std::unordered_map<int, Socket> &a,
-                           const std::unordered_map<int, Socket> &b,
+static void diff_sock_list(const std::map<int, Socket> &a,
+                           const std::map<int, Socket> &b,
                            int proc_id, bool &has_diff)
 {
   if (a.size() != b.size())
@@ -1478,8 +1448,8 @@ static void diff_sock_list(const std::unordered_map<int, Socket> &a,
 
 /* Helper: Compare UDP buffers */
 static void
-diff_udp_buffers(const std::unordered_map<int, std::deque<UdpDatagram>> &a,
-                 const std::unordered_map<int, std::deque<UdpDatagram>> &b,
+diff_udp_buffers(const std::map<int, std::deque<UdpDatagram>> &a,
+                 const std::map<int, std::deque<UdpDatagram>> &b,
                  int proc_id, bool &has_diff)
 {
   /* Check if maps have same keys */
@@ -1547,8 +1517,8 @@ diff_udp_buffers(const std::unordered_map<int, std::deque<UdpDatagram>> &a,
 
 /* Helper: Compare TCP connections */
 static void
-diff_tcp_connections(const std::unordered_map<int, TcpConnection> &a,
-                     const std::unordered_map<int, TcpConnection> &b,
+diff_tcp_connections(const std::map<int, TcpConnection> &a,
+                     const std::map<int, TcpConnection> &b,
                      int proc_id, bool &has_diff)
 {
   /* Check if maps have same keys */

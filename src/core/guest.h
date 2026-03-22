@@ -11,7 +11,7 @@
 #include <unistd.h>
 
 extern const char *syscalls[450];
-extern const uintptr_t available_memory;
+extern const uintptr_t scratch_page;
 extern int running_process;
 
 void tracee_set_rax(int pid, uint64_t val);

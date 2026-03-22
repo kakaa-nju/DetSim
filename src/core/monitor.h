@@ -38,9 +38,7 @@ struct PTMC_STATE
   int choose = -1;
   int batch_choice_preset =
       -1; /* Preset choice value from batch file (-1 = not set) */
-  sys_state source_state;
-  sys_state dest_state;
-  hash_type sysstate_hash = 0; /* state in operating system */
+  sys_state running_state = sys_state();
   hash_type toload = 0;
 
   int status[NP] = {};
@@ -60,8 +58,6 @@ struct PTMC_STATE
 
   struct timeval time[NP] = {};
   std::string addrs[NP];
-  std::unordered_set<std::string> shared_files;
-  std::unordered_set<std::string> proc_files[NP];
 
   std::unordered_set<std::string> assertions;
   std::vector<int (*)()> user_checks;

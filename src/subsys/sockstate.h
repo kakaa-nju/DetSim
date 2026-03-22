@@ -14,7 +14,6 @@
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
-#include <unordered_map>
 #include <vector>
 
 /* Guest memory operations - defined in guest.cpp */
@@ -184,25 +183,25 @@ class SockState
   size_t get_udp_buffer_size(int fd) const;
 
   /* Access all sockets (for serialization/debug) */
-  const std::unordered_map<int, Socket> &sockets() const { return sockets_; }
-  std::unordered_map<int, Socket> &sockets() { return sockets_; }
+  const std::map<int, Socket> &sockets() const { return sockets_; }
+  std::map<int, Socket> &sockets() { return sockets_; }
 
   /* Add a socket with specific fd (used by emu_socket) */
   void add_socket(const Socket &sock) { sockets_[sock.fd] = sock; }
 
   /* Access UDP receive buffers (for cross-process delivery) */
-  const std::unordered_map<int, std::deque<UdpDatagram>> &
+  const std::map<int, std::deque<UdpDatagram>> &
   udp_recv_buffers() const
   {
     return udp_recv_buffers_;
   }
-  std::unordered_map<int, std::deque<UdpDatagram>> &udp_recv_buffers()
+  std::map<int, std::deque<UdpDatagram>> &udp_recv_buffers()
   {
     return udp_recv_buffers_;
   }
 
   /* Access TCP connections */
-  const std::unordered_map<int, TcpConnection> &tcp_connections() const
+  const std::map<int, TcpConnection> &tcp_connections() const
   {
     return tcp_connections_;
   }
@@ -224,13 +223,13 @@ class SockState
   FdManagerPtr fd_manager_;
 
   /* All sockets indexed by fd */
-  std::unordered_map<int, Socket> sockets_;
+  std::map<int, Socket> sockets_;
 
   /* UDP receive buffers: fd -> queue of datagrams */
-  std::unordered_map<int, std::deque<UdpDatagram>> udp_recv_buffers_;
+  std::map<int, std::deque<UdpDatagram>> udp_recv_buffers_;
 
   /* TCP connections: local_fd -> connection state */
-  std::unordered_map<int, TcpConnection> tcp_connections_;
+  std::map<int, TcpConnection> tcp_connections_;
 
   /* Helper: allocate new fd via FdManager */
   int allocate_fd();

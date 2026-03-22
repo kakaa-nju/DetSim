@@ -944,9 +944,14 @@ type_info dwarf_get_type_info(const char *type_name)
     return array_info;
   }
 
-  /* Handle pointer type - construct a synthetic type_info */
+  /* Handle pointer type - construct a synthetic type_info and cache */
   if (is_pointer)
   {
+    auto it = type_cache.find(type_name);
+    if (it != type_cache.end())
+    {
+      return it->second;
+    }
     type_info ptr_info;
     ptr_info.name = type_name;
     ptr_info.is_pointer = true;
@@ -954,6 +959,7 @@ type_info dwarf_get_type_info(const char *type_name)
     ptr_info.size = 8;
     ptr_info.is_struct = false;
     ptr_info.is_array = false;
+    type_cache[type_name] = ptr_info;
     return ptr_info;
   }
 
@@ -2076,22 +2082,34 @@ bool dwarf_lookup_local(const char *varname, uintptr_t *out_addr,
     return false;
   }
 
+  DwarfLocalCache::VarInfo cached;
+  if (DwarfLocalCache::instance().lookup_local(current_frame_id, varname,
+                                               cached))
+  {
+    if (out_addr)
+      *out_addr = cached.address;
+    if (out_type)
+      *out_type = cached.type_name;
+    return true;
+  }
+
   const auto &frame = current_stack_trace[current_frame_id];
 
-  /* Search in frame's local_vars */
   for (const auto &v : frame.local_vars)
   {
     if (v.name == varname)
     {
-      /* Calculate address from BP and stack offset */
+      uintptr_t addr = frame.bp + v.stack_offset;
       if (out_addr)
-      {
-        *out_addr = frame.bp + v.stack_offset;
-      }
+        *out_addr = addr;
       if (out_type)
-      {
         *out_type = v.type_name;
-      }
+
+      DwarfLocalCache::VarInfo info;
+      info.address = addr;
+      info.type_name = v.type_name;
+      DwarfLocalCache::instance().cache_local(current_frame_id, varname, info);
+
       return true;
     }
   }
@@ -2137,4 +2155,56 @@ bool dwarf_read_var(int pid, const char *varname, T *out)
 
   memcpy_guest2host(out, (void *)addr, size);
   return true;
+}
+
+DwarfLocalCache &DwarfLocalCache::instance()
+{
+  static DwarfLocalCache instance;
+  return instance;
+}
+
+void DwarfLocalCache::cache_local(int frame_id, const std::string &varname,
+                                  const VarInfo &info)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (current_frame_id_ != frame_id)
+  {
+    cache_.clear();
+    current_frame_id_ = frame_id;
+  }
+  cache_[varname] = info;
+}
+
+bool DwarfLocalCache::lookup_local(int frame_id, const std::string &varname,
+                                   VarInfo &out)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (current_frame_id_ != frame_id)
+  {
+    return false;
+  }
+  auto it = cache_.find(varname);
+  if (it == cache_.end())
+  {
+    return false;
+  }
+  out = it->second;
+  return true;
+}
+
+void DwarfLocalCache::clear()
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  cache_.clear();
+  current_frame_id_ = -1;
+}
+
+void DwarfLocalCache::clear_frame(int frame_id)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  if (current_frame_id_ == frame_id)
+  {
+    cache_.clear();
+    current_frame_id_ = -1;
+  }
 }

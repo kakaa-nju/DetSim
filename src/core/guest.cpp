@@ -30,7 +30,7 @@
 #include <unistd.h>
 #include <vector>
 
-const uintptr_t available_memory = 0x0000600000000000;
+const uintptr_t scratch_page = 0x0000600000000000;
 const uintptr_t syscall_instr = 0x0000600000000ff0;
 
 /* ======================================================================
@@ -499,7 +499,7 @@ void tracee_backtrace(int pid)
 /* Only once for each process */
 void tracee_reserve_temp_page(int pid)
 {
-  tracee_do_mmap_in_place(pid, available_memory, available_memory + PAGE_SIZE);
+  tracee_do_mmap_in_place(pid, scratch_page, scratch_page + PAGE_SIZE);
 }
 
 int tracee_do_open(int pid, const char *filename, uint64_t flags)
@@ -507,10 +507,10 @@ int tracee_do_open(int pid, const char *filename, uint64_t flags)
   /* need tracee memory to place filename */
   /* mappings has been restored */
   /* LOG_TRACE("open filename, flags = %s, %o", filename, flags); */
-  assert(available_memory);
-  tracee_write_mem(pid, (void *)available_memory, filename,
+  assert(scratch_page);
+  tracee_write_mem(pid, (void *)scratch_page, filename,
                    strlen(filename) + 1);
-  return tracee_do_syscall(pid, SYS_open, (uint64_t)available_memory, flags, 0,
+  return tracee_do_syscall(pid, SYS_open, (uint64_t)scratch_page, flags, 0,
                            0, 0, 0);
 }
 

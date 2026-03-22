@@ -1,6 +1,8 @@
 /* expr_ast.cpp - AST node implementations */
 #include "expr_ast.hpp"
 #include "dwarf_info.h"
+#include "monitor.h"
+#include "state.h"
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -55,9 +57,44 @@ void free_parser_result()
   g_parser_result = nullptr;
 }
 
-/* Memory read */
+/* Get ts_hash for current process to read from snapshot */
+static hash_type get_current_ts_hash(int pid)
+{
+  int index = -1;
+  // Try to find index from pid
+  for (int i = 0; i < NP; i++)
+  {
+    if (ptmc_state.pids[i] == pid)
+    {
+      index = i;
+      break;
+    }
+  }
+  if (index >= 0 && index < NP)
+  {
+    return ptmc_state.running_state.ts_hash[index];
+  }
+  return 0;
+}
+
+/* Memory read - optimized to use snapshot instead of ptrace */
 static long read_memory_long(int pid, uint64_t addr, bool &success)
 {
+  // Try to read from snapshot first (much faster than ptrace)
+  hash_type ts_hash = get_current_ts_hash(pid);
+  if (ts_hash != 0)
+  {
+    void *data = read_mem(pid, ts_hash, addr, sizeof(long));
+    if (data)
+    {
+      long result = *(long *)data;
+      free(data);
+      success = true;
+      return result;
+    }
+  }
+
+  // Fallback to ptrace if snapshot read fails
   errno = 0;
   long data = ptrace(PTRACE_PEEKDATA, pid, addr, nullptr);
   if (errno != 0)
@@ -876,7 +913,7 @@ EvalResult SizeofTypeNode::eval(int pid, bool &success) const
   /* If type not found, try evaluating as expression */
   if (size == 0)
   {
-    ExprNode *expr = parse_expression(type_name_.c_str());
+    auto expr = ExprCache::instance().get(type_name_);
     if (expr)
     {
       bool dummy;
@@ -885,7 +922,6 @@ EvalResult SizeofTypeNode::eval(int pid, bool &success) const
       {
         size = dwarf_type_size(op_res.type_name.c_str());
       }
-      delete expr;
     }
   }
 
@@ -976,3 +1012,48 @@ std::string ProcessQualifiedNode::to_string() const
 }
 
 // namespace end
+
+ExprCache &ExprCache::instance()
+{
+  static ExprCache instance;
+  return instance;
+}
+
+std::shared_ptr<ExprNode> ExprCache::get(const std::string &expr)
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+
+  auto it = cache_.find(expr);
+  if (it != cache_.end())
+  {
+    return it->second;
+  }
+
+  ExprNode *ast = parse_expression(expr);
+  if (!ast)
+  {
+    return nullptr;
+  }
+
+  std::shared_ptr<ExprNode> result(ast);
+  if (cache_.size() >= MAX_CACHE_SIZE)
+  {
+    auto mid = cache_.begin();
+    std::advance(mid, cache_.size() / 2);
+    cache_.erase(cache_.begin(), mid);
+  }
+  cache_[expr] = result;
+  return result;
+}
+
+void ExprCache::clear()
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  cache_.clear();
+}
+
+size_t ExprCache::size() const
+{
+  std::lock_guard<std::mutex> lock(mutex_);
+  return cache_.size();
+}

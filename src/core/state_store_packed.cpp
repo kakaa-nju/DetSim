@@ -719,13 +719,19 @@ hash_type StateStorePacked::save(const void *data, size_t len)
 
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
-  /* Check if already exists */
-  if (index_.count(hash))
+  auto it = index_.find(hash);
+  if (it != index_.end())
   {
-    return hash;
+    std::vector<uint8_t> verify_data;
+    ssize_t loaded = load(hash, verify_data);
+    if (loaded > 0)
+    {
+      return hash;
+    }
+    LOG_WARN("Hash %016lx in index but data unreadable, re-saving", hash);
+    index_.erase(it);
   }
 
-  /* Compress data */
   std::vector<uint8_t> raw_data(len);
   memcpy(raw_data.data(), data, len);
   std::vector<uint8_t> compressed = compress(raw_data);
@@ -818,6 +824,11 @@ hash_type StateStorePacked::save(const void *data, size_t len)
     save_segments_info();
   }
 
+  if (active_segment_fd_ >= 0)
+  {
+    fsync(active_segment_fd_);
+  }
+
   LOG_TRACE("Saved hash %016lx to segment %u, offset %lu, size %zu -> %u", hash,
             entry.segment_id, entry.offset, len, entry.compressed_size);
 
@@ -831,6 +842,8 @@ ssize_t StateStorePacked::load(hash_type hash, std::vector<uint8_t> &data)
   auto it = index_.find(hash);
   if (it == index_.end())
   {
+    LOG_WARN("Hash %016lx not found in packed index (total entries: %zu)", hash,
+             index_.size());
     return -1;
   }
 
