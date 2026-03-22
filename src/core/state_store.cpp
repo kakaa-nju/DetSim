@@ -194,6 +194,14 @@ void StateStore::shutdown()
     }
   }
 
+  // Flush packed storage index and segment info to ensure data consistency
+  if (config_.use_packed_storage)
+  {
+    StateStorePacked::instance().save_segments_info();
+    StateStorePacked::instance().flush_index();
+    LOG_INFO("StateStore shutdown: flushed packed storage index and segments info");
+  }
+
   // Clear ZSTD context caches (prevents memory leak warnings)
   {
     std::lock_guard<std::mutex> lock(ctx_cache_mutex_);
@@ -982,6 +990,8 @@ hash_type StateStore::save(const void *data, size_t len)
   {
     std::lock_guard<std::mutex> lock(stats_mutex_);
     stats_.save_dedup_disk++;
+    LOG_DEBUG("StateStore::save: hash %016lx already exists on disk, skipping",
+              hash);
     return hash;
   }
 
@@ -1314,6 +1324,14 @@ void StateStore::wait_for_completion()
                      return entry->state.load() == StateEntry::State::PERSISTED;
                    });
   }
+
+  // Flush packed storage index to ensure index entries are persisted
+  if (config_.use_packed_storage)
+  {
+    StateStorePacked::instance().save_segments_info();
+    StateStorePacked::instance().flush_index();
+    LOG_INFO("StateStore wait_for_completion: flushed packed storage index");
+  }
 }
 
 /* ==============================================================================
@@ -1365,7 +1383,8 @@ void StateStore::io_worker()
         entry->state = StateEntry::State::PERSISTING;
       }
 
-      bool success = write_to_disk(entry->hash, entry->compressed_data);
+      bool success = write_to_disk(entry->hash, entry->compressed_data,
+                                   entry->raw_data.size());
 
       if (success)
       {
@@ -1627,12 +1646,15 @@ std::vector<uint8_t> StateStore::decompress(const std::vector<uint8_t> &data,
  * ==============================================================================
  */
 
-bool StateStore::write_to_disk(hash_type hash, const std::vector<uint8_t> &data)
+bool StateStore::write_to_disk(hash_type hash, const std::vector<uint8_t> &compressed_data,
+                                 size_t original_size)
 {
   if (config_.use_packed_storage)
   {
     StateStorePacked &packed = StateStorePacked::instance();
-    hash_type result = packed.save(data.data(), data.size());
+    // Pass precomputed hash, mark data as compressed, pass original size
+    hash_type result = packed.save(compressed_data.data(), compressed_data.size(), 
+                                   hash, true, original_size);
     return result != 0;
   }
 
@@ -1658,7 +1680,7 @@ bool StateStore::write_to_disk(hash_type hash, const std::vector<uint8_t> &data)
     }
   } file_guard(fp);
 
-  if (fwrite(data.data(), 1, data.size(), fp) != data.size())
+  if (fwrite(compressed_data.data(), 1, compressed_data.size(), fp) != compressed_data.size())
   {
     LOG_ERROR("Failed to write data to %s", path.c_str());
     return false;

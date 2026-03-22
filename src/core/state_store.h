@@ -387,7 +387,8 @@ class StateStore
   ZSTDContextCache *get_thread_ctx_cache();
 
   // Disk operations
-  bool write_to_disk(hash_type hash, const std::vector<uint8_t> &data);
+  bool write_to_disk(hash_type hash, const std::vector<uint8_t> &compressed_data,
+                     size_t original_size);
   bool read_from_disk(hash_type hash, std::vector<uint8_t> &data);
   bool read_compressed_from_disk(hash_type hash,
                                  std::vector<uint8_t> &compressed_data);

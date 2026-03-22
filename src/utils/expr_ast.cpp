@@ -139,6 +139,17 @@ EvalResult VariableNode::eval(int pid, bool &success) const
   uint64_t addr = addr_res.as_address();
   std::string type_name = addr_res.type_name;
 
+  /* Special handling for ELF symbols (func and void*) - return address directly
+   * For ELF symbols without DWARF type info, we don't know the actual type,
+   * so we return the address. User can dereference with *var if needed.
+   */
+  if (type_name == "func" || type_name == "void*")
+  {
+    EvalResult res(static_cast<long>(addr));
+    res.type_name = type_name;
+    return res;
+  }
+
   if (!type_name.empty())
   {
     type_info info = dwarf_get_type_info(type_name.c_str());

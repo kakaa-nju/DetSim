@@ -7,8 +7,10 @@
 #include <cctype>
 #include <cstring>
 #include <dwarf.h>
+#include <elf.h>
 #include <fcntl.h>
 #include <fmt/format.h>
+#include <gelf.h>
 #include <libdwarf/libdwarf.h>
 #include <stack>
 #include <unistd.h>
@@ -57,6 +59,22 @@ std::unordered_map<std::string, var_info> global_vars;
 
 /* Type cache */
 std::unordered_map<std::string, type_info> type_cache;
+
+/* ELF symbol cache for symbols not in DWARF (e.g., _dl_x86_cpu_features) */
+struct elf_symbol
+{
+  std::string name;
+  uintptr_t address = 0;
+  size_t size = 0;
+  int type = 0; /* STT_OBJECT, STT_FUNC, etc. */
+  int bind = 0; /* STB_GLOBAL, STB_LOCAL, etc. */
+};
+static std::unordered_map<std::string, elf_symbol> elf_symbol_cache;
+static std::string current_elf_path;
+
+/* Forward declarations for ELF symbol handling */
+static void load_elf_symbols(const char *executable);
+static uintptr_t lookup_elf_symbol(const char *symname);
 
 /* ======================================================================
  * Section 2: Type Parsing
@@ -759,6 +777,9 @@ void dwarf_init(const char *executable)
   LOG_INFO("DWARF: Parsed %zu global variables", global_vars.size());
 
   LOG_INFO("DWARF: Cached %zu types", type_cache.size());
+
+  /* Also load ELF symbols as fallback for symbols not in DWARF */
+  load_elf_symbols(executable);
 }
 
 void dwarf_cleanup(void)
@@ -776,6 +797,8 @@ void dwarf_cleanup(void)
   }
   global_vars.clear();
   type_cache.clear();
+  elf_symbol_cache.clear();
+  current_elf_path.clear();
 }
 
 /* Legacy compatibility wrapper */
@@ -813,28 +836,194 @@ void cleanup_dwarf(void)
   type_cache.clear();
 }
 
+/* ==================================================================
+ * Section 5.5: ELF Symbol Table Parsing (fallback for non-DWARF symbols)
+ * ====================================================================== */
+
+/* Load symbols from ELF symbol table (.symtab or .dynsym)
+ * This is needed for symbols like _dl_x86_cpu_features which are
+ * defined in shared libraries but may not have DWARF debug info */
+static void load_elf_symbols(const char *executable)
+{
+  if (elf_version(EV_CURRENT) == EV_NONE)
+  {
+    LOG_ERROR("ELF library initialization failed");
+    return;
+  }
+
+  int fd = open(executable, O_RDONLY);
+  if (fd < 0)
+  {
+    LOG_ERROR("Failed to open %s for ELF symbol parsing", executable);
+    return;
+  }
+
+  Elf *e = elf_begin(fd, ELF_C_READ, nullptr);
+  if (!e)
+  {
+    LOG_ERROR("elf_begin failed: %s", elf_errmsg(-1));
+    close(fd);
+    return;
+  }
+
+  /* Clear existing cache */
+  elf_symbol_cache.clear();
+  current_elf_path = executable;
+
+  size_t shstrndx;
+  if (elf_getshdrstrndx(e, &shstrndx) != 0)
+  {
+    LOG_ERROR("elf_getshdrstrndx failed");
+    elf_end(e);
+    close(fd);
+    return;
+  }
+
+  /* Iterate through all sections to find symbol tables */
+  Elf_Scn *scn = nullptr;
+  while ((scn = elf_nextscn(e, scn)) != nullptr)
+  {
+    GElf_Shdr shdr;
+    if (gelf_getshdr(scn, &shdr) != &shdr)
+      continue;
+
+    /* Look for .symtab or .dynsym sections */
+    if (shdr.sh_type != SHT_SYMTAB && shdr.sh_type != SHT_DYNSYM)
+      continue;
+
+    /* Get the string table for this symbol table */
+    Elf_Scn *str_scn = elf_getscn(e, shdr.sh_link);
+    if (!str_scn)
+      continue;
+
+    GElf_Shdr str_shdr;
+    if (gelf_getshdr(str_scn, &str_shdr) != &str_shdr)
+      continue;
+
+    Elf_Data *str_data = elf_getdata(str_scn, nullptr);
+    if (!str_data)
+      continue;
+
+    /* Get symbol table data */
+    Elf_Data *sym_data = elf_getdata(scn, nullptr);
+    if (!sym_data)
+      continue;
+
+    size_t num_syms = shdr.sh_size / shdr.sh_entsize;
+
+    for (size_t i = 0; i < num_syms; i++)
+    {
+      GElf_Sym sym;
+      if (gelf_getsym(sym_data, i, &sym) != &sym)
+        continue;
+
+      /* Only interested in global or weak symbols with names */
+      if (sym.st_name == 0)
+        continue;
+
+      int bind = GELF_ST_BIND(sym.st_info);
+      if (bind != STB_GLOBAL && bind != STB_WEAK)
+        continue;
+
+      /* Get symbol name */
+      if (!str_data->d_buf)
+        continue;
+      const char *sym_name =
+          (const char *)str_data->d_buf + sym.st_name;
+      if (!sym_name || !*sym_name)
+        continue;
+
+      /* Only cache object and function symbols with valid addresses */
+      int type = GELF_ST_TYPE(sym.st_info);
+      if (type != STT_OBJECT && type != STT_FUNC)
+        continue;
+
+      /* Skip undefined symbols (imported from other libraries) */
+      if (sym.st_shndx == SHN_UNDEF)
+        continue;
+
+      elf_symbol esym;
+      esym.name = sym_name;
+      esym.address = (uintptr_t)sym.st_value;
+      esym.size = (size_t)sym.st_size;
+      esym.type = type;
+      esym.bind = bind;
+
+      elf_symbol_cache[sym_name] = esym;
+    }
+  }
+
+  elf_end(e);
+  close(fd);
+
+  LOG_INFO("ELF: Loaded %zu symbols from %s", elf_symbol_cache.size(),
+           executable);
+}
+
+/* Lookup a symbol in the ELF symbol cache
+ * Returns 0 if not found */
+static uintptr_t lookup_elf_symbol(const char *symname)
+{
+  if (!symname || !*symname)
+    return 0;
+
+  auto it = elf_symbol_cache.find(symname);
+  if (it != elf_symbol_cache.end())
+  {
+    LOG_DEBUG("ELF: Found symbol %s at 0x%lx", symname, it->second.address);
+    return it->second.address;
+  }
+
+  return 0;
+}
+
+/* Get ELF symbol type info
+ * Returns "func" for functions, "void*" for data objects, "" if not found */
+static std::string get_elf_symbol_type(const char *symname)
+{
+  if (!symname || !*symname)
+    return "";
+
+  auto it = elf_symbol_cache.find(symname);
+  if (it != elf_symbol_cache.end())
+  {
+    if (it->second.type == STT_FUNC)
+      return "func"; /* Special marker for function pointers */
+    else if (it->second.type == STT_OBJECT)
+      return "void*"; /* Generic pointer for data symbols */
+  }
+
+  return "";
+}
+
 /* ======================================================================
  * Section 6: Variable Lookup API
  * ====================================================================== */
 
 uintptr_t dwarf_get_global_addr(const char *varname)
 {
+  /* First try DWARF debug info */
   auto it = global_vars.find(varname);
   if (it != global_vars.end())
   {
     return it->second.address;
   }
-  return 0;
+
+  /* Fallback to ELF symbol table */
+  return lookup_elf_symbol(varname);
 }
 
 std::string dwarf_get_global_type(const char *varname)
 {
+  /* First try DWARF debug info */
   auto it = global_vars.find(varname);
   if (it != global_vars.end())
   {
     return it->second.type_name;
   }
-  return "";
+
+  /* Fallback to ELF symbol type */
+  return get_elf_symbol_type(varname);
 }
 
 /* Parse a type name to extract base type and modifiers (array, pointer) */

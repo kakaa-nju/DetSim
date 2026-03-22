@@ -29,6 +29,8 @@ int tracee_write_word(int pid, void *addr, long data);
 void tracee_write_mem(int pid, void *addr, const void *data, int len);
 void tracee_read_mem(int pid, const void *addr, void *data, int len);
 void remove_vdso(int pid);
+int patch_at_random(pid_t pid);
+void patch_cpu_features_elf(pid_t pid);
 
 void show_regs(struct user_regs_struct *regs);
 void tracee_switch_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,

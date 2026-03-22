@@ -476,18 +476,28 @@ syscall_info extract_one_syscall(pid_t pid)
   {
     ret.rval = 114514;
     tracee_set_rax(pid, 114514);
+    LOG_INFO("Neutralize set_tid_address, return 114514");
   }
   /* getrandom */
   if (ret.nr == SYS_getrandom)
   {
     memcpy_host2guest((void *)ret.args[0], "\0\0\0\0\0\0\0\0", 8);
+    LOG_INFO("Neutralize getrandom(%p, %d, %d)", (void *)ret.args[0], ret.args[1],
+             ret.args[2]);
   }
   /* rseq mask */
   if (ret.nr == SYS_rseq)
   {
     rseq_struct[pid] = (void *)ret.args[0];
     rseq_len[pid] = ret.args[1];
-    LOG_TRACE("Record rseq(%p, %d)", (void *)ret.args[0], ret.args[1]);
+    LOG_INFO("Record rseq(%p, %d)", (void *)ret.args[0], ret.args[1]);
+  }
+  
+  if (ret.nr == SYS_getcpu)
+  {
+    tracee_set_rax(pid, 0);
+    tracee_set_orig_rax(pid, 0);
+    LOG_INFO("Neutralize getcpu, return 0 and do nothing to arguments");
   }
   return ret;
 }
@@ -517,11 +527,13 @@ static void init_tracee_state(int index)
   assert(WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGTRAP);
 
   remove_vdso(pid);
+  patch_at_random(pid);
 
   /* skip non-user code: *
    * Libc initialization ends with an `munmap` call */
   while (extract_one_syscall(pid).nr != stop_nr)
     ;
+  patch_cpu_features_elf(pid);
 
   /* Preserve memory for parameters. Need recover registers *
    * for the original first syscall. */

@@ -73,6 +73,14 @@ void StateStorePacked::init(const Config &config)
   /* Load incremental index */
   load_incremental_index();
 
+  /* If index is empty but segments exist, rebuild index from segments */
+  if (index_.empty() && !segments_.empty())
+  {
+    LOG_WARN("Index empty but %zu segments found, rebuilding index...",
+             segments_.size());
+    rebuild_index();
+  }
+
   /* Ensure we have an active segment */
   ensure_active_segment();
 
@@ -448,19 +456,23 @@ void StateStorePacked::append_to_incremental_index(
 {
   incremental_index_[hash] = entry;
 
-  FILE *fp = fopen(get_incremental_index_path().c_str(), "ab");
+  std::string inc_path = get_incremental_index_path();
+  
+  /* Check if file already exists (to avoid duplicate header) */
+  bool file_exists = (access(inc_path.c_str(), F_OK) == 0);
+  
+  FILE *fp = fopen(inc_path.c_str(), "ab");
   if (!fp)
   {
     LOG_ERROR("Failed to open incremental index for append");
     return;
   }
 
-  static bool write_header = true;
-  if (write_header)
+  /* Write header only if file is new/empty */
+  if (!file_exists || ftell(fp) == 0)
   {
     uint32_t magic = INCREMENTAL_MAGIC;
     fwrite(&magic, sizeof(magic), 1, fp);
-    write_header = false;
   }
 
   fwrite(&hash, sizeof(hash), 1, fp);
@@ -470,6 +482,7 @@ void StateStorePacked::append_to_incremental_index(
   fwrite(&entry.original_size, sizeof(entry.original_size), 1, fp);
   fwrite(&entry.checksum, sizeof(entry.checksum), 1, fp);
 
+  fflush(fp);
   fclose(fp);
 }
 
@@ -644,6 +657,7 @@ StateStorePacked::decompress(const std::vector<uint8_t> &data,
   size_t dst_capacity = original_size;
   if (original_size == 0)
   {
+    LOG_WARN("Decompress called with original_size=0, trying to get from frame");
     unsigned long long frame_size =
         ZSTD_getFrameContentSize(data.data(), data.size());
     if (frame_size != ZSTD_CONTENTSIZE_UNKNOWN &&
@@ -652,10 +666,12 @@ StateStorePacked::decompress(const std::vector<uint8_t> &data,
       if (frame_size <= SIZE_MAX)
       {
         dst_capacity = static_cast<size_t>(frame_size);
+        LOG_DEBUG("Got frame content size: %zu", dst_capacity);
       }
     }
     else
     {
+      LOG_WARN("Could not get frame content size, using fallback");
       dst_capacity = data.size() * 10;
     }
   }
@@ -710,12 +726,11 @@ uint32_t StateStorePacked::compute_checksum(const std::vector<uint8_t> &data)
  * ==============================================================================
  */
 
-hash_type StateStorePacked::save(const void *data, size_t len)
+hash_type StateStorePacked::save(const void *data, size_t len, hash_type hash,
+                                 bool is_compressed, size_t original_size)
 {
-  if (!data || len == 0)
+  if (!data || len == 0 || hash == 0)
     return 0;
-
-  hash_type hash = compute_xxhash(data, len);
 
   std::lock_guard<std::recursive_mutex> lock(mutex_);
 
@@ -732,9 +747,33 @@ hash_type StateStorePacked::save(const void *data, size_t len)
     index_.erase(it);
   }
 
-  std::vector<uint8_t> raw_data(len);
-  memcpy(raw_data.data(), data, len);
-  std::vector<uint8_t> compressed = compress(raw_data);
+  std::vector<uint8_t> compressed;
+  size_t orig_size;
+  
+  if (is_compressed)
+  {
+    /* Data is already compressed */
+    compressed.resize(len);
+    memcpy(compressed.data(), data, len);
+    if (original_size > 0)
+    {
+      orig_size = original_size;
+    }
+    else
+    {
+      LOG_ERROR("Save called with is_compressed=true but original_size=0! hash=%016lx, len=%zu", 
+                hash, len);
+      orig_size = len; /* Fallback - will cause decompression error! */
+    }
+  }
+  else
+  {
+    /* Need to compress raw data */
+    std::vector<uint8_t> raw_data(len);
+    memcpy(raw_data.data(), data, len);
+    compressed = compress(raw_data);
+    orig_size = len;
+  }
 
   if (compressed.empty())
   {
@@ -769,18 +808,51 @@ hash_type StateStorePacked::save(const void *data, size_t len)
   header.magic = DATA_MAGIC;
   header.hash = hash;
   header.compressed_size = compressed.size();
-  header.original_size = len;
-  header.checksum = compute_checksum(raw_data);
+  header.original_size = orig_size;
+  /* Compute checksum of original data if available, otherwise use compressed */
+  if (is_compressed && original_size > 0)
+  {
+    /* We don't have original data, use a simple checksum of compressed data */
+    header.checksum = compute_checksum(compressed);
+  }
+  else
+  {
+    std::vector<uint8_t> raw_data(orig_size);
+    if (is_compressed)
+    {
+      /* Decompress to get raw data for checksum - this is expensive! */
+      /* For now, use compressed checksum as workaround */
+      header.checksum = compute_checksum(compressed);
+    }
+    else
+    {
+      memcpy(raw_data.data(), data, orig_size);
+      header.checksum = compute_checksum(raw_data);
+    }
+  }
 
-  /* Current offset (where payload will be written) */
-  off_t current_offset = lseek(active_segment_fd_, 0, SEEK_CUR);
-  if (current_offset < 0)
+  /* Write header + compressed data atomically using O_APPEND */
+  /* Note: O_APPEND ensures atomic append, but we need to know the offset */
+  /* Get current file size (where header will be written) */
+  off_t header_offset = lseek(active_segment_fd_, 0, SEEK_CUR);
+  if (header_offset < 0)
   {
     LOG_ERROR("Failed to get current offset");
     return 0;
   }
 
-  /* Write header + compressed data */
+  /* Verify we're at the end of file */
+  struct stat st;
+  if (fstat(active_segment_fd_, &st) == 0)
+  {
+    if (header_offset != st.st_size)
+    {
+      LOG_WARN("Offset mismatch: lseek=%ld, stat=%ld, correcting", 
+               (long)header_offset, (long)st.st_size);
+      header_offset = st.st_size;
+    }
+  }
+
   ssize_t written = write(active_segment_fd_, &header, sizeof(header));
   if (written != sizeof(header))
   {
@@ -798,9 +870,9 @@ hash_type StateStorePacked::save(const void *data, size_t len)
   /* Update index */
   PackedIndexEntry entry;
   entry.segment_id = active_segment_id_;
-  entry.offset = current_offset + sizeof(PackedDataHeader);
+  entry.offset = header_offset + sizeof(PackedDataHeader);
   entry.compressed_size = compressed.size();
-  entry.original_size = len;
+  entry.original_size = orig_size;  /* BUG FIX: was 'len', should be 'orig_size' */
   entry.checksum = header.checksum;
 
   index_[hash] = entry;
@@ -842,8 +914,7 @@ ssize_t StateStorePacked::load(hash_type hash, std::vector<uint8_t> &data)
   auto it = index_.find(hash);
   if (it == index_.end())
   {
-    LOG_WARN("Hash %016lx not found in packed index (total entries: %zu)", hash,
-             index_.size());
+    LOG_DEBUG("Hash %016lx not found in packed index (total entries: %zu)", hash, index_.size());
     return -1;
   }
 
@@ -905,17 +976,18 @@ ssize_t StateStorePacked::load(hash_type hash, std::vector<uint8_t> &data)
   }
 
   /* Decompress */
+  /* Verify compressed checksum first (stored checksum is for compressed data
+   * when data is saved as compressed, since we don't have original data) */
+  if (compute_checksum(compressed) != entry.checksum)
+  {
+    LOG_ERROR("Compressed checksum mismatch for hash %016lx", hash);
+    return -1;
+  }
+
   data = decompress(compressed, entry.original_size);
   if (data.empty())
   {
     LOG_ERROR("Failed to decompress data for hash %016lx", hash);
-    return -1;
-  }
-
-  /* Verify decompressed checksum */
-  if (compute_checksum(data) != entry.checksum)
-  {
-    LOG_ERROR("Checksum mismatch for hash %016lx", hash);
     return -1;
   }
 
@@ -929,7 +1001,13 @@ ssize_t StateStorePacked::load(hash_type hash, std::vector<uint8_t> &data)
 bool StateStorePacked::exists(hash_type hash)
 {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
-  return index_.count(hash) > 0;
+  bool found = index_.count(hash) > 0;
+  if (!found)
+  {
+    LOG_DEBUG("Hash %016lx not found in packed index (total entries: %zu)",
+             hash, index_.size());
+  }
+  return found;
 }
 
 bool StateStorePacked::wait_persisted(hash_type hash, uint64_t timeout_ms)
@@ -1168,7 +1246,9 @@ extern "C"
 
   uint64_t state_store_packed_save(const void *data, size_t len)
   {
-    return StateStorePacked::instance().save(data, len);
+    // C interface: compute hash from raw data
+    hash_type hash = compute_xxhash(data, len);
+    return StateStorePacked::instance().save(data, len, hash);
   }
 
   ssize_t state_store_packed_load(uint64_t hash, void *data, size_t max_len)

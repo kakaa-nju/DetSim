@@ -97,11 +97,11 @@ int main(int argc, char *argv[])
   /* 初始化监控器 */
   init_monitor(argc, argv);
 
-  /* 启动 tracee */
-  state_initialization();
-
   /* 分析变量地址 */
   init_dwarf();
+
+  /* 启动 tracee */
+  state_initialization();
 
   // 使用日志宏输出调试信息
   UI_LOG_DEBUG("About to call ui_mainloop");

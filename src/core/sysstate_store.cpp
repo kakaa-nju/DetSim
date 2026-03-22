@@ -26,12 +26,14 @@
 #define INDEX_FLUSH_INTERVAL_ENTRIES 10000   // Flush every N entries (was 10)
 #define INDEX_FLUSH_INTERVAL_SECONDS 30      // Or every N seconds
 
-struct DataEntryHeader {
+/* Packed to avoid alignment padding */
+struct __attribute__((packed)) DataEntryHeader {
     uint32_t magic;
     hash_type hash;
     uint32_t size;
     uint32_t checksum;
 };
+static_assert(sizeof(DataEntryHeader) == 20, "DataEntryHeader size must be 20 bytes");
 
 SysStateStore& SysStateStore::instance() {
     static SysStateStore instance;

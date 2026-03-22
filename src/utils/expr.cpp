@@ -207,6 +207,21 @@ static void print_value_recursive(int pid, const char *expr, uint64_t addr,
   for (int i = 0; i < indent; i++)
     detsim::ui::ui_printf("  ");
 
+  /* Special handling for ELF symbols - addr is the symbol address */
+  if (type_name == "func" || type_name == "void*")
+  {
+    const char *type_str = (type_name == "func") ? "func" : "void*";
+    if (is_member)
+    {
+      detsim::ui::ui_printf("%s = (%s) 0x%lx,\n", expr, type_str, (unsigned long)addr);
+    }
+    else
+    {
+      detsim::ui::ui_printf("%s = (%s) 0x%lx\n", expr, type_str, (unsigned long)addr);
+    }
+    return;
+  }
+
   if (type_name.empty())
   {
     long val = ptrace(PTRACE_PEEKDATA, pid, addr, nullptr);

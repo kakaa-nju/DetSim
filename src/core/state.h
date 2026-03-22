@@ -17,7 +17,8 @@
  * State Data Format (shared with StateStore)
  * ====================================================================== */
 
-struct StateDataHeader
+/* Packed to avoid alignment padding */
+struct __attribute__((packed)) StateDataHeader
 {
   uint32_t magic;         // 'DSTM' = 0x4453544D
   uint32_t version;       // 3 (updated for integrated mappings)
@@ -28,8 +29,10 @@ struct StateDataHeader
   uint64_t maps_size;     // size of mappings data
   uint64_t regs_offset;   // offset to register data
 };
+static_assert(sizeof(StateDataHeader) == 52, "StateDataHeader size must be 52 bytes");
 
-struct RegionInfo
+/* Packed to avoid alignment padding */
+struct __attribute__((packed)) RegionInfo
 {
   uint64_t start;
   uint64_t end;
@@ -37,6 +40,7 @@ struct RegionInfo
   uint32_t prot;   // protection flags (PROT_READ/WRITE/EXEC)
   char flags[5];   // original flags string from /proc/pid/maps (e.g., "rwxp")
 };
+static_assert(sizeof(RegionInfo) == 33, "RegionInfo size must be 33 bytes");
 
 /* ======================================================================
  * Syscall Info Structure

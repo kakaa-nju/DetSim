@@ -18,11 +18,13 @@
 #include <chrono>
 
 /* Entry in the index */
-struct SysStateEntry {
+/* Packed to avoid alignment padding */
+struct __attribute__((packed)) SysStateEntry {
     uint64_t offset;    // Offset in data file
     uint32_t size;      // Size of serialized data
     uint32_t checksum;  // Simple checksum for validation
 };
+static_assert(sizeof(SysStateEntry) == 16, "SysStateEntry size must be 16 bytes");
 
 class SysStateStore {
 public:

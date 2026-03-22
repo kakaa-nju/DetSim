@@ -335,8 +335,9 @@ static int cmd_load(char *args)
 
   if (s.size() == 1)
   {
-    ptmc_state.running_state = sys_state(s[0]);
-    ptmc_state.running_state.recover_running_state(); 
+    sys_state state(s[0]);
+    state.recover_running_state(); 
+    ptmc_state.running_state = state;
     detsim::ui::ui_printf("Loaded state %016lx\n", s[0]);
   }
   else if (s.size() == 0)
@@ -720,26 +721,8 @@ static std::vector<hash_type> find_states_by_prefix(const char *prefix)
   if (!prefix)
     return matches;
 
-  DIR *dir = opendir("sstate");
-  if (!dir)
-    return matches;
-
-  struct dirent *de;
-  while ((de = readdir(dir)) != NULL)
-  {
-    if (de->d_name[0] == '.')
-      continue;
-    if (strstr(de->d_name, prefix) == de->d_name)
-    {
-      hash_type hash;
-      if (sscanf(de->d_name, "%lx", &hash) == 1)
-      {
-        matches.push_back(hash);
-      }
-    }
-  }
-  closedir(dir);
-  return matches;
+  /* Use SysStateStore to find by prefix (packed storage) */
+  return SysStateStore::instance().find_by_prefix(prefix);
 }
 
 /* Helper: Print formatted hash */

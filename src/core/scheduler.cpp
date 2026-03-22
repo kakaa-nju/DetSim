@@ -9,6 +9,7 @@
 #include "sockstate.h"
 #include "state.h"
 #include "state_store.h"
+#include "state_store_packed.h"
 #include "state_transition.h"
 #include "sysstate_store.h"
 #include "utils.h"
@@ -718,6 +719,8 @@ int exec_bfs()
        * consistency */
       detsim::ui::ui_printf("Flushing pending state writes...\n");
       StateStore::instance().wait_for_completion();
+      /* Flush StateStorePacked index */
+      StateStorePacked::instance().flush_index();
       /* Flush SysStateStore index to merge incremental entries */
       SysStateStore::instance().flush_index();
       detsim::ui::ui_printf(
@@ -863,6 +866,8 @@ int do_dfs(hash_type ss_hash, int depth)
      */
     detsim::ui::ui_printf("Flushing pending state writes...\n");
     StateStore::instance().wait_for_completion();
+    /* Flush StateStorePacked index */
+    StateStorePacked::instance().flush_index();
     /* Flush SysStateStore index to merge incremental entries */
     SysStateStore::instance().flush_index();
     detsim::ui::ui_printf(
@@ -1012,6 +1017,8 @@ int exec_rand(int depth)
        * consistency */
       detsim::ui::ui_printf("Flushing pending state writes...\n");
       StateStore::instance().wait_for_completion();
+      /* Flush StateStorePacked index */
+      StateStorePacked::instance().flush_index();
       /* Flush SysStateStore index to merge incremental entries */
       SysStateStore::instance().flush_index();
       detsim::ui::ui_printf(
