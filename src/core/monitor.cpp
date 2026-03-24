@@ -29,6 +29,7 @@
 #include <dirent.h>
 #include <fmt/format.h>
 #include <iomanip>
+#include <map>
 #include <readline/history.h>
 #include <readline/readline.h>
 #include <set>
@@ -38,7 +39,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
-#include <map>
 #include <vector>
 
 /* Defined in config.cpp */
@@ -293,7 +293,8 @@ static int cmd_si(char *args)
 
   load_exec_store();
 
-  show_syscall(ptmc_state.pids[cursor], ptmc_state.running_state.ts_hash[cursor]);
+  show_syscall(ptmc_state.pids[cursor],
+               ptmc_state.running_state.ts_hash[cursor]);
 
   return 0;
 }
@@ -336,7 +337,7 @@ static int cmd_load(char *args)
   if (s.size() == 1)
   {
     sys_state state(s[0]);
-    state.recover_running_state(); 
+    state.recover_running_state();
     ptmc_state.running_state = state;
     detsim::ui::ui_printf("Loaded state %016lx\n", s[0]);
   }
@@ -361,6 +362,123 @@ static std::string format_addr_short(const struct sockaddr_in &addr)
   return fmt::format("{}:{}", ip, ntohs(addr.sin_port));
 }
 
+/* Helper: Display all socket states */
+static void show_socket_states()
+{
+  detsim::ui::ui_printf("\n[Socket States]\n");
+
+  for (int i = 0; i < NP; i++)
+  {
+    const auto &sockets = ptmc_state.sock_states[i].sockets();
+    const auto &tcp_conns = ptmc_state.sock_states[i].tcp_connections();
+
+    if (sockets.empty() && tcp_conns.empty())
+    {
+      continue;
+    }
+
+    detsim::ui::ui_printf("  Process %d:\n", i);
+
+    for (const auto &kv : sockets)
+    {
+      int fd = kv.first;
+      const Socket &sock = kv.second;
+
+      std::string type_str = (sock.type == SOCK_STREAM) ? "TCP" : "UDP";
+      std::string state_str;
+
+      if (sock.listening)
+      {
+        state_str = "LISTEN";
+      }
+      else if (sock.connected)
+      {
+        state_str = "CONNECTED";
+      }
+      else if (sock.bound)
+      {
+        state_str = "BOUND";
+      }
+      else
+      {
+        state_str = "OPEN";
+      }
+
+      detsim::ui::ui_printf("    fd=%d: %s %s", fd, type_str.c_str(),
+                            state_str.c_str());
+
+      if (sock.bound)
+      {
+        detsim::ui::ui_printf(" local=%s",
+                              format_addr_short(sock.local_addr).c_str());
+      }
+
+      if (sock.connected)
+      {
+        detsim::ui::ui_printf(" peer=%s",
+                              format_addr_short(sock.peer_addr).c_str());
+      }
+
+      if (sock.listening)
+      {
+        detsim::ui::ui_printf(" backlog=%zu pending=%zu", (size_t)sock.backlog,
+                              sock.pending_connections.size());
+      }
+
+      detsim::ui::ui_printf("\n");
+    }
+
+    for (const auto &kv : tcp_conns)
+    {
+      int fd = kv.first;
+      const TcpConnection &conn = kv.second;
+
+      detsim::ui::ui_printf("    fd=%d: TCP_CONN local=%s peer=%s recv_q=%zu\n",
+                            fd, format_addr_short(conn.local_addr).c_str(),
+                            format_addr_short(conn.peer_addr).c_str(),
+                            conn.recv_buffer.size());
+    }
+  }
+}
+
+/* Helper: Display epoll states */
+static void show_epoll_states()
+{
+  detsim::ui::ui_printf("\n[Epoll States]\n");
+
+  for (int i = 0; i < NP; i++)
+  {
+    const auto &epoll_map = ptmc_state.sock_states[i].epoll_instances();
+
+    if (epoll_map.empty())
+    {
+      continue;
+    }
+
+    detsim::ui::ui_printf("  Process %d:\n", i);
+
+    for (const auto &kv : epoll_map)
+    {
+      int epfd = kv.first;
+      const EpollInstance &inst = kv.second;
+
+      detsim::ui::ui_printf("    epfd=%d: watching %zu fds, %zu ready events\n",
+                            epfd, inst.watched_fds.size(),
+                            inst.ready_events.size());
+
+      for (const auto &watched : inst.watched_fds)
+      {
+        int fd = watched.first;
+        uint32_t events = watched.second;
+        detsim::ui::ui_printf("      fd=%d events=%s%s%s\n", fd,
+                              (events & EPOLLIN) ? "IN " : "",
+                              (events & EPOLLOUT) ? "OUT " : "",
+                              (events & EPOLLERR) ? "ERR " : "");
+      }
+    }
+  }
+}
+
 /* Helper: Display UDP buffer state */
 static void show_udp_buffers()
 {
@@ -372,7 +490,6 @@ static void show_udp_buffers()
 
     if (udp_map.empty())
     {
-      detsim::ui::ui_printf("  Process %d: (empty)\n", i);
       continue;
     }
 
@@ -393,11 +510,11 @@ static void show_udp_buffers()
 
       detsim::ui::ui_printf("[%zu datagrams]\n", buf.size());
 
-      /* Show each datagram (limit to first 100) */
+      /* Show each datagram (limit to first 10) */
       size_t count = 0;
       for (const auto &dg : buf)
       {
-        if (count >= 100)
+        if (count >= 10)
         {
           detsim::ui::ui_printf("      ... (%zu more)\n", buf.size() - count);
           break;
@@ -406,13 +523,8 @@ static void show_udp_buffers()
         std::string from_str = format_addr_short(dg.from);
         size_t content_len = dg.content.size();
 
-        /* Parse Raft message from content */
-        std::string parsed_msg =
-            raft::parse_raft_message(dg.content.data(), dg.content.size());
-
-        detsim::ui::ui_printf("      [%zu] from=%s, len=%zu, msg=%s\n", count,
-                              from_str.c_str(), content_len,
-                              parsed_msg.c_str());
+        detsim::ui::ui_printf("      [%zu] from=%s, len=%zu\n", count,
+                              from_str.c_str(), content_len);
 
         count++;
       }
@@ -422,9 +534,11 @@ static void show_udp_buffers()
 
 static int cmd_info(char *args)
 {
-  // Handle "info sock" subcommand - only show UDP buffer state
+  // Handle "info sock" subcommand - show all network states
   if (args && (strcmp(args, "sock") == 0 || strcmp(args, "socket") == 0))
   {
+    show_socket_states();
+    show_epoll_states();
     show_udp_buffers();
     return 0;
   }
@@ -1418,8 +1532,8 @@ static void diff_fs_state(const FileSystemState &a, const FileSystemState &b,
 
 /* Helper: Compare socket lists */
 static void diff_sock_list(const std::map<int, Socket> &a,
-                           const std::map<int, Socket> &b,
-                           int proc_id, bool &has_diff)
+                           const std::map<int, Socket> &b, int proc_id,
+                           bool &has_diff)
 {
   if (a.size() != b.size())
   {
@@ -1430,10 +1544,9 @@ static void diff_sock_list(const std::map<int, Socket> &a,
 }
 
 /* Helper: Compare UDP buffers */
-static void
-diff_udp_buffers(const std::map<int, std::deque<UdpDatagram>> &a,
-                 const std::map<int, std::deque<UdpDatagram>> &b,
-                 int proc_id, bool &has_diff)
+static void diff_udp_buffers(const std::map<int, std::deque<UdpDatagram>> &a,
+                             const std::map<int, std::deque<UdpDatagram>> &b,
+                             int proc_id, bool &has_diff)
 {
   /* Check if maps have same keys */
   std::set<int> keys_a, keys_b;
@@ -1499,10 +1612,9 @@ diff_udp_buffers(const std::map<int, std::deque<UdpDatagram>> &a,
 }
 
 /* Helper: Compare TCP connections */
-static void
-diff_tcp_connections(const std::map<int, TcpConnection> &a,
-                     const std::map<int, TcpConnection> &b,
-                     int proc_id, bool &has_diff)
+static void diff_tcp_connections(const std::map<int, TcpConnection> &a,
+                                 const std::map<int, TcpConnection> &b,
+                                 int proc_id, bool &has_diff)
 {
   /* Check if maps have same keys */
   std::set<int> keys_a, keys_b;
@@ -1526,8 +1638,7 @@ diff_tcp_connections(const std::map<int, TcpConnection> &a,
     const auto &conn_a = kv.second;
     const auto &conn_b = b.at(fd);
 
-    if (conn_a.send_buffer.size() != conn_b.send_buffer.size() ||
-        conn_a.recv_buffer.size() != conn_b.recv_buffer.size())
+    if (conn_a.recv_buffer.size() != conn_b.recv_buffer.size())
     {
       detsim::ui::ui_printf("  [Process %d - TCP Connection fd=%d]\n", proc_id,
                             fd);

@@ -13,6 +13,7 @@
 #include <netinet/in.h>
 #include <sstream>
 #include <string>
+#include <sys/epoll.h>
 #include <sys/socket.h>
 #include <vector>
 
@@ -77,19 +78,39 @@ struct UdpDatagram
   void serialize(Archive &ar);
 };
 
-/* TCP connection state */
+/* TCP connection state - identified by addresses, not fds */
 struct TcpConnection
 {
-  int local_fd; // Local socket fd
-  int peer_fd;  // Peer socket fd (in other process)
-  int peer_pid; // Peer process ID
+  // Connection identifiers (for debugging)
+  int local_fd;
 
-  struct sockaddr_in local_addr;
-  struct sockaddr_in peer_addr;
+  // Connection endpoints
+  struct sockaddr_in local_addr; // Our address
+  struct sockaddr_in peer_addr;  // Remote address
 
-  // Data buffers
-  std::deque<std::string> send_buffer; // Data to be sent
-  std::deque<std::string> recv_buffer; // Data received
+  // Data buffer
+  std::deque<std::string> recv_buffer;
+
+  template <class Archive>
+  void serialize(Archive &ar);
+};
+
+struct EpollEvent
+{
+  uint32_t events;
+  int fd;
+
+  template <class Archive>
+  void serialize(Archive &ar);
+};
+
+struct EpollInstance
+{
+  int epoll_fd;
+  std::map<int, uint32_t> watched_fds;
+  std::deque<EpollEvent> ready_events;
+
+  EpollInstance() : epoll_fd(-1) {}
 
   template <class Archive>
   void serialize(Archive &ar);
@@ -153,6 +174,12 @@ class SockState
                                   struct sockaddr *src_addr, socklen_t *addrlen,
                                   int choice);
 
+  /* send(fd, buf, len, flags) -> bytes_sent or -errno (TCP only) */
+  ssize_t do_send(int fd, const void *buf, size_t len, int flags);
+
+  /* recv(fd, buf, len, flags) -> bytes_recv or -errno (TCP only) */
+  ssize_t do_recv(int fd, void *buf, size_t len, int flags);
+
   /* Get number of available choices for recvfrom (0, 1, or 2) */
   int get_recvfrom_choices(int fd) const;
 
@@ -164,6 +191,24 @@ class SockState
 
   /* getpeername(fd, addr, addrlen) -> 0 or -errno */
   int do_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen);
+
+  /* --------------------------------------------------------------------------
+   * Epoll Operations (for Redis)
+   * --------------------------------------------------------------------------
+   */
+
+  /* epoll_create(size) -> fd or -errno */
+  int do_epoll_create(int size);
+
+  /* epoll_create1(flags) -> fd or -errno */
+  int do_epoll_create1(int flags);
+
+  /* epoll_ctl(epfd, op, fd, event) -> 0 or -errno */
+  int do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+
+  /* epoll_wait(epfd, events, maxevents, timeout) -> num_events or -errno */
+  int do_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+                    int timeout);
 
   /* --------------------------------------------------------------------------
    * Cross-Process Message Delivery (for UDP)
@@ -190,8 +235,7 @@ class SockState
   void add_socket(const Socket &sock) { sockets_[sock.fd] = sock; }
 
   /* Access UDP receive buffers (for cross-process delivery) */
-  const std::map<int, std::deque<UdpDatagram>> &
-  udp_recv_buffers() const
+  const std::map<int, std::deque<UdpDatagram>> &udp_recv_buffers() const
   {
     return udp_recv_buffers_;
   }
@@ -204,6 +248,12 @@ class SockState
   const std::map<int, TcpConnection> &tcp_connections() const
   {
     return tcp_connections_;
+  }
+
+  /* Access epoll instances */
+  const std::map<int, EpollInstance> &epoll_instances() const
+  {
+    return epoll_instances_;
   }
 
   /* --------------------------------------------------------------------------
@@ -231,8 +281,11 @@ class SockState
   /* TCP connections: local_fd -> connection state */
   std::map<int, TcpConnection> tcp_connections_;
 
+  /* Epoll instances: epoll_fd -> epoll state */
+  std::map<int, EpollInstance> epoll_instances_;
+
   /* Helper: allocate new fd via FdManager */
-  int allocate_fd();
+  int allocate_fd(FdType type = FdType::SOCKET);
 
   /* Helper: release fd */
   void release_fd(int fd);
@@ -263,7 +316,27 @@ int emu_socket(int domain, int type, int protocol);
 int emu_listen(int sockfd, int backlog);
 int emu_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 
-/* For compatibility with code that uses these types */
+int emu_epoll_create(int size);
+int emu_epoll_create1(int flags);
+int emu_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
+int emu_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+                   int timeout);
+
+ssize_t emu_send(int sockfd, const void *buf, size_t len, int flags);
+ssize_t emu_recv(int sockfd, void *buf, size_t len, int flags);
+
+int emu_setsockopt(int sockfd, int level, int optname, const void *optval,
+                   socklen_t optlen);
+int emu_getsockopt(int sockfd, int level, int optname, void *optval,
+                   socklen_t *optlen);
+
+int emu_fsync(int fd);
+int emu_fdatasync(int fd);
+
+int emu_fcntl(int fd, int cmd, long arg);
+
+int emu_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen);
+
 typedef std::deque<UdpDatagram> udp_buffer;
 
 #endif /* __SOCKSTATE_H */

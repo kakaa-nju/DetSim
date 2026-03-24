@@ -18,6 +18,7 @@
 
 /* Raft message parser */
 #include "raft_msg_parser.h"
+#define DISPLAY_MAX_LEN 128
 
 /* External syscall name table */
 extern const char *syscalls[450];
@@ -73,12 +74,13 @@ static int format_sockaddr(char *dest, struct sockaddr_in *addr)
  * ====================================================================== */
 
 /* Format: write - input buffer, print by requested size */
-void format_write(char *buf, int pid, hash_type ts_hash, const syscall_info &info) 
+void format_write(char *buf, int pid, hash_type ts_hash,
+                  const syscall_info &info)
 {
   size_t requested_len = info.args[2];
   size_t display_len = requested_len;
-  if (display_len > 4096)
-    display_len = 4096;
+  if (display_len > DISPLAY_MAX_LEN)
+    display_len = DISPLAY_MAX_LEN;
 
   char *mem = (char *)read_mem(pid, ts_hash, info.args[1], display_len);
 
@@ -88,8 +90,9 @@ void format_write(char *buf, int pid, hash_type ts_hash, const syscall_info &inf
   {
     pos += sprintf(buf + pos, "%p\"", (void *)info.args[1]);
     pos += format_mem_content(buf + pos, mem, display_len);
-    if (requested_len > 4096)
-      pos += sprintf(buf + pos, "...(%ld more bytes)", requested_len - 4096);
+    if (requested_len > DISPLAY_MAX_LEN)
+      pos += sprintf(buf + pos, "...(%ld more bytes)",
+                     requested_len - DISPLAY_MAX_LEN);
     pos += sprintf(buf + pos, "\"");
     free(mem);
   }
@@ -103,7 +106,8 @@ void format_write(char *buf, int pid, hash_type ts_hash, const syscall_info &inf
 }
 
 /* Format: read - output buffer, print by return value */
-void format_read(char *buf, int pid, hash_type ts_hash, const syscall_info &info) 
+void format_read(char *buf, int pid, hash_type ts_hash,
+                 const syscall_info &info)
 {
   int pos = sprintf(buf, "read(%ld, ", info.args[0]);
 
@@ -122,15 +126,15 @@ void format_read(char *buf, int pid, hash_type ts_hash, const syscall_info &info
   {
     /* Success: show content by return value */
     size_t display_len = ret;
-    if (display_len > 4096)
-      display_len = 4096;
+    if (display_len > DISPLAY_MAX_LEN)
+      display_len = DISPLAY_MAX_LEN;
 
     char *mem = (char *)read_mem(pid, ts_hash, info.args[1], display_len);
     if (mem)
     {
       pos += sprintf(buf + pos, "%p\"", (void *)info.args[1]);
       pos += format_mem_content(buf + pos, mem, display_len);
-      if (ret > 4096)
+      if (ret > DISPLAY_MAX_LEN)
         pos += sprintf(buf + pos, "...");
       pos += sprintf(buf + pos, "\"");
       free(mem);
@@ -146,20 +150,21 @@ void format_read(char *buf, int pid, hash_type ts_hash, const syscall_info &info
 }
 
 /* Format: int fd only (close style) */
-void format_fd_only(char *buf, const syscall_info &info) 
+void format_fd_only(char *buf, const syscall_info &info)
 {
   int pos = sprintf(buf, "%s(%ld) ", syscalls[info.nr], info.args[0]);
   format_ret(buf + pos, info.rval);
 }
 
 /* Format: sendto - input buffer, print by requested size */
-void format_sendto(char *buf, int pid, hash_type ts_hash, const syscall_info &info) 
+void format_sendto(char *buf, int pid, hash_type ts_hash,
+                   const syscall_info &info)
 {
   /* Limit buffer size to prevent overflow - cap at 4KB for display */
   size_t requested_len = info.args[2];
   size_t display_len = requested_len;
-  if (display_len > 4096)
-    display_len = 4096;
+  if (display_len > DISPLAY_MAX_LEN)
+    display_len = DISPLAY_MAX_LEN;
 
   int pos = sprintf(buf, "sendto(%ld, ", info.args[0]);
 
@@ -191,8 +196,9 @@ void format_sendto(char *buf, int pid, hash_type ts_hash, const syscall_info &in
       /* Regular binary content */
       pos += sprintf(buf + pos, "%p\"", (void *)info.args[1]);
       pos += format_mem_content(buf + pos, mem, display_len);
-      if (requested_len > 4096)
-        pos += sprintf(buf + pos, "...(%ld more bytes)", requested_len - 4096);
+      if (requested_len > DISPLAY_MAX_LEN)
+        pos += sprintf(buf + pos, "...(%ld more bytes)",
+                       requested_len - DISPLAY_MAX_LEN);
       pos += sprintf(buf + pos, "\"");
     }
     free(mem);
@@ -221,7 +227,8 @@ void format_sendto(char *buf, int pid, hash_type ts_hash, const syscall_info &in
 }
 
 /* Format: recvfrom - output buffer, print by return value */
-void format_recvfrom(char *buf, int pid, hash_type ts_hash, const syscall_info &info) 
+void format_recvfrom(char *buf, int pid, hash_type ts_hash,
+                     const syscall_info &info)
 {
   int pos = 0;
   ssize_t ret = info.rval;
@@ -244,8 +251,8 @@ void format_recvfrom(char *buf, int pid, hash_type ts_hash, const syscall_info &
   {
     /* Success: show pointer + content by return value */
     size_t display_len = ret;
-    if (display_len > 4096)
-      display_len = 4096;
+    if (display_len > DISPLAY_MAX_LEN)
+      display_len = DISPLAY_MAX_LEN;
 
     char *mem = (char *)read_mem(pid, ts_hash, info.args[1], display_len);
     if (mem)
@@ -276,7 +283,7 @@ void format_recvfrom(char *buf, int pid, hash_type ts_hash, const syscall_info &
         pos += format_mem_content(buf + pos, mem, display_len);
         pos += sprintf(buf + pos, "\"");
       }
-      if (ret > 4096)
+      if (ret > DISPLAY_MAX_LEN)
         pos += sprintf(buf + pos, "...");
       free(mem);
     }
@@ -341,14 +348,14 @@ void format_recvfrom(char *buf, int pid, hash_type ts_hash, const syscall_info &
 }
 
 /* Format: void *addr (brk/mmap style) */
-void format_addr(char *buf, const syscall_info &info) 
+void format_addr(char *buf, const syscall_info &info)
 {
   int pos = sprintf(buf, "%s(0x%lx) ", syscalls[info.nr], info.args[0]);
   format_ret(buf + pos, info.rval);
 }
 
 /* Format: mmap - detailed like strace */
-void format_mmap(char *buf, const syscall_info &info) 
+void format_mmap(char *buf, const syscall_info &info)
 {
   /* mmap(void *addr, size_t length, int prot, int flags, int fd, off_t offset)
    */
@@ -489,20 +496,21 @@ void format_mmap(char *buf, const syscall_info &info)
   format_ret(buf + pos, info.rval);
 }
 
-void format_tgkill(char *buf, const syscall_info &info) 
+void format_tgkill(char *buf, const syscall_info &info)
 {
   sprintf(buf, "%s(%ld, %ld, %ld(%s)) = ?", syscalls[info.nr], info.args[0],
           info.args[1], info.args[2], strsignal(info.args[2]));
 }
 
 /* Format: int status (exit style) */
-void format_exit(char *buf, const syscall_info &info) 
+void format_exit(char *buf, const syscall_info &info)
 {
   sprintf(buf, "%s(%ld) = ?", syscalls[info.nr], info.args[0]);
 }
 
 /* Format: openat */
-void format_openat(char *buf, int pid, hash_type ts_hash, const syscall_info &info) 
+void format_openat(char *buf, int pid, hash_type ts_hash,
+                   const syscall_info &info)
 {
   /* Use a reasonable size for path display - protect against huge paths */
   size_t path_len = 256;
@@ -538,12 +546,13 @@ void format_openat(char *buf, int pid, hash_type ts_hash, const syscall_info &in
 }
 
 /* Format: gettimeofday */
-void format_gettimeofday(char *buf, int pid, hash_type ts_hash, const syscall_info &info) 
+void format_gettimeofday(char *buf, int pid, hash_type ts_hash,
+                         const syscall_info &info)
 {
   int pos = sprintf(buf, "gettimeofday(");
 
-  struct timeval *tv = (struct timeval *)read_mem(pid, ts_hash, 
-      info.args[0], sizeof(struct timeval));
+  struct timeval *tv = (struct timeval *)read_mem(pid, ts_hash, info.args[0],
+                                                  sizeof(struct timeval));
   if (tv && info.rval >= 0)
   {
     pos += sprintf(buf + pos, "{tv_sec=%ld, tv_usec=%ld}", tv->tv_sec,
@@ -562,13 +571,14 @@ void format_gettimeofday(char *buf, int pid, hash_type ts_hash, const syscall_in
 }
 
 /* Format: clock_nanosleep */
-void format_clock_nanosleep(char *buf, int pid, hash_type ts_hash, const syscall_info &info) 
+void format_clock_nanosleep(char *buf, int pid, hash_type ts_hash,
+                            const syscall_info &info)
 {
   int pos =
       sprintf(buf, "clock_nanosleep(%ld, %ld, ", info.args[0], info.args[1]);
 
-  struct timespec *ts = (struct timespec *)read_mem(pid, ts_hash, 
-      info.args[2], sizeof(struct timespec));
+  struct timespec *ts = (struct timespec *)read_mem(pid, ts_hash, info.args[2],
+                                                    sizeof(struct timespec));
   if (ts && info.rval >= 0)
     pos += sprintf(buf + pos, "{tv_sec=%ld, tv_nsec=%ld}", ts->tv_sec,
                    ts->tv_nsec);
@@ -581,7 +591,7 @@ void format_clock_nanosleep(char *buf, int pid, hash_type ts_hash, const syscall
 }
 
 /* Format: socket */
-void format_socket(char *buf, const syscall_info &info) 
+void format_socket(char *buf, const syscall_info &info)
 {
   const char *domain_str = "AF_???";
   if (info.args[0] == AF_INET)
@@ -601,7 +611,8 @@ void format_socket(char *buf, const syscall_info &info)
 }
 
 /* Format: bind with sockaddr details */
-void format_bind(char *buf, int pid, hash_type ts_hash, const syscall_info &info) 
+void format_bind(char *buf, int pid, hash_type ts_hash,
+                 const syscall_info &info)
 {
   int pos = sprintf(buf, "bind(%ld, ", info.args[0]);
 
@@ -625,17 +636,30 @@ void format_bind(char *buf, int pid, hash_type ts_hash, const syscall_info &info
 }
 
 /* Format: listen/accept/connect */
-void format_socket_fd(char *buf, const syscall_info &info) 
+void format_socket_fd(char *buf, const syscall_info &info)
 {
   int pos = sprintf(buf, "%s(%ld, ...) ", syscalls[info.nr], info.args[0]);
   format_ret(buf + pos, info.rval);
 }
 
+void format_chdir(char *buf, int pid, hash_type ts_hash,
+                  const syscall_info &info)
+{
+  (void)pid;
+  (void)ts_hash;
+  char path[256] = {};
+  memcpy_guest2host(path, (void *)info.args[0], 255);
+  path[255] = '\0';
+  int pos = sprintf(buf, "chdir(\"%s\") ", path);
+  format_ret(buf + pos, info.rval);
+}
+
 /* Format: default (6 arguments hex) */
-void format_default(char *buf, const syscall_info &info) {
+void format_default(char *buf, const syscall_info &info)
+{
   int pos = sprintf(buf, "%s(0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx) ",
-                    syscalls[info.nr], info.args[0], info.args[1],
-                    info.args[2], info.args[3], info.args[4], info.args[5]);
+                    syscalls[info.nr], info.args[0], info.args[1], info.args[2],
+                    info.args[3], info.args[4], info.args[5]);
   format_ret(buf + pos, info.rval);
 }
 
@@ -669,6 +693,43 @@ void format(char *buf, int pid, hash_type ts_hash)
       format_socket_fd(buf, info);
       break;
 
+    case SYS_epoll_create:
+      snprintf(buf, 1024, "epoll_create(%ld)", info.args[0]);
+      break;
+    case SYS_epoll_create1:
+      snprintf(buf, 1024, "epoll_create1(%ld)", info.args[0]);
+      break;
+    case SYS_epoll_ctl:
+      snprintf(buf, 1024, "epoll_ctl(epfd=%ld, op=%ld, fd=%ld, event=%p)",
+               info.args[0], info.args[1], info.args[2], (void *)info.args[3]);
+      break;
+    case SYS_epoll_wait:
+      snprintf(buf, 1024,
+               "epoll_wait(epfd=%ld, events=%p, maxevents=%ld, timeout=%ld)",
+               info.args[0], (void *)info.args[1], info.args[2], info.args[3]);
+      break;
+
+    case SYS_setsockopt:
+      snprintf(buf, 1024, "setsockopt(fd=%ld, level=%ld, optname=%ld)",
+               info.args[0], info.args[1], info.args[2]);
+      break;
+    case SYS_getsockopt:
+      snprintf(buf, 1024, "getsockopt(fd=%ld, level=%ld, optname=%ld)",
+               info.args[0], info.args[1], info.args[2]);
+      break;
+
+    case SYS_fsync:
+      snprintf(buf, 1024, "fsync(%ld)", info.args[0]);
+      break;
+    case SYS_fdatasync:
+      snprintf(buf, 1024, "fdatasync(%ld)", info.args[0]);
+      break;
+
+    case SYS_fcntl:
+      snprintf(buf, 1024, "fcntl(fd=%ld, cmd=%ld, arg=%ld)", info.args[0],
+               info.args[1], info.args[2]);
+      break;
+
     /* File I/O */
     case SYS_read:
       format_read(buf, pid, ts_hash, info);
@@ -681,6 +742,9 @@ void format(char *buf, int pid, hash_type ts_hash)
       break;
     case SYS_close:
       format_fd_only(buf, info);
+      break;
+    case SYS_chdir:
+      format_chdir(buf, pid, ts_hash, info);
       break;
 
     /* Memory */

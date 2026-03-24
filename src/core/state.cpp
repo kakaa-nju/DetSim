@@ -52,7 +52,7 @@ void show_syscall(int pid, hash_type ts_hash)
 {
   char buf[1024];
   syscall_fmt::format(buf, pid, ts_hash);
-  detsim::ui::ui_printf("%s", buf);
+  detsim::ui::ui_printf("%s\n", buf);
 }
 
 /* Format syscall for history display */

@@ -1,22 +1,36 @@
 #include "state_transition.h"
-#include "log_wrapper.h"
 #include "common.h"
-#include "guest.h"
 #include "emu.h"
-#include "utils.h"
-#include "proc_status.h"
+#include "fsstate.h"
+#include "guest.h"
+#include "log_wrapper.h"
 #include "ncurses_ui.h"
+#include "proc_status.h"
 #include "state_store.h"
-#include <string.h>
+#include "utils.h"
 #include <fcntl.h>
-#include <sys/wait.h>
+#include <readline/readline.h>
+#include <stddef.h>
+#include <string.h>
+#include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
-#include <readline/readline.h>
+#include <sys/user.h>
+#include <sys/wait.h>
 
 #include <monitor.h>
 
 #define pids ptmc_state.pids
+
+// Track VFS mmap operations between enter and exit
+struct VfsMmapState
+{
+  bool active;
+  int fd;
+  off_t offset;
+  size_t length;
+};
+static VfsMmapState g_vfs_mmap = {false, -1, 0, 0};
 
 static void do_nosys(int pid)
 {
@@ -27,6 +41,34 @@ static void do_nosys(int pid)
 /* Check if syscall need to be done */
 static void on_syscall_enter(pid_t pid, int nr)
 {
+  if (nr == SYS_mmap)
+  {
+    // Check if this is a VFS file mmap
+    int fd = ptrace(PTRACE_PEEKUSER, pid, offsetof(struct user_regs_struct, r8),
+                    NULL);
+    auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
+    if (fd >= 0 && fs.open_files.find(fd) != fs.open_files.end())
+    {
+      // Save VFS mmap state
+      g_vfs_mmap.active = true;
+      g_vfs_mmap.fd = fd;
+      g_vfs_mmap.offset = ptrace(PTRACE_PEEKUSER, pid,
+                                 offsetof(struct user_regs_struct, r9), NULL);
+      g_vfs_mmap.length = ptrace(PTRACE_PEEKUSER, pid,
+                                 offsetof(struct user_regs_struct, rsi), NULL);
+      int prot = ptrace(PTRACE_PEEKUSER, pid,
+                        offsetof(struct user_regs_struct, rdx), NULL);
+      int flags = ptrace(PTRACE_PEEKUSER, pid,
+                         offsetof(struct user_regs_struct, r10), NULL);
+      // Change to anonymous mmap (fd = -1)
+      ptrace(PTRACE_POKEUSER, pid, offsetof(struct user_regs_struct, rdx),
+             prot | PROT_WRITE);
+      ptrace(PTRACE_POKEUSER, pid, offsetof(struct user_regs_struct, r10),
+             flags | MAP_ANONYMOUS);
+      ptrace(PTRACE_POKEUSER, pid, offsetof(struct user_regs_struct, r8), -1);
+    }
+  }
+
   switch (nr)
   {
     /* emulated. so do nothing */
@@ -39,6 +81,17 @@ static void on_syscall_enter(pid_t pid, int nr)
     case SYS_clock_nanosleep:
     case SYS_socket:
     case SYS_connect:
+    case SYS_accept:
+    case SYS_accept4:
+    case SYS_epoll_create:
+    case SYS_epoll_create1:
+    case SYS_epoll_ctl:
+    case SYS_epoll_wait:
+    case SYS_setsockopt:
+    case SYS_getsockopt:
+    case SYS_fsync:
+    case SYS_fdatasync:
+    case SYS_fcntl:
     /* VFS emulated */
     case SYS_open:
     case SYS_openat:
@@ -49,6 +102,8 @@ static void on_syscall_enter(pid_t pid, int nr)
     case SYS_lseek:
     case SYS_stat:
     case SYS_fstat:
+    case SYS_pipe:
+    case SYS_pipe2:
       do_nosys(pid);
       break;
 
@@ -176,23 +231,23 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
                        info.args[5]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_gettimeofday:
       ret = emu_gettimeofday((struct timeval *)info.args[0],
                              (struct timezone *)info.args[1]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_socket:
       ret = emu_socket(info.args[0], info.args[1], info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_listen:
       ret = emu_listen(info.args[0], info.args[1]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_bind:
       ret = emu_bind(info.args[0], (const struct sockaddr *)info.args[1],
                      info.args[2]);
@@ -204,31 +259,13 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
                         info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
 
     case SYS_chdir:
     {
-      // Read the path string from the tracee memory and update cwd on success
-      uintptr_t guest_ptr = info.args[0];
-      // helper: read null-terminated string from guest using memcpy_guest2host
-      std::string path;
-      char ch;
-      size_t idx = 0;
-      do
-      {
-        memcpy_guest2host(&ch, (const void *)(guest_ptr + idx), 1);
-        if (ch != '\0')
-          path.push_back(ch);
-        idx++;
-      } while (ch != '\0');
-
-      if ((long)info.rval >= 0)
-      {
-        // success: update cwd of current fs_state
-        ptmc_state.fs_states[ptmc_state.cursor].set_cwd(path);
-      }
-      // reflect syscall return
-      tracee_set_rax(pid, info.rval);
+      ret = emu_chdir((const char *)info.args[0]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
       return CKPT_YES;
     }
 
@@ -242,21 +279,21 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
                            info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_openat:
       ret = emu_vfs_openat(info.args[0], (const char *)info.args[1],
                            info.args[2], info.args[3]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_read:
       ret = emu_vfs_read(info.args[0], (void *)info.args[1], info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_write:
-      ret = emu_vfs_write(info.args[0], (const void *)info.args[1],
-                          info.args[2]);
+      ret =
+          emu_vfs_write(info.args[0], (const void *)info.args[1], info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
       return CKPT_YES;
@@ -264,23 +301,136 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
       ret = emu_vfs_close(info.args[0]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_lseek:
       ret = emu_vfs_lseek(info.args[0], info.args[1], info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_stat:
-      ret = emu_vfs_stat((const char *)info.args[0],
-                         (struct stat *)info.args[1]);
+      ret =
+          emu_vfs_stat((const char *)info.args[0], (struct stat *)info.args[1]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_fstat:
       ret = emu_vfs_fstat(info.args[0], (struct stat *)info.args[1]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
       return CKPT_NO;
+    case SYS_mmap:
+      if (g_vfs_mmap.active)
+      {
+        // This was a VFS file mmap - tracee did anonymous mmap
+        // Get the returned address from tracee
+        void *addr = (void *)info.rval;
+        if (addr != MAP_FAILED)
+        {
+          // Get VFS file content and write to tracee memory
+          auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
+          auto fd_it = fs.open_files.find(g_vfs_mmap.fd);
+          if (fd_it != fs.open_files.end())
+          {
+            auto node_it = fs.filesystem.find(fd_it->second.path);
+            if (node_it != fs.filesystem.end())
+            {
+              VFSNode &node = node_it->second;
+              size_t offset = g_vfs_mmap.offset;
+              size_t len = g_vfs_mmap.length;
+
+              // Clamp to file size
+              if (offset > node.content.size())
+                offset = node.content.size();
+              if (offset + len > node.content.size())
+                len = node.content.size() - offset;
+
+              // Write content to tracee memory
+              memcpy_host2guest(addr, node.content.data() + offset, len);
+            }
+          }
+        }
+        g_vfs_mmap.active = false;
+        return CKPT_YES;
+      }
+      // Normal mmap - fall through to default
+      return CKPT_NO;
+    case SYS_munmap:
+      ret = emu_munmap((void *)info.args[0], info.args[1]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_NO;
+    case SYS_pipe:
+    case SYS_pipe2:
+    {
+      int pipefd[2];
+      ret = emu_pipe(pipefd, info.args[1]);
+      if (ret == 0)
+      {
+        memcpy_host2guest((void *)info.args[0], pipefd, sizeof(pipefd));
+      }
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+    }
+
+    case SYS_epoll_create:
+      ret = emu_epoll_create(info.args[0]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+    case SYS_epoll_create1:
+      ret = emu_epoll_create1(info.args[0]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+    case SYS_epoll_ctl:
+      ret = emu_epoll_ctl(info.args[0], info.args[1], info.args[2],
+                          (struct epoll_event *)info.args[3]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+    case SYS_epoll_wait:
+      ret = emu_epoll_wait(info.args[0], (struct epoll_event *)info.args[1],
+                           info.args[2], info.args[3]);
+      LOG_INFO("epoll_wait(epfd=%ld) returned %ld events", info.args[0], ret);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+    case SYS_setsockopt:
+      ret = emu_setsockopt(info.args[0], info.args[1], info.args[2],
+                           (void *)info.args[3], info.args[4]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+    case SYS_getsockopt:
+      ret = emu_getsockopt(info.args[0], info.args[1], info.args[2],
+                           (void *)info.args[3], (socklen_t *)info.args[4]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+    case SYS_fsync:
+      ret = emu_fsync(info.args[0]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+    case SYS_fdatasync:
+      ret = emu_fdatasync(info.args[0]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+    case SYS_fcntl:
+      ret = emu_fcntl(info.args[0], info.args[1], info.args[2]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+
+    case SYS_accept:
+    case SYS_accept4:
+      ret = emu_accept(info.args[0], (struct sockaddr *)info.args[1],
+                       (socklen_t *)info.args[2]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
 
     case SYS_nanosleep:
     case SYS_brk:
@@ -351,7 +501,6 @@ int do_one_syscall(pid_t pid, syscall_info &si)
   return on_syscall_exit(pid, si);
 }
 
-
 /* loaded, exec 1 STEP, not stored. Save Last syscall into `info` *
  * 1 STEP = critical syscall step */
 int exec_once(const sys_state &s, syscall_info &info)
@@ -377,48 +526,49 @@ int exec_once(const sys_state &s, syscall_info &info)
         return result;
       case CKPT_EXIT:
         LOG_INFO("Tracee %d exited with status %d", index,
-                    DEXITSTATUS(ptmc_state.status[index]));
+                 DEXITSTATUS(ptmc_state.status[index]));
         return result;
       case CKPT_STOP:
         LOG_INFO("Tracee %d stopped for signal %s", index,
-                    strsignal(DSTOPSIG(ptmc_state.status[index])));
+                 strsignal(DSTOPSIG(ptmc_state.status[index])));
         return result;
     }
   }
   return 0;
 }
 
-TransitionResult state_transition(
-    const sys_state& source_state,
-    int process_index)
+TransitionResult state_transition(const sys_state &source_state,
+                                  int process_index)
 {
-    TransitionResult result;
-    ptmc_state.cursor = process_index;
-    
-    // restore state to tracees with timing
-    auto t1 = std::chrono::high_resolution_clock::now();
-    source_state.recover_running_state();
-    auto t2 = std::chrono::high_resolution_clock::now();
-    result.restore_time = std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
-    
-    // do syscalls
-    syscall_info new_syscalls[NP];
-    for (int i = 0; i < NP; i++)
-        new_syscalls[i] = source_state.child[i].si;
+  TransitionResult result;
+  ptmc_state.cursor = process_index;
 
-    int ckpt = exec_once(source_state, new_syscalls[process_index]);
-    
-    // save state with timing
-    auto t3 = std::chrono::high_resolution_clock::now();
-    result.new_state = sys_state(new_syscalls);
-    auto t4 = std::chrono::high_resolution_clock::now();
-    result.save_time = std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3);
-    
-    // add to state tree for future exploration
-    state_tree_add(source_state, result.new_state, process_index, 
-                   ptmc_state.n_choose ? ptmc_state.choose : -1);
-    ptmc_state.running_state = result.new_state;
-    return result;
+  // restore state to tracees with timing
+  auto t1 = std::chrono::high_resolution_clock::now();
+  source_state.recover_running_state();
+  auto t2 = std::chrono::high_resolution_clock::now();
+  result.restore_time =
+      std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
+
+  // do syscalls
+  syscall_info new_syscalls[NP];
+  for (int i = 0; i < NP; i++)
+    new_syscalls[i] = source_state.child[i].si;
+
+  int ckpt = exec_once(source_state, new_syscalls[process_index]);
+
+  // save state with timing
+  auto t3 = std::chrono::high_resolution_clock::now();
+  result.new_state = sys_state(new_syscalls);
+  auto t4 = std::chrono::high_resolution_clock::now();
+  result.save_time =
+      std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3);
+
+  // add to state tree for future exploration
+  state_tree_add(source_state, result.new_state, process_index,
+                 ptmc_state.n_choose ? ptmc_state.choose : -1);
+  ptmc_state.running_state = result.new_state;
+  return result;
 }
 
 static void exit_all(int _)
@@ -482,8 +632,8 @@ syscall_info extract_one_syscall(pid_t pid)
   if (ret.nr == SYS_getrandom)
   {
     memcpy_host2guest((void *)ret.args[0], "\0\0\0\0\0\0\0\0", 8);
-    LOG_INFO("Neutralize getrandom(%p, %d, %d)", (void *)ret.args[0], ret.args[1],
-             ret.args[2]);
+    LOG_INFO("Neutralize getrandom(%p, %d, %d)", (void *)ret.args[0],
+             ret.args[1], ret.args[2]);
   }
   /* rseq mask */
   if (ret.nr == SYS_rseq)
@@ -492,7 +642,7 @@ syscall_info extract_one_syscall(pid_t pid)
     rseq_len[pid] = ret.args[1];
     LOG_INFO("Record rseq(%p, %d)", (void *)ret.args[0], ret.args[1]);
   }
-  
+
   if (ret.nr == SYS_getcpu)
   {
     tracee_set_rax(pid, 0);
@@ -541,7 +691,6 @@ static void init_tracee_state(int index)
   tracee_write_mem(pid, (void *)(scratch_page + 0xff0),
                    "\x0f\x05\x0f\x05\x0f\x05\x0f\x05", 8);
 }
-
 
 /* prepare tracee for ptrace, and execve */
 static void start_tracee(int id)

@@ -29,6 +29,7 @@ extern "C" detsim::ui::NCursesUI *get_ncurses_ui();
 #include <cstddef>
 #include <cstdlib>
 #include <fcntl.h>
+#include <pthread.h>
 #include <random>
 #include <readline/readline.h>
 #include <signal.h>
@@ -510,6 +511,7 @@ static void start_status_monitor()
   /* Open depth statistics file for append */
   std::lock_guard<std::mutex> lock(g_depth_stat_mutex);
   g_monitor_thread = std::thread(status_monitor_thread);
+  pthread_setname_np(g_monitor_thread.native_handle(), "status_monitor");
 }
 
 static void stop_status_monitor()

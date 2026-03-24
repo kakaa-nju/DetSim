@@ -11,7 +11,9 @@
 #include "debug.h"
 #include "monitor.h"
 #include <arpa/inet.h>
+#include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <fmt/format.h>
 
 /* ==============================================================================
@@ -45,14 +47,14 @@ bool parse_sockaddr(const std::string &str, struct sockaddr_in &addr)
  * ==============================================================================
  */
 
-int SockState::allocate_fd()
+int SockState::allocate_fd(FdType type)
 {
   if (!fd_manager_)
   {
     LOG_ERROR("FdManager not set!");
     return -1;
   }
-  return fd_manager_->allocate_fd(FdType::SOCKET);
+  return fd_manager_->allocate_fd(type);
 }
 
 void SockState::release_fd(int fd)
@@ -194,14 +196,265 @@ int SockState::do_listen(int fd, int backlog)
 int SockState::do_connect(int fd, const struct sockaddr *addr,
                           socklen_t addrlen)
 {
-  LOG_WARN("connect() not fully implemented");
-  return -ECONNREFUSED;
+  (void)addrlen;
+  Socket *sock = get_socket_mutable(fd);
+  if (!sock)
+  {
+    return -EBADF;
+  }
+
+  if (sock->type != SOCK_STREAM)
+  {
+    return -EOPNOTSUPP;
+  }
+
+  struct sockaddr_in peer_addr;
+  memcpy_guest2host(&peer_addr, addr, sizeof(struct sockaddr_in));
+
+  // Set local address: bind to 0.0.0.0 with ephemeral port
+  if (!sock->bound)
+  {
+    sock->bound = true;
+    sock->local_addr.sin_family = AF_INET;
+    sock->local_addr.sin_addr.s_addr = INADDR_ANY; // 0.0.0.0
+    sock->local_addr.sin_port =
+        htons(10000 + (rand() % 50000)); // Random ephemeral port
+  }
+
+  sock->connected = true;
+  sock->peer_addr = peer_addr;
+
+  // Cross-process: find listening socket by port (handle 0.0.0.0 binding)
+  for (int pid = 0; pid < NP; pid++)
+  {
+    // Match by port only, since server may bind to 0.0.0.0 (INADDR_ANY)
+    int listen_fd =
+        ptmc_state.sock_states[pid].find_socket_by_port(peer_addr.sin_port);
+    if (listen_fd >= 0)
+    {
+      Socket *listener =
+          ptmc_state.sock_states[pid].get_socket_mutable(listen_fd);
+      if (listener && listener->listening)
+      {
+        // Add to pending connections of the listener's process
+        listener->pending_connections.push_back(fd);
+        LOG_TRACE("connect(fd=%d) -> listener fd=%d on process %d (port=%d), "
+                  "added to pending",
+                  fd, listen_fd, pid, ntohs(peer_addr.sin_port));
+        break;
+      }
+    }
+  }
+
+  // Create or update TCP connection
+  TcpConnection conn;
+  conn.local_fd = fd;
+  conn.local_addr = sock->local_addr;
+  conn.peer_addr = peer_addr;
+  tcp_connections_[fd] = conn;
+
+  LOG_TRACE("connect(fd=%d, addr=%s) = 0", fd,
+            format_sockaddr(peer_addr).c_str());
+  return 0;
 }
 
 int SockState::do_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
 {
-  LOG_WARN("accept() not fully implemented");
-  return -EAGAIN;
+  Socket *listener = get_socket_mutable(fd);
+  if (!listener)
+  {
+    return -EBADF;
+  }
+
+  if (listener->type != SOCK_STREAM)
+  {
+    return -EOPNOTSUPP;
+  }
+
+  if (!listener->listening)
+  {
+    return -EINVAL;
+  }
+
+  if (listener->pending_connections.empty())
+  {
+    return -EAGAIN; // No pending connections
+  }
+
+  // Get the first pending connection
+  int client_fd = listener->pending_connections.front();
+  listener->pending_connections.pop_front();
+
+  // Allocate new fd for accepted socket
+  int new_fd = allocate_fd(FdType::SOCKET);
+  if (new_fd < 0)
+  {
+    return -EMFILE;
+  }
+
+  // Create new socket for accepted connection
+  Socket new_sock;
+  new_sock.fd = new_fd;
+  new_sock.domain = listener->domain;
+  new_sock.type = SOCK_STREAM;
+  new_sock.protocol = 0;
+  new_sock.bound = true;
+  new_sock.connected = true;
+
+  // Server's local address: use real IP from config, not 0.0.0.0
+  new_sock.local_addr.sin_family = AF_INET;
+  inet_pton(AF_INET, ptmc_state.addrs[ptmc_state.cursor].c_str(),
+            &new_sock.local_addr.sin_addr);
+  new_sock.local_addr.sin_port = listener->local_addr.sin_port;
+
+  // Get client socket and find its real address
+  for (int pid = 0; pid < NP; pid++)
+  {
+    const Socket *client_sock =
+        ptmc_state.sock_states[pid].get_socket(client_fd);
+    if (client_sock)
+    {
+      // Client's peer address from its view: use client's real IP
+      new_sock.peer_addr.sin_family = AF_INET;
+      inet_pton(AF_INET, ptmc_state.addrs[pid].c_str(),
+                &new_sock.peer_addr.sin_addr);
+      new_sock.peer_addr.sin_port = client_sock->local_addr.sin_port;
+      break;
+    }
+  }
+  sockets_[new_fd] = new_sock;
+
+  TcpConnection new_conn;
+  new_conn.local_fd = new_fd;
+  new_conn.local_addr = new_sock.local_addr;
+  new_conn.peer_addr = new_sock.peer_addr;
+  tcp_connections_[new_fd] = new_conn;
+
+  // Return peer address to caller
+  if (addr && addrlen)
+  {
+    socklen_t len = *addrlen;
+    if (len > sizeof(struct sockaddr_in))
+    {
+      len = sizeof(struct sockaddr_in);
+    }
+    memcpy_host2guest(addr, &new_sock.peer_addr, len);
+  }
+
+  LOG_TRACE("accept(fd=%d) = %d (client fd=%d)", fd, new_fd, client_fd);
+  return new_fd;
+}
+
+ssize_t SockState::do_send(int fd, const void *buf, size_t len, int flags)
+{
+  (void)flags;
+  Socket *sock = get_socket_mutable(fd);
+  if (!sock)
+  {
+    return -EBADF;
+  }
+
+  if (!sock->connected)
+  {
+    return -ENOTCONN;
+  }
+
+  // Read data from guest
+  std::string data(len, '\0');
+  memcpy_guest2host(&data[0], buf, len);
+
+  // Route by address: find socket with matching local_addr == our peer_addr
+  for (int pid = 0; pid < NP; pid++)
+  {
+    SockState &remote_state = ptmc_state.sock_states[pid];
+    for (auto &kv : remote_state.sockets_)
+    {
+      Socket &remote_sock = kv.second;
+      if (!remote_sock.connected)
+        continue;
+
+      // Get effective local address: if 0.0.0.0, use config addr
+      uint32_t effective_addr = remote_sock.local_addr.sin_addr.s_addr;
+      if (effective_addr == INADDR_ANY)
+      {
+        struct in_addr config_addr;
+        if (inet_pton(AF_INET, ptmc_state.addrs[pid].c_str(), &config_addr) ==
+            1)
+        {
+          effective_addr = config_addr.s_addr;
+        }
+      }
+
+      if (effective_addr == sock->peer_addr.sin_addr.s_addr &&
+          remote_sock.local_addr.sin_port == sock->peer_addr.sin_port)
+      {
+        auto conn_it = remote_state.tcp_connections_.find(kv.first);
+        if (conn_it != remote_state.tcp_connections_.end())
+        {
+          conn_it->second.recv_buffer.push_back(data);
+          LOG_TRACE("send(fd=%d, len=%zu) -> peer fd=%d in process %d", fd, len,
+                    kv.first, pid);
+          return len;
+        }
+      }
+    }
+  }
+
+  return -ECONNRESET;
+}
+
+ssize_t SockState::do_recv(int fd, void *buf, size_t len, int flags)
+{
+  (void)flags;
+  Socket *sock = get_socket_mutable(fd);
+  if (!sock)
+  {
+    return -EBADF;
+  }
+
+  if (!sock->connected)
+  {
+    return -ENOTCONN;
+  }
+
+  auto it = tcp_connections_.find(fd);
+  if (it == tcp_connections_.end())
+  {
+    return -ECONNRESET;
+  }
+
+  TcpConnection &conn = it->second;
+  if (conn.recv_buffer.empty())
+  {
+    return -EAGAIN; // No data available
+  }
+
+  // Get first message
+  std::string &data = conn.recv_buffer.front();
+
+  // Empty string is EOF marker (peer closed connection)
+  if (data.empty())
+  {
+    conn.recv_buffer.pop_front();
+    return 0; // EOF
+  }
+
+  size_t to_copy = len < data.size() ? len : data.size();
+  memcpy_host2guest(buf, data.c_str(), to_copy);
+
+  if (to_copy < data.size())
+  {
+    // Partial read, keep remaining data
+    data = data.substr(to_copy);
+  }
+  else
+  {
+    // Full read, remove from buffer
+    conn.recv_buffer.pop_front();
+  }
+
+  LOG_TRACE("recv(fd=%d, len=%zu) = %zu", fd, len, to_copy);
+  return to_copy;
 }
 
 /* ==============================================================================
@@ -373,6 +626,60 @@ int SockState::do_close(int fd)
     return -EBADF;
   }
 
+  Socket &sock = it->second;
+
+  // For connected TCP sockets, notify peer
+  if (sock.connected && sock.type == SOCK_STREAM)
+  {
+    // Get effective local address: if 0.0.0.0, use config addr
+    uint32_t effective_local_addr = sock.local_addr.sin_addr.s_addr;
+    if (effective_local_addr == INADDR_ANY)
+    {
+      struct in_addr config_addr;
+      if (inet_pton(AF_INET, ptmc_state.addrs[ptmc_state.cursor].c_str(),
+                    &config_addr) == 1)
+      {
+        effective_local_addr = config_addr.s_addr;
+      }
+    }
+
+    // Find peer socket and add EPOLLIN event to wake up epoll_wait
+    for (int pid = 0; pid < NP; pid++)
+    {
+      SockState &remote_state = ptmc_state.sock_states[pid];
+      for (auto &kv : remote_state.sockets_)
+      {
+        Socket &remote_sock = kv.second;
+        if (remote_sock.connected &&
+            remote_sock.peer_addr.sin_addr.s_addr == effective_local_addr &&
+            remote_sock.peer_addr.sin_port == sock.local_addr.sin_port)
+        {
+          // Found peer, add EOF marker to recv_buffer and notify
+          auto conn_it = remote_state.tcp_connections_.find(kv.first);
+          if (conn_it != remote_state.tcp_connections_.end())
+          {
+            // Push empty string as EOF marker
+            conn_it->second.recv_buffer.push_back("");
+          }
+          for (auto &epoll_kv : remote_state.epoll_instances_)
+          {
+            EpollInstance &inst = epoll_kv.second;
+            if (inst.watched_fds.find(kv.first) != inst.watched_fds.end())
+            {
+              EpollEvent ev;
+              ev.events = EPOLLIN;
+              ev.fd = kv.first;
+              inst.ready_events.push_back(ev);
+              LOG_TRACE("close(fd=%d): notified peer fd=%d in process %d", fd,
+                        kv.first, pid);
+            }
+          }
+          break;
+        }
+      }
+    }
+  }
+
   udp_recv_buffers_.erase(fd);
   tcp_connections_.erase(fd);
   sockets_.erase(it);
@@ -532,8 +839,7 @@ void TcpConnection::serialize(Archive &ar)
   in_port_t p_port = peer_addr.sin_port;
   uint32_t p_addr = peer_addr.sin_addr.s_addr;
 
-  ar(local_fd, peer_fd, peer_pid, l_family, l_port, l_addr, p_family, p_port,
-     p_addr, send_buffer, recv_buffer);
+  ar(local_fd, l_family, l_port, l_addr, p_family, p_port, p_addr, recv_buffer);
 
   local_addr.sin_family = l_family;
   local_addr.sin_port = l_port;
@@ -774,4 +1080,342 @@ ssize_t emu_sendto(int sockfd, const void *buf, size_t len, int flags,
             recvfd);
 
   return len;
+}
+
+/* ==============================================================================
+ * Epoll Implementation for Redis
+ * ==============================================================================
+ */
+
+int SockState::do_epoll_create(int size)
+{
+  (void)size;
+
+  int epfd = allocate_fd(FdType::EPOLL);
+  if (epfd < 0)
+  {
+    LOG_ERROR("do_epoll_create: failed to allocate fd");
+    return -EMFILE;
+  }
+
+  EpollInstance inst;
+  inst.epoll_fd = epfd;
+  epoll_instances_[epfd] = inst;
+
+  LOG_TRACE("do_epoll_create: created epoll fd %d", epfd);
+  return epfd;
+}
+
+int SockState::do_epoll_create1(int flags)
+{
+  (void)flags;
+  return do_epoll_create(1);
+}
+
+int SockState::do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
+{
+  auto it = epoll_instances_.find(epfd);
+  if (it == epoll_instances_.end())
+  {
+    LOG_ERROR("do_epoll_ctl: invalid epoll fd %d", epfd);
+    return -EBADF;
+  }
+
+  EpollInstance &inst = it->second;
+
+  // Read event from guest memory
+  struct epoll_event host_event;
+  if (event)
+  {
+    memcpy_guest2host(&host_event, event, sizeof(struct epoll_event));
+  }
+  else if (op != EPOLL_CTL_DEL)
+  {
+    return -EINVAL;
+  }
+
+  switch (op)
+  {
+    case EPOLL_CTL_ADD:
+      inst.watched_fds[fd] = host_event.events;
+      LOG_TRACE("do_epoll_ctl: ADD fd %d to epoll %d, events=%u", fd, epfd,
+                host_event.events);
+      break;
+    case EPOLL_CTL_MOD:
+      inst.watched_fds[fd] = host_event.events;
+      LOG_TRACE("do_epoll_ctl: MOD fd %d on epoll %d, events=%u", fd, epfd,
+                host_event.events);
+      break;
+    case EPOLL_CTL_DEL:
+      inst.watched_fds.erase(fd);
+      LOG_TRACE("do_epoll_ctl: DEL fd %d from epoll %d", fd, epfd);
+      break;
+    default:
+      return -EINVAL;
+  }
+
+  return 0;
+}
+
+int SockState::do_epoll_wait(int epfd, struct epoll_event *events,
+                             int maxevents, int timeout)
+{
+  (void)timeout;
+
+  auto it = epoll_instances_.find(epfd);
+  if (it == epoll_instances_.end())
+  {
+    LOG_ERROR("do_epoll_wait: invalid epoll fd %d", epfd);
+    return -EBADF;
+  }
+
+  EpollInstance &inst = it->second;
+
+  // Collect ready events in host buffer first
+  std::vector<struct epoll_event> ready_host_events;
+  while (!inst.ready_events.empty() &&
+         (int)ready_host_events.size() < maxevents)
+  {
+    int fd = inst.ready_events.front().fd;
+    // Skip events for sockets that no longer exist
+    if (get_socket(fd) == nullptr)
+    {
+      LOG_TRACE("do_epoll_wait: skipping event for closed fd=%d", fd);
+      inst.ready_events.pop_front();
+      continue;
+    }
+    struct epoll_event ev;
+    ev.events = inst.ready_events.front().events;
+    ev.data.fd = fd;
+    ready_host_events.push_back(ev);
+    inst.ready_events.pop_front();
+  }
+
+  if (!ready_host_events.empty())
+  {
+    memcpy_host2guest(events, ready_host_events.data(),
+                      ready_host_events.size() * sizeof(struct epoll_event));
+    LOG_TRACE("do_epoll_wait: returned %zu ready events",
+              ready_host_events.size());
+    return ready_host_events.size();
+  }
+
+  // Collect events in host buffer first, then copy to guest
+  std::vector<struct epoll_event> host_events;
+  for (const auto &kv : inst.watched_fds)
+  {
+    if ((int)host_events.size() >= maxevents)
+      break;
+
+    int fd = kv.first;
+    uint32_t mask = kv.second;
+    uint32_t revents = 0;
+
+    if ((mask & EPOLLIN) && get_udp_buffer_size(fd) > 0)
+    {
+      revents |= EPOLLIN;
+    }
+
+    const Socket *sock = get_socket(fd);
+    if (sock && sock->listening && (mask & EPOLLIN))
+    {
+      LOG_TRACE("epoll_wait: fd=%d is listening, pending=%zu", fd,
+                sock->pending_connections.size());
+      if (!sock->pending_connections.empty())
+      {
+        revents |= EPOLLIN;
+        LOG_TRACE("epoll_wait: fd=%d has pending connection, setting EPOLLIN",
+                  fd);
+      }
+    }
+
+    if (sock && sock->connected && (mask & EPOLLIN))
+    {
+      auto conn_it = tcp_connections_.find(fd);
+      if (conn_it != tcp_connections_.end() &&
+          !conn_it->second.recv_buffer.empty())
+      {
+        revents |= EPOLLIN;
+      }
+    }
+
+    if (revents != 0)
+    {
+      struct epoll_event ev;
+      ev.events = revents;
+      ev.data.fd = fd;
+      host_events.push_back(ev);
+    }
+  }
+
+  // Copy events to guest memory
+  if (!host_events.empty())
+  {
+    LOG_TRACE("epoll_wait: copying %zu events to guest at %p",
+              host_events.size(), events);
+    for (size_t i = 0; i < host_events.size(); i++)
+    {
+      LOG_TRACE("epoll_wait: event[%zu] fd=%d events=%u", i,
+                host_events[i].data.fd, host_events[i].events);
+    }
+    memcpy_host2guest(events, host_events.data(),
+                      host_events.size() * sizeof(struct epoll_event));
+    LOG_TRACE("epoll_wait: copied successfully");
+  }
+
+  return host_events.size();
+}
+
+int emu_epoll_create(int size)
+{
+  return ptmc_state.sock_states[ptmc_state.cursor].do_epoll_create(size);
+}
+
+int emu_epoll_create1(int flags)
+{
+  return ptmc_state.sock_states[ptmc_state.cursor].do_epoll_create1(flags);
+}
+
+int emu_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
+{
+  return ptmc_state.sock_states[ptmc_state.cursor].do_epoll_ctl(epfd, op, fd,
+                                                                event);
+}
+
+int emu_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
+                   int timeout)
+{
+  return ptmc_state.sock_states[ptmc_state.cursor].do_epoll_wait(
+      epfd, events, maxevents, timeout);
+}
+
+/* ==============================================================================
+ * TCP send/recv
+ * ==============================================================================
+ */
+
+ssize_t emu_send(int sockfd, const void *buf, size_t len, int flags)
+{
+  SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
+  const Socket *sock = sock_state.get_socket(sockfd);
+
+  if (!sock)
+  {
+    LOG_ERROR("emu_send: invalid socket fd %d", sockfd);
+    return -EBADF;
+  }
+
+  if (sock->type == SOCK_STREAM && sock->connected)
+  {
+    return emu_sendto(sockfd, buf, len, flags,
+                      (struct sockaddr *)&sock->peer_addr,
+                      sizeof(sock->peer_addr));
+  }
+
+  return emu_sendto(sockfd, buf, len, flags, nullptr, 0);
+}
+
+ssize_t emu_recv(int sockfd, void *buf, size_t len, int flags)
+{
+  return ptmc_state.sock_states[ptmc_state.cursor].do_recv(sockfd, buf, len,
+                                                           flags);
+}
+
+int emu_accept(int sockfd, struct sockaddr *addr, socklen_t *addrlen)
+{
+  return ptmc_state.sock_states[ptmc_state.cursor].do_accept(sockfd, addr,
+                                                             addrlen);
+}
+
+/* ==============================================================================
+ * Socket Options
+ * ==============================================================================
+ */
+
+int emu_setsockopt(int sockfd, int level, int optname, const void *optval,
+                   socklen_t optlen)
+{
+  (void)sockfd;
+  (void)level;
+  (void)optname;
+  (void)optval;
+  (void)optlen;
+  LOG_TRACE("emu_setsockopt: fd=%d, level=%d, optname=%d", sockfd, level,
+            optname);
+  return 0;
+}
+
+int emu_getsockopt(int sockfd, int level, int optname, void *optval,
+                   socklen_t *optlen)
+{
+  SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
+  const Socket *sock = sock_state.get_socket(sockfd);
+
+  if (!sock)
+  {
+    return -EBADF;
+  }
+
+  if (level == SOL_SOCKET && optname == SO_ACCEPTCONN)
+  {
+    int accepting = sock->listening ? 1 : 0;
+    memcpy_host2guest(optval, &accepting, sizeof(int));
+    if (optlen)
+    {
+      socklen_t len = sizeof(int);
+      memcpy_host2guest(optlen, &len, sizeof(socklen_t));
+    }
+    LOG_TRACE("getsockopt(fd=%d, SO_ACCEPTCONN) = %d", sockfd, accepting);
+    return 0;
+  }
+
+  LOG_TRACE("getsockopt(fd=%d, level=%d, optname=%d) - not implemented", sockfd,
+            level, optname);
+  return 0;
+}
+
+/* ==============================================================================
+ * File Sync Operations
+ * ==============================================================================
+ */
+
+int emu_fsync(int fd)
+{
+  (void)fd;
+  LOG_TRACE("emu_fsync: fd=%d", fd);
+  return 0;
+}
+
+int emu_fdatasync(int fd)
+{
+  (void)fd;
+  LOG_TRACE("emu_fdatasync: fd=%d", fd);
+  return 0;
+}
+
+/* ==============================================================================
+ * Non-blocking I/O
+ * ==============================================================================
+ */
+
+int emu_fcntl(int fd, int cmd, long arg)
+{
+  (void)fd;
+  (void)arg;
+
+  switch (cmd)
+  {
+    case F_GETFL:
+      return 0;
+    case F_SETFL:
+      LOG_TRACE("emu_fcntl: F_SETFL fd=%d, arg=%ld", fd, arg);
+      return 0;
+    case F_GETFD:
+      return 0;
+    case F_SETFD:
+      return 0;
+    default:
+      LOG_TRACE("emu_fcntl: fd=%d, cmd=%d, arg=%ld", fd, cmd, arg);
+      return 0;
+  }
 }

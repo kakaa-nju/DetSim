@@ -15,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <pthread.h>
 #include <sstream>
 #include <zstd.h>
 #include <zstd_errors.h>
@@ -89,15 +90,22 @@ void StateStore::init(const Config &config)
   for (size_t i = 0; i < config_.io_threads; i++)
   {
     io_threads_.emplace_back(&StateStore::io_worker, this);
+    char name[16];
+    snprintf(name, sizeof(name), "io_worker_%zu", i);
+    pthread_setname_np(io_threads_.back().native_handle(), name);
   }
 
   // Start prefetch workers
   for (size_t i = 0; i < config_.prefetch_threads; i++)
   {
     prefetch_threads_.emplace_back(&StateStore::prefetch_worker, this);
+    char name[16];
+    snprintf(name, sizeof(name), "prefetch_%zu", i);
+    pthread_setname_np(prefetch_threads_.back().native_handle(), name);
   }
 
   eviction_thread_ = std::thread(&StateStore::eviction_worker, this);
+  pthread_setname_np(eviction_thread_.native_handle(), "eviction");
 
   LOG_INFO("StateStore initialized: hot=%zuMB, warm=%zuMB, prefetch_window=%zu",
            config_.hot_cache_size / (1024 * 1024),
