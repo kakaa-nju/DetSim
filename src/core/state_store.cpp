@@ -199,7 +199,8 @@ void StateStore::shutdown()
   {
     StateStorePacked::instance().save_segments_info();
     StateStorePacked::instance().flush_index();
-    LOG_INFO("StateStore shutdown: flushed packed storage index and segments info");
+    LOG_INFO(
+        "StateStore shutdown: flushed packed storage index and segments info");
   }
 
   // Clear ZSTD context caches (prevents memory leak warnings)
@@ -1364,8 +1365,17 @@ void StateStore::io_worker()
     if (!entry || entry->raw_data.empty())
       continue;
 
+    // Lock and copy raw_data to prevent use-after-free during compression
+    // (eviction may clear raw_data from another thread)
+    std::vector<uint8_t> raw_data;
+    {
+      std::lock_guard<std::mutex> entry_lock(entry->mutex);
+      raw_data = entry->raw_data;
+    }
+    const size_t original_size = raw_data.size();
+
     // Async compression
-    std::vector<uint8_t> compressed = compress(entry->raw_data);
+    std::vector<uint8_t> compressed = compress(raw_data);
 
     if (!compressed.empty())
     {
@@ -1383,8 +1393,8 @@ void StateStore::io_worker()
         entry->state = StateEntry::State::PERSISTING;
       }
 
-      bool success = write_to_disk(entry->hash, entry->compressed_data,
-                                   entry->raw_data.size());
+      bool success =
+          write_to_disk(entry->hash, entry->compressed_data, original_size);
 
       if (success)
       {
@@ -1646,15 +1656,17 @@ std::vector<uint8_t> StateStore::decompress(const std::vector<uint8_t> &data,
  * ==============================================================================
  */
 
-bool StateStore::write_to_disk(hash_type hash, const std::vector<uint8_t> &compressed_data,
-                                 size_t original_size)
+bool StateStore::write_to_disk(hash_type hash,
+                               const std::vector<uint8_t> &compressed_data,
+                               size_t original_size)
 {
   if (config_.use_packed_storage)
   {
     StateStorePacked &packed = StateStorePacked::instance();
     // Pass precomputed hash, mark data as compressed, pass original size
-    hash_type result = packed.save(compressed_data.data(), compressed_data.size(), 
-                                   hash, true, original_size);
+    hash_type result =
+        packed.save(compressed_data.data(), compressed_data.size(), hash, true,
+                    original_size);
     return result != 0;
   }
 
@@ -1680,7 +1692,8 @@ bool StateStore::write_to_disk(hash_type hash, const std::vector<uint8_t> &compr
     }
   } file_guard(fp);
 
-  if (fwrite(compressed_data.data(), 1, compressed_data.size(), fp) != compressed_data.size())
+  if (fwrite(compressed_data.data(), 1, compressed_data.size(), fp) !=
+      compressed_data.size())
   {
     LOG_ERROR("Failed to write data to %s", path.c_str());
     return false;

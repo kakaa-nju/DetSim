@@ -10,14 +10,15 @@ BUILD_DIR = build
 # Include paths
 INCLUDES = -I. -Isrc -Isrc/core -Isrc/subsys -Isrc/utils -Isrc/ui -Ithird_party -Iexamples/redisraft/plugins
 
-CXXFLAGS ?= $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2 -D_FORTIFY_SOURCE=0
+CXXFLAGS ?= $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2 -D_FORTIFY_SOURCE=0 -fno-omit-frame-pointer
 LDFLAGS = -g -ldwarf -lreadline -ldw -lzstd -rdynamic \
 					-lunwind-ptrace -lunwind-x86_64 -lunwind -lelf -lfmt \
-					-lncurses -lpthread
+					-lncurses -lpthread -fno-omit-frame-pointer
 
 # Source files with new directory structure
-SRCS = src/main.cpp \
-       src/core/scheduler.cpp src/core/guest.cpp src/core/monitor.cpp src/core/state.cpp src/core/config.cpp src/core/syscall_fmt.cpp src/core/dwarf.cpp src/core/state_store.cpp src/core/state_store_packed.cpp src/core/sysstate_store.cpp \
+SRCS = src/main.cpp\
+       src/core/scheduler.cpp src/core/guest.cpp src/core/monitor.cpp src/core/state.cpp src/core/config.cpp src/core/syscall_fmt.cpp \
+       src/core/dwarf.cpp src/core/state_store.cpp src/core/state_store_packed.cpp src/core/sysstate_store.cpp \
        src/subsys/serialize.cpp src/subsys/sockstate.cpp src/subsys/fsstate.cpp src/subsys/emu.cpp src/subsys/fd_manager.cpp \
        src/utils/utils.cpp src/utils/expr.cpp src/utils/expr_ast.cpp \
        src/utils/expr_lexer.cpp src/utils/expr_parser.cpp \
@@ -131,3 +132,38 @@ $(BUILD_DIR)/perf/%.o: perf/%.cpp | $(BUILD_DIR)
 	end=$$(date +%s.%N); \
 	dur=$$(echo "$$end - $$start" | bc); \
 	echo "Compiled $< in $$dur seconds"
+
+# --- Tool Targets ---
+TOOLS_DIR = tools
+
+# Tool executables
+SSTATE_QUERY_SRC = $(TOOLS_DIR)/sstate_query.cpp
+SSTATE_QUERY_OBJ = $(BUILD_DIR)/$(TOOLS_DIR)/sstate_query.o
+SSTATE_QUERY_EXE = $(TOOLS_DIR)/sstate_query
+
+VERIFY_SSTATE_SRC = $(TOOLS_DIR)/verify_sstate.cpp
+VERIFY_SSTATE_OBJ = $(BUILD_DIR)/$(TOOLS_DIR)/verify_sstate.o
+VERIFY_SSTATE_EXE = $(TOOLS_DIR)/verify_sstate
+
+# Tool dependencies - need UI objects too
+TOOL_DEPS = $(TRACER_OBJS_NO_MAIN) $(BUILD_DIR)/nr2call.o \
+            $(BUILD_DIR)/src/ui/ncurses_ui.o $(BUILD_DIR)/src/ui/log_wrapper.o
+
+tools: $(SSTATE_QUERY_EXE) $(VERIFY_SSTATE_EXE)
+
+$(SSTATE_QUERY_EXE): $(SSTATE_QUERY_OBJ) $(TOOL_DEPS)
+	@echo "==> Linking Tool: $(SSTATE_QUERY_EXE)"
+	$(LD) $^ $(LDFLAGS) -o $@
+
+$(VERIFY_SSTATE_EXE): $(VERIFY_SSTATE_OBJ) $(TOOL_DEPS)
+	@echo "==> Linking Tool: $(VERIFY_SSTATE_EXE)"
+	$(LD) $^ $(LDFLAGS) -o $@
+
+# Compile tool files to build directory
+$(BUILD_DIR)/$(TOOLS_DIR)/%.o: $(TOOLS_DIR)/%.cpp | $(BUILD_DIR)
+	@if [ -z "$(NP)" ]; then \
+		echo "NP not set"; exit 1; \
+	fi
+	@mkdir -p $(dir $@)
+	@echo "Compiling tool $<"
+	$(CXX) $< $(CXXFLAGS) -c -o $@ -DNP=$(NP)

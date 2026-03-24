@@ -263,6 +263,18 @@ void StateStorePacked::ensure_active_segment()
     return;
   }
 
+  /* O_APPEND ensures writes append, but file position may be at start.
+   * Seek to end so lseek(SEEK_CUR) returns correct offset for index.
+   */
+  if (lseek(active_segment_fd_, 0, SEEK_END) < 0)
+  {
+    LOG_ERROR("Failed to seek to end of active segment %u: %s",
+              active_segment_id_, strerror(errno));
+    close(active_segment_fd_);
+    active_segment_fd_ = -1;
+    return;
+  }
+
   /* Find or create segment info */
   SegmentInfo *info = nullptr;
   for (auto &seg : segments_)
@@ -457,10 +469,10 @@ void StateStorePacked::append_to_incremental_index(
   incremental_index_[hash] = entry;
 
   std::string inc_path = get_incremental_index_path();
-  
+
   /* Check if file already exists (to avoid duplicate header) */
   bool file_exists = (access(inc_path.c_str(), F_OK) == 0);
-  
+
   FILE *fp = fopen(inc_path.c_str(), "ab");
   if (!fp)
   {
@@ -657,7 +669,8 @@ StateStorePacked::decompress(const std::vector<uint8_t> &data,
   size_t dst_capacity = original_size;
   if (original_size == 0)
   {
-    LOG_WARN("Decompress called with original_size=0, trying to get from frame");
+    LOG_WARN(
+        "Decompress called with original_size=0, trying to get from frame");
     unsigned long long frame_size =
         ZSTD_getFrameContentSize(data.data(), data.size());
     if (frame_size != ZSTD_CONTENTSIZE_UNKNOWN &&
@@ -749,7 +762,7 @@ hash_type StateStorePacked::save(const void *data, size_t len, hash_type hash,
 
   std::vector<uint8_t> compressed;
   size_t orig_size;
-  
+
   if (is_compressed)
   {
     /* Data is already compressed */
@@ -761,7 +774,8 @@ hash_type StateStorePacked::save(const void *data, size_t len, hash_type hash,
     }
     else
     {
-      LOG_ERROR("Save called with is_compressed=true but original_size=0! hash=%016lx, len=%zu", 
+      LOG_ERROR("Save called with is_compressed=true but original_size=0! "
+                "hash=%016lx, len=%zu",
                 hash, len);
       orig_size = len; /* Fallback - will cause decompression error! */
     }
@@ -847,7 +861,7 @@ hash_type StateStorePacked::save(const void *data, size_t len, hash_type hash,
   {
     if (header_offset != st.st_size)
     {
-      LOG_WARN("Offset mismatch: lseek=%ld, stat=%ld, correcting", 
+      LOG_WARN("Offset mismatch: lseek=%ld, stat=%ld, correcting",
                (long)header_offset, (long)st.st_size);
       header_offset = st.st_size;
     }
@@ -872,7 +886,8 @@ hash_type StateStorePacked::save(const void *data, size_t len, hash_type hash,
   entry.segment_id = active_segment_id_;
   entry.offset = header_offset + sizeof(PackedDataHeader);
   entry.compressed_size = compressed.size();
-  entry.original_size = orig_size;  /* BUG FIX: was 'len', should be 'orig_size' */
+  entry.original_size =
+      orig_size; /* BUG FIX: was 'len', should be 'orig_size' */
   entry.checksum = header.checksum;
 
   index_[hash] = entry;
@@ -914,7 +929,8 @@ ssize_t StateStorePacked::load(hash_type hash, std::vector<uint8_t> &data)
   auto it = index_.find(hash);
   if (it == index_.end())
   {
-    LOG_DEBUG("Hash %016lx not found in packed index (total entries: %zu)", hash, index_.size());
+    LOG_DEBUG("Hash %016lx not found in packed index (total entries: %zu)",
+              hash, index_.size());
     return -1;
   }
 
@@ -1005,7 +1021,7 @@ bool StateStorePacked::exists(hash_type hash)
   if (!found)
   {
     LOG_DEBUG("Hash %016lx not found in packed index (total entries: %zu)",
-             hash, index_.size());
+              hash, index_.size());
   }
   return found;
 }

@@ -182,7 +182,19 @@ EvalResult VariableNode::eval(int pid, bool &success) const
 
 EvalResult VariableNode::eval_address(int pid, bool &success) const
 {
+  /* Try DWARF/ELF main executable first */
   uintptr_t addr = dwarf_get_global_addr(name_.c_str());
+  if (addr != 0)
+  {
+    success = true;
+    EvalResult res(static_cast<uint64_t>(addr));
+    res.type_name = dwarf_get_global_type(name_.c_str());
+    return res;
+  }
+
+  /* Try loading shared library symbols and search again */
+  dwarf_load_shared_library_symbols(pid);
+  addr = dwarf_get_global_addr(name_.c_str());
   if (addr != 0)
   {
     success = true;

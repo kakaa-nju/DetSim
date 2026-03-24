@@ -110,10 +110,10 @@ class StateStore
   struct Config
   {
     // L1 Hot Cache: raw uncompressed data (fast access)
-    size_t hot_cache_size = 512ULL * 1024 * 1024; // 512MB default
+    size_t hot_cache_size = 1ULL * 1024 * 1024; // 512MB default
 
     // L2 Warm Cache: compressed data (higher capacity)
-    size_t warm_cache_size = 2048ULL * 1024 * 1024; // 2GB default
+    size_t warm_cache_size = 1ULL * 1024 * 1024; // 2GB default
 
     // Compression settings
     int compression_level = 1;

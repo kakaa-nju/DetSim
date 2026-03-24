@@ -2,8 +2,11 @@
 #include "core/state_store.h"
 #include "core/sysstate_store.h"
 #include "core/state_transition.h"
+#include "segv_handler.hpp"
 #include <cstdio>
 #include <cstring>
+#include <signal.h>
+#include <execinfo.h>
 
 // NCursesUI 集成
 #include "ui/log_wrapper.h"
@@ -30,6 +33,8 @@ extern char *batch_file;
 
 int main(int argc, char *argv[])
 {
+  ThreadAltStack main_altstack;
+
   /* 先解析参数（设置 loglevel, use_ui, batch_file） */
   parse_args(argc, argv);
 

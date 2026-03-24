@@ -85,6 +85,9 @@ void dwarf_cleanup(void);
 /* Legacy compatibility wrapper - uses tracee[0].executable */
 void init_dwarf(void);
 
+/* Load shared library symbols for a specific PID (for dynamic linking) */
+void dwarf_load_shared_library_symbols(int pid);
+
 /* ======================================================================
  * Variable Lookup
  * ====================================================================== */

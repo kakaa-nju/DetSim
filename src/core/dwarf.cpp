@@ -64,17 +64,31 @@ std::unordered_map<std::string, type_info> type_cache;
 struct elf_symbol
 {
   std::string name;
-  uintptr_t address = 0;
+  uintptr_t address = 0;  /* Runtime address (base + offset) */
   size_t size = 0;
   int type = 0; /* STT_OBJECT, STT_FUNC, etc. */
   int bind = 0; /* STB_GLOBAL, STB_LOCAL, etc. */
+  std::string lib_path;   /* Which library this symbol comes from */
 };
-static std::unordered_map<std::string, elf_symbol> elf_symbol_cache;
+
+/* Per-library symbol cache */
+struct library_symbols
+{
+  std::string path;
+  uintptr_t base_addr = 0;  /* Runtime load address */
+  std::unordered_map<std::string, elf_symbol> symbols;
+};
+
+/* Global library cache */
+static std::unordered_map<std::string, library_symbols> elf_library_cache;
 static std::string current_elf_path;
+static int elf_symbols_loaded_for_pid = -1;
 
 /* Forward declarations for ELF symbol handling */
 static void load_elf_symbols(const char *executable);
+static void load_shared_library_symbols(int pid);
 static uintptr_t lookup_elf_symbol(const char *symname);
+static std::string get_elf_symbol_type(const char *symname);
 
 /* ======================================================================
  * Section 2: Type Parsing
@@ -797,8 +811,9 @@ void dwarf_cleanup(void)
   }
   global_vars.clear();
   type_cache.clear();
-  elf_symbol_cache.clear();
+  elf_library_cache.clear();
   current_elf_path.clear();
+  elf_symbols_loaded_for_pid = -1;
 }
 
 /* Legacy compatibility wrapper */
@@ -834,50 +849,100 @@ void cleanup_dwarf(void)
   /* Clear all caches */
   global_vars.clear();
   type_cache.clear();
+  elf_library_cache.clear();
 }
 
 /* ==================================================================
  * Section 5.5: ELF Symbol Table Parsing (fallback for non-DWARF symbols)
  * ====================================================================== */
 
-/* Load symbols from ELF symbol table (.symtab or .dynsym)
- * This is needed for symbols like _dl_x86_cpu_features which are
- * defined in shared libraries but may not have DWARF debug info */
-static void load_elf_symbols(const char *executable)
+/* Parse /proc/<pid>/maps and return list of loaded shared libraries with base addresses
+ * Format: <start_addr>-<end_addr> <perms> <offset> <dev> <inode> <pathname>
+ * Returns map of pathname -> base_address */
+static std::unordered_map<std::string, uintptr_t> parse_proc_maps(int pid)
 {
-  if (elf_version(EV_CURRENT) == EV_NONE)
+  std::unordered_map<std::string, uintptr_t> libraries;
+  char maps_path[256];
+  snprintf(maps_path, sizeof(maps_path), "/proc/%d/maps", pid);
+
+  FILE *fp = fopen(maps_path, "r");
+  if (!fp)
   {
-    LOG_ERROR("ELF library initialization failed");
-    return;
+    LOG_ERROR("Failed to open %s", maps_path);
+    return libraries;
   }
 
-  int fd = open(executable, O_RDONLY);
-  if (fd < 0)
+  char line[512];
+  while (fgets(line, sizeof(line), fp))
   {
-    LOG_ERROR("Failed to open %s for ELF symbol parsing", executable);
-    return;
+    uintptr_t start_addr;
+    char path[256] = {0};
+    
+    /* Parse: start_addr-end_addr perms offset dev inode [path] */
+    if (sscanf(line, "%lx-%*x %*s %*s %*s %*s %255s", &start_addr, path) >= 1)
+    {
+      /* Skip if no path or path is special */
+      if (path[0] == '\0' || path[0] == '[')
+        continue;
+      
+      /* Skip if already seen (we want the first mapping which is the base) */
+      if (libraries.find(path) != libraries.end())
+        continue;
+      
+      /* For executables and shared libraries, the first mapping is the base */
+      libraries[path] = start_addr;
+    }
   }
+
+  fclose(fp);
+  return libraries;
+}
+
+/* Load symbols from a single ELF file (executable or library)
+ * base_addr: runtime load address (0 for non-PIE executables) */
+static void load_symbols_from_file(const char *path, uintptr_t base_addr)
+{
+  int fd = open(path, O_RDONLY);
+  if (fd < 0)
+    return;
 
   Elf *e = elf_begin(fd, ELF_C_READ, nullptr);
   if (!e)
   {
-    LOG_ERROR("elf_begin failed: %s", elf_errmsg(-1));
     close(fd);
     return;
   }
 
-  /* Clear existing cache */
-  elf_symbol_cache.clear();
-  current_elf_path = executable;
-
-  size_t shstrndx;
-  if (elf_getshdrstrndx(e, &shstrndx) != 0)
+  /* Check if this is a PIE or shared library (needs base address adjustment) */
+  GElf_Ehdr ehdr;
+  bool needs_relocation = false;
+  if (gelf_getehdr(e, &ehdr) == &ehdr)
   {
-    LOG_ERROR("elf_getshdrstrndx failed");
+    /* ET_DYN = shared library or PIE executable - needs base address */
+    /* ET_EXEC = non-PIE executable - use addresses as-is */
+    needs_relocation = (ehdr.e_type == ET_DYN);
+  }
+
+  /* If base_addr is 0 but needs relocation, we can't resolve symbols */
+  if (needs_relocation && base_addr == 0)
+  {
     elf_end(e);
     close(fd);
     return;
   }
+
+  size_t shstrndx;
+  if (elf_getshdrstrndx(e, &shstrndx) != 0)
+  {
+    elf_end(e);
+    close(fd);
+    return;
+  }
+
+  /* Create library entry */
+  library_symbols lib_syms;
+  lib_syms.path = path;
+  lib_syms.base_addr = base_addr;
 
   /* Iterate through all sections to find symbol tables */
   Elf_Scn *scn = nullptr;
@@ -901,7 +966,7 @@ static void load_elf_symbols(const char *executable)
       continue;
 
     Elf_Data *str_data = elf_getdata(str_scn, nullptr);
-    if (!str_data)
+    if (!str_data || !str_data->d_buf)
       continue;
 
     /* Get symbol table data */
@@ -917,19 +982,19 @@ static void load_elf_symbols(const char *executable)
       if (gelf_getsym(sym_data, i, &sym) != &sym)
         continue;
 
-      /* Only interested in global or weak symbols with names */
+      /* Only interested in symbols with names */
       if (sym.st_name == 0)
         continue;
 
+      /* Get binding info */
       int bind = GELF_ST_BIND(sym.st_info);
-      if (bind != STB_GLOBAL && bind != STB_WEAK)
+      
+      /* Skip local symbols (reduces cache size) - keep global and weak */
+      if (bind != STB_GLOBAL && bind != STB_WEAK && bind != STB_LOCAL)
         continue;
 
       /* Get symbol name */
-      if (!str_data->d_buf)
-        continue;
-      const char *sym_name =
-          (const char *)str_data->d_buf + sym.st_name;
+      const char *sym_name = (const char *)str_data->d_buf + sym.st_name;
       if (!sym_name || !*sym_name)
         continue;
 
@@ -942,36 +1007,106 @@ static void load_elf_symbols(const char *executable)
       if (sym.st_shndx == SHN_UNDEF)
         continue;
 
+      /* Skip local symbols that start with '_' (internal) unless whitelisted */
+      if (bind == STB_LOCAL && sym_name[0] == '_')
+        continue;
+
       elf_symbol esym;
       esym.name = sym_name;
-      esym.address = (uintptr_t)sym.st_value;
+      /* Calculate runtime address: base + offset */
+      esym.address = base_addr + (uintptr_t)sym.st_value;
       esym.size = (size_t)sym.st_size;
       esym.type = type;
       esym.bind = bind;
+      esym.lib_path = path;
 
-      elf_symbol_cache[sym_name] = esym;
+      lib_syms.symbols[sym_name] = esym;
     }
   }
 
   elf_end(e);
   close(fd);
 
-  LOG_INFO("ELF: Loaded %zu symbols from %s", elf_symbol_cache.size(),
-           executable);
+  /* Store in global cache */
+  if (!lib_syms.symbols.empty())
+  {
+    elf_library_cache[path] = std::move(lib_syms);
+    LOG_INFO("ELF: Loaded %zu symbols from %s (base=0x%lx)",
+             elf_library_cache[path].symbols.size(), path, base_addr);
+  }
 }
 
-/* Lookup a symbol in the ELF symbol cache
+/* Load symbols from main executable */
+static void load_elf_symbols(const char *executable)
+{
+  if (elf_version(EV_CURRENT) == EV_NONE)
+  {
+    LOG_ERROR("ELF library initialization failed");
+    return;
+  }
+
+  /* Clear existing cache */
+  elf_library_cache.clear();
+  current_elf_path = executable;
+
+  /* Load main executable with base=0 (we'll fix this when we know runtime base) */
+  load_symbols_from_file(executable, 0);
+}
+
+/* Load symbols from all shared libraries mapped in process */
+static void load_shared_library_symbols(int pid)
+{
+  auto libraries = parse_proc_maps(pid);
+  
+  for (const auto &[path, base_addr] : libraries)
+  {
+    /* Skip main executable (already loaded) */
+    if (path == current_elf_path)
+    {
+      /* Update base address for main executable if it's PIE */
+      auto it = elf_library_cache.find(path);
+      if (it != elf_library_cache.end())
+      {
+        /* Check if we need to update addresses */
+        if (it->second.base_addr == 0 && base_addr != 0)
+        {
+          /* This is a PIE executable, update symbol addresses */
+          for (auto &[sym_name, sym] : it->second.symbols)
+          {
+            sym.address += base_addr;
+          }
+          it->second.base_addr = base_addr;
+          LOG_INFO("ELF: Updated base address for %s to 0x%lx", path, base_addr);
+        }
+      }
+      continue;
+    }
+
+    /* Skip if already loaded */
+    if (elf_library_cache.find(path) != elf_library_cache.end())
+      continue;
+
+    /* Load symbols from this library */
+    load_symbols_from_file(path.c_str(), base_addr);
+  }
+}
+
+/* Lookup a symbol in the ELF symbol cache (all libraries)
  * Returns 0 if not found */
 static uintptr_t lookup_elf_symbol(const char *symname)
 {
   if (!symname || !*symname)
     return 0;
 
-  auto it = elf_symbol_cache.find(symname);
-  if (it != elf_symbol_cache.end())
+  for (const auto &[path, lib] : elf_library_cache)
   {
-    LOG_DEBUG("ELF: Found symbol %s at 0x%lx", symname, it->second.address);
-    return it->second.address;
+    auto it = lib.symbols.find(symname);
+    if (it != lib.symbols.end())
+    {
+      LOG_DEBUG("ELF: Found symbol %s at 0x%lx in %s", symname, 
+                it->second.address, path.c_str());
+      return it->second.address;
+    }
   }
 
   return 0;
@@ -984,13 +1119,16 @@ static std::string get_elf_symbol_type(const char *symname)
   if (!symname || !*symname)
     return "";
 
-  auto it = elf_symbol_cache.find(symname);
-  if (it != elf_symbol_cache.end())
+  for (const auto &[path, lib] : elf_library_cache)
   {
-    if (it->second.type == STT_FUNC)
-      return "func"; /* Special marker for function pointers */
-    else if (it->second.type == STT_OBJECT)
-      return "void*"; /* Generic pointer for data symbols */
+    auto it = lib.symbols.find(symname);
+    if (it != lib.symbols.end())
+    {
+      if (it->second.type == STT_FUNC)
+        return "func";
+      else if (it->second.type == STT_OBJECT)
+        return "void*";
+    }
   }
 
   return "";
@@ -1010,7 +1148,26 @@ uintptr_t dwarf_get_global_addr(const char *varname)
   }
 
   /* Fallback to ELF symbol table */
-  return lookup_elf_symbol(varname);
+  uintptr_t addr = lookup_elf_symbol(varname);
+  if (addr != 0)
+    return addr;
+
+  /* Try loading shared library symbols if not found
+   * This is a lazy loading approach - we load shared library symbols
+   * only when needed and cache them */
+  return 0;
+}
+
+/* Load shared library symbols for a specific PID
+ * Should be called when process is stopped */
+void dwarf_load_shared_library_symbols(int pid)
+{
+  if (elf_symbols_loaded_for_pid == pid)
+    return; /* Already loaded for this PID */
+  
+  LOG_INFO("ELF: Loading shared library symbols for PID %d", pid);
+  load_shared_library_symbols(pid);
+  elf_symbols_loaded_for_pid = pid;
 }
 
 std::string dwarf_get_global_type(const char *varname)

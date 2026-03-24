@@ -1,6 +1,14 @@
 /*
  * verify_sstate.cpp - Verify integrity of sstate (SysStateStore) files
  * 
+ * Stub for get_ncurses_ui - defined in main.cpp which we don't link
+ */
+extern "C" {
+    namespace detsim { namespace ui { class NCursesUI; } }
+    detsim::ui::NCursesUI* get_ncurses_ui() { return nullptr; }
+}
+
+/*
  * Usage: ./verify_sstate [sstate_dir]
  *   Default sstate_dir is "./sstate"
  */
@@ -33,21 +41,14 @@ static const char* INCREMENTAL_FILE = "packed.inc";
 
 using hash_type = uint64_t;
 
-/* Data entry header in packed.dat
- * 
- * Layout (24 bytes total):
- *   offset 0-3:   magic (4 bytes)
- *   offset 4-7:   padding (4 bytes, compiler inserted for hash alignment)
- *   offset 8-15:  hash (8 bytes)
- *   offset 16-19: size (4 bytes)
- *   offset 20-23: checksum (4 bytes)
- */
-struct DataEntryHeader {
+/* Data entry header in packed.dat - packed to 20 bytes */
+struct __attribute__((packed)) DataEntryHeader {
     uint32_t magic;
     hash_type hash;
     uint32_t size;
     uint32_t checksum;
 };
+static_assert(sizeof(DataEntryHeader) == 20, "DataEntryHeader size must be 20 bytes");
 
 /* Index entry */
 struct SysStateEntry {

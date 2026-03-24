@@ -896,10 +896,10 @@ int exec_dfs(int depth)
   ptmc_state.mode = PTMC_STATE::MODE_DFS;
   StateStore::instance().reset_stats();
   StateStore::instance().disable_prefetch();
-  g_states_searched = 0;
-  g_states_new = 0;
-  states_searched_this_run = 0;
-  states_new_this_run = 0;
+  g_states_searched = 1;
+  g_states_new = 1;
+  states_searched_this_run = 1;
+  states_new_this_run = 1;
   start_status_monitor();
 
   StateStore::instance().queue_clear();
