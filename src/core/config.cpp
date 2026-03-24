@@ -346,10 +346,6 @@ static void parse_statestore_config(const json &cfg)
     ss_config.malloc_trim_threshold =
         ss["malloc_trim_threshold_mb"].get<size_t>() * 1024 * 1024;
   }
-  if (ss.contains("use_packed_storage"))
-  {
-    ss_config.use_packed_storage = ss["use_packed_storage"].get<bool>();
-  }
   if (ss.contains("packed_storage_path"))
   {
     ss_config.packed_storage_path =

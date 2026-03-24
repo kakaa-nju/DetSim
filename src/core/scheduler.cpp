@@ -377,69 +377,47 @@ static void status_monitor_thread()
     /* Update status display */
     if (ui)
     {
-      /* Use NCursesUI status window */
+      /* Use NCursesUI status window - compact layout */
       char buf[256];
 
-      /* Line 1: Basic stats */
-      snprintf(buf, sizeof(buf),
-               "States: %zu | Unique: %zu | Queued: %zu | Traces: %zu | Depth: "
-               "%zu | %.1f/s",
-               g_states_searched.load(), unique_states, queue_size,
-               traces_searched, depth, states_per_sec);
-      ui->set_status_line(1, buf);
-
-      /* Line 2: Queues */
-      snprintf(buf, sizeof(buf), "IO: %zu/%zu | Prefetch: %zu", io_queue_size,
-               io_queue_cap, prefetch_queue_size);
-      ui->set_status_line(2, buf);
-
-      /* Line 3: Cache L1 */
-      snprintf(buf, sizeof(buf), "L1: %s/%s (%zu entries)",
-               format_bytes(l1_usage).c_str(), format_bytes(l1_cap).c_str(),
-               l1_entries);
-      ui->set_status_line(3, buf);
-
-      /* Line 4: Cache L2 */
-      snprintf(buf, sizeof(buf), "L2: %s/%s (%zu entries)",
-               format_bytes(l2_usage).c_str(), format_bytes(l2_cap).c_str(),
-               l2_entries);
-      ui->set_status_line(4, buf);
-
-      /* Line 5: Time */
+      double l1_pct = l1_cap > 0 ? 100.0 * l1_usage / l1_cap : 0;
+      double l2_pct = l2_cap > 0 ? 100.0 * l2_usage / l2_cap : 0;
       int hours = (int)(elapsed / 3600);
       int minutes = ((int)elapsed % 3600) / 60;
       int seconds = (int)elapsed % 60;
-      snprintf(buf, sizeof(buf), "Time: %02d:%02d:%02d | Total: %zu", hours,
-               minutes, seconds, total_sysstates);
-      ui->set_status_line(5, buf);
 
-      /* Line 6: Mode */
-      const char *mode_str = "DFS";
-      if (ptmc_state.mode == PTMC_STATE::MODE_RAND)
-        mode_str = "RAND";
-      else if (ptmc_state.mode == PTMC_STATE::MODE_BFS)
-        mode_str = "BFS";
-      snprintf(buf, sizeof(buf), "Mode: %s | Auto: %s | SIGINT: %s", mode_str,
-               is_auto_mode() ? "ON" : "OFF", sigint_received ? "YES" : "NO");
-      ui->set_status_line(6, buf);
+      /* Line 1: Progress stats */
+      snprintf(buf, sizeof(buf),
+               "Searched: %zu | Unique: %zu | Depth: %zu | Queued: %zu | "
+               "%.1f/s | %02d:%02d:%02d",
+               g_states_searched.load(), unique_states, depth, queue_size,
+               states_per_sec, hours, minutes, seconds);
+      ui->set_status_line(1, buf);
 
-      /* Line 7: Process status */
-      int running = 0, exited = 0;
-      for (int i = 0; i < NP; i++)
-      {
-        if (DISDEAD(ptmc_state.status[i]))
-          exited++;
-        else
-          running++;
-      }
-      snprintf(buf, sizeof(buf), "Procs: %d run | %d exit | Cursor: %d",
-               running, exited, ptmc_state.cursor);
-      ui->set_status_line(7, buf);
+      /* Line 2: Worker queues & prefetch stats */
+      snprintf(
+          buf, sizeof(buf),
+          "IO: %zu/%zu | Prefetch: %zu Q(%lu/%lu H) | Tree: %zu | Sys: %zu",
+          io_queue_size, io_queue_cap, prefetch_queue_size,
+          stats.prefetch_issued, stats.prefetch_hits, state_tree_size,
+          total_sysstates);
+      ui->set_status_line(2, buf);
 
-      /* Line 8: Current hash */
-      snprintf(buf, sizeof(buf), "Hash: %016lx",
-               ptmc_state.running_state.ss_hash);
-      ui->set_status_line(8, buf);
+      /* Line 3: Cache L1 & L2 with hit rate */
+      snprintf(
+          buf, sizeof(buf),
+          "L1: %s/%s (%.0f%%) [%zu] | L2: %s/%s (%.0f%%) [%zu] | Hit: %.1f%%",
+          format_bytes(l1_usage).c_str(), format_bytes(l1_cap).c_str(), l1_pct,
+          l1_entries, format_bytes(l2_usage).c_str(),
+          format_bytes(l2_cap).c_str(), l2_pct, l2_entries, hit_rate);
+      ui->set_status_line(3, buf);
+
+      /* Line 4: Eviction & subsystem stats */
+      snprintf(buf, sizeof(buf),
+               "Evict: %lu (%s) | Sock: %zu | FS: %zu | SQueue: %zu",
+               stats.evict_calls, format_bytes(stats.evict_bytes).c_str(),
+               sock_state_total, fs_state_total, state_queue_internal);
+      ui->set_status_line(4, buf);
     }
     else
     {

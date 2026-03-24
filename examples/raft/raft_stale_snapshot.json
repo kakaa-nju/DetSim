@@ -1,5 +1,5 @@
 {
-  "Loglevel": 1,
+  "Loglevel": 2,
   "Nodes": 3,
   "Tracee": [
     ["./raft/raft", "0"],

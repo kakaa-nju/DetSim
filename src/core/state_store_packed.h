@@ -40,7 +40,8 @@ struct __attribute__((packed)) PackedIndexEntry
   uint32_t original_size; // Uncompressed size for pre-allocation
   uint32_t checksum;
 };
-static_assert(sizeof(PackedIndexEntry) == 24, "PackedIndexEntry size must be 24 bytes");
+static_assert(sizeof(PackedIndexEntry) == 24,
+              "PackedIndexEntry size must be 24 bytes");
 
 /* Data entry header (stored in segment file) */
 /* Packed to avoid alignment padding - total size must be exactly 24 bytes */
@@ -52,7 +53,8 @@ struct __attribute__((packed)) PackedDataHeader
   uint32_t original_size;
   uint32_t checksum;
 };
-static_assert(sizeof(PackedDataHeader) == 24, "PackedDataHeader size must be 24 bytes");
+static_assert(sizeof(PackedDataHeader) == 24,
+              "PackedDataHeader size must be 24 bytes");
 
 /* Segment info */
 /* Packed to avoid alignment padding */
@@ -91,15 +93,23 @@ class StateStorePacked
   void init(); // Use default config
 
   /* Save state data with precomputed hash
-   * NOTE: data can be either raw or compressed. If compressed, set is_compressed=true.
-   * hash must be precomputed from the RAW data (by caller).
-   * original_size is required if is_compressed=true (size of uncompressed data).
+   * NOTE: data can be either raw or compressed. If compressed, set
+   * is_compressed=true. hash must be precomputed from the RAW data (by caller).
+   * original_size is required if is_compressed=true (size of uncompressed
+   * data).
    */
-  hash_type save(const void *data, size_t len, hash_type hash, 
+  hash_type save(const void *data, size_t len, hash_type hash,
                  bool is_compressed = false, size_t original_size = 0);
 
   /* Load state data, returns bytes read or -1 */
   ssize_t load(hash_type hash, std::vector<uint8_t> &data);
+
+  /* Load compressed data directly (for prefetch), returns bytes read or -1 */
+  ssize_t load_compressed(hash_type hash,
+                          std::vector<uint8_t> &compressed_data);
+
+  /* Get original size for a hash (for decompression) */
+  size_t get_original_size(hash_type hash);
 
   /* Check if hash exists */
   bool exists(hash_type hash);
@@ -131,6 +141,11 @@ class StateStorePacked
   /* Save segment info (for shutdown) */
   void save_segments_info();
 
+  /* Compression - shared with StateStore */
+  std::vector<uint8_t> compress(const std::vector<uint8_t> &data);
+  std::vector<uint8_t> decompress(const std::vector<uint8_t> &data,
+                                  size_t original_size);
+
   private:
   StateStorePacked() = default;
   ~StateStorePacked();
@@ -159,11 +174,6 @@ class StateStorePacked
   void ensure_active_segment();
   void rotate_segment();
   void load_segments_info();
-
-  /* Compression */
-  std::vector<uint8_t> compress(const std::vector<uint8_t> &data);
-  std::vector<uint8_t> decompress(const std::vector<uint8_t> &data,
-                                  size_t original_size);
 
   /* Checksum */
   uint32_t compute_checksum(const std::vector<uint8_t> &data);

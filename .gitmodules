@@ -7,3 +7,6 @@
 [submodule "examples/redisraft/raft"]
 	path = examples/redisraft/raft
 	url = https://github.com/Tilnel/redisraft
+[submodule "examples/redis/redis"]
+	path = examples/redis/redis
+	url = https://github.com/Tilnel/redis

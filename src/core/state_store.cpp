@@ -3,8 +3,11 @@
  */
 
 #include "state_store.h"
+#include "cereal/archives/binary.hpp"
 #include "debug.h"
+#include "state.h"
 #include "state_store_packed.h"
+#include "sysstate_store.h"
 #include "utils.h"
 #include "xxhash.h"
 #include <cerrno>
@@ -12,6 +15,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <sstream>
 #include <zstd.h>
 #include <zstd_errors.h>
 
@@ -53,16 +57,13 @@ void StateStore::init(const Config &config)
 
   config_ = config;
 
-  // Initialize packed storage if enabled
-  if (config_.use_packed_storage)
-  {
-    StateStorePacked::Config packed_config;
-    packed_config.compression_level = config_.compression_level;
-    packed_config.storage_path = config_.packed_storage_path;
-    StateStorePacked::instance().init(packed_config);
-    LOG_INFO("StateStore using packed storage: path=%s",
-             config_.packed_storage_path.c_str());
-  }
+  // Initialize packed storage
+  StateStorePacked::Config packed_config;
+  packed_config.compression_level = config_.compression_level;
+  packed_config.storage_path = config_.packed_storage_path;
+  StateStorePacked::instance().init(packed_config);
+  LOG_INFO("StateStore using packed storage: path=%s",
+           config_.packed_storage_path.c_str());
 
 // Check malloc tuning (glibc-specific)
 #ifdef __linux__
@@ -195,19 +196,10 @@ void StateStore::shutdown()
   }
 
   // Flush packed storage index and segment info to ensure data consistency
-  if (config_.use_packed_storage)
-  {
-    StateStorePacked::instance().save_segments_info();
-    StateStorePacked::instance().flush_index();
-    LOG_INFO(
-        "StateStore shutdown: flushed packed storage index and segments info");
-  }
-
-  // Clear ZSTD context caches (prevents memory leak warnings)
-  {
-    std::lock_guard<std::mutex> lock(ctx_cache_mutex_);
-    ctx_caches_.clear();
-  }
+  StateStorePacked::instance().save_segments_info();
+  StateStorePacked::instance().flush_index();
+  LOG_INFO(
+      "StateStore shutdown: flushed packed storage index and segments info");
 
   // Clear IO queue (should already be empty after workers join)
   {
@@ -230,16 +222,6 @@ void StateStore::queue_push_back(hash_type hash)
   state_queue_.push_back(hash);
 }
 
-hash_type StateStore::queue_front()
-{
-  std::lock_guard<std::mutex> lock(queue_mutex_);
-  if (state_queue_.empty())
-  {
-    return 0;
-  }
-  return state_queue_.front();
-}
-
 void StateStore::queue_pop_front()
 {
   hash_type current_hash = 0;
@@ -258,26 +240,28 @@ void StateStore::queue_pop_front()
 
 hash_type StateStore::queue_try_pop_front()
 {
-  std::lock_guard<std::mutex> lock(queue_mutex_);
-  if (state_queue_.empty())
-  {
-    LOG_DEBUG("queue_try_pop_front: queue empty");
-    return 0;
-  }
-  hash_type hash = state_queue_.front();
-  state_queue_.pop_front();
-  if (state_queue_.size() % 100 == 0)
-  {
-    LOG_DEBUG("queue_try_pop_front: popped hash %016lx, remaining=%zu", hash,
-              state_queue_.size());
-  }
-  return hash;
-}
+  hash_type hash = 0;
 
-bool StateStore::queue_empty() const
-{
-  std::lock_guard<std::mutex> lock(queue_mutex_);
-  return state_queue_.empty();
+  {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    if (state_queue_.empty())
+    {
+      LOG_DEBUG("queue_try_pop_front: queue empty");
+      return 0;
+    }
+    hash = state_queue_.front();
+    state_queue_.pop_front();
+    if (state_queue_.size() % 100 == 0)
+    {
+      LOG_DEBUG("queue_try_pop_front: popped hash %016lx, remaining=%zu", hash,
+                state_queue_.size());
+    }
+  }
+
+  // Trigger prefetch for upcoming states
+  submit_prefetch_tasks();
+
+  return hash;
 }
 
 size_t StateStore::queue_size() const
@@ -310,15 +294,15 @@ hash_type StateStore::queue_peek(size_t offset) const
 void StateStore::submit_prefetch_tasks()
 {
   std::vector<hash_type> to_prefetch;
+  size_t skipped_in_cache = 0;
+  size_t skipped_not_on_disk = 0;
+  size_t checked = 0;
 
   {
     std::lock_guard<std::mutex> inflight_lock(inflight_mutex_);
 
-    // Check if inflight is already at max
     if (prefetch_inflight_.size() >= config_.max_inflight_prefetch)
-    {
       return;
-    }
 
     for (size_t i = 0; i < config_.prefetch_window; i++)
     {
@@ -326,17 +310,55 @@ void StateStore::submit_prefetch_tasks()
       if (h == 0)
         break;
 
-      // Check: not in L1, not in L2, not already prefetching
+      checked++;
+
+      bool is_sys_state = SysStateStore::instance().exists(h);
+
+      if (is_sys_state)
+      {
+        std::vector<uint8_t> sys_data;
+        if (SysStateStore::instance().load(h, sys_data))
+        {
+          try
+          {
+            sys_state s;
+            std::istringstream iss(
+                std::string((char *)sys_data.data(), sys_data.size()));
+            cereal::BinaryInputArchive inputArchive(iss);
+            inputArchive(s);
+
+            for (int j = 0; j < NP; j++)
+            {
+              hash_type ts_hash = s.ts_hash[j];
+              if (ts_hash != 0 && !in_l1(ts_hash) && !in_l2(ts_hash) &&
+                  prefetch_inflight_.find(ts_hash) == prefetch_inflight_.end())
+              {
+                if (StateStorePacked::instance().exists(ts_hash))
+                {
+                  prefetch_inflight_.insert(ts_hash);
+                  to_prefetch.push_back(ts_hash);
+
+                  if (prefetch_inflight_.size() >=
+                      config_.max_inflight_prefetch)
+                    break;
+                }
+              }
+            }
+          }
+          catch (...)
+          {
+            LOG_WARN("Prefetch: failed to deserialize sys_state %016lx", h);
+          }
+        }
+        continue;
+      }
+
       if (!in_l1(h) && !in_l2(h) &&
           prefetch_inflight_.find(h) == prefetch_inflight_.end())
       {
-
-        // Only prefetch tracee_state (stored as .mem.zstd files)
-        // sys_state (.ss files) should not be prefetched
-        std::string path =
-            fileutils::format_hash_filename("memory", ".mem.zstd", h);
-        if (!fileutils::file_exists(path))
+        if (!StateStorePacked::instance().exists(h))
         {
+          skipped_not_on_disk++;
           continue;
         }
 
@@ -344,11 +366,21 @@ void StateStore::submit_prefetch_tasks()
         to_prefetch.push_back(h);
 
         if (prefetch_inflight_.size() >= config_.max_inflight_prefetch)
-        {
           break;
-        }
+      }
+      else
+      {
+        skipped_in_cache++;
       }
     }
+  }
+
+  if (!to_prefetch.empty())
+  {
+    LOG_DEBUG("Prefetch: submitting %zu tasks (%zu checked, %zu skipped cache, "
+              "%zu not on disk)",
+              to_prefetch.size(), checked, skipped_in_cache,
+              skipped_not_on_disk);
   }
 
   // Submit tasks
@@ -414,58 +446,6 @@ void StateStore::prefetch_worker()
       prefetch_inflight_.erase(task.hash);
       inflight_cv_.notify_all();
     }
-  }
-}
-
-void StateStore::prefetch(hash_type hash)
-{
-  if (hash == 0)
-    return;
-
-  {
-    std::lock_guard<std::mutex> lock(inflight_mutex_);
-    if (in_l1(hash) || in_l2(hash) ||
-        prefetch_inflight_.find(hash) != prefetch_inflight_.end())
-    {
-      return;
-    }
-    prefetch_inflight_.insert(hash);
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(prefetch_mutex_);
-    prefetch_queue_.push({hash, std::chrono::steady_clock::now()});
-  }
-  prefetch_cv_.notify_one();
-}
-
-void StateStore::prefetch_batch(const std::vector<hash_type> &hashes)
-{
-  std::vector<hash_type> to_submit;
-
-  {
-    std::lock_guard<std::mutex> lock(inflight_mutex_);
-    for (auto h : hashes)
-    {
-      if (h == 0)
-        continue;
-      if (!in_l1(h) && !in_l2(h) &&
-          prefetch_inflight_.find(h) == prefetch_inflight_.end() &&
-          prefetch_inflight_.size() < config_.max_inflight_prefetch)
-      {
-        prefetch_inflight_.insert(h);
-        to_submit.push_back(h);
-      }
-    }
-  }
-
-  {
-    std::lock_guard<std::mutex> lock(prefetch_mutex_);
-    for (auto h : to_submit)
-    {
-      prefetch_queue_.push({h, std::chrono::steady_clock::now()});
-    }
-    prefetch_cv_.notify_all();
   }
 }
 
@@ -615,7 +595,8 @@ bool StateStore::move_l2_to_l1(hash_type hash)
   }
 
   // Phase 2: Decompress outside any lock
-  std::vector<uint8_t> raw = decompress(compressed_data, 0);
+  size_t original_size = StateStorePacked::instance().get_original_size(hash);
+  std::vector<uint8_t> raw = decompress(compressed_data, original_size);
   if (raw.empty())
   {
     LOG_ERROR("Failed to decompress hash %016lx for L1 promotion", hash);
@@ -680,42 +661,6 @@ bool StateStore::move_l2_to_l1(hash_type hash)
   }
 
   return true;
-}
-
-void StateStore::evict_l1_if_needed(size_t required_bytes)
-{
-  std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
-
-  while (hot_memory_usage_ + required_bytes > config_.hot_cache_size &&
-         !hot_lru_.empty())
-  {
-    hash_type oldest = hot_lru_.back();
-    auto it = hot_cache_.find(oldest);
-
-    if (it != hot_cache_.end())
-    {
-      size_t freed = it->second->raw_data.size();
-      // Force immediate memory release - swap with empty vector
-      // shrink_to_fit() doesn't guarantee release for mmap'd memory
-      std::vector<uint8_t>().swap(it->second->raw_data);
-      hot_memory_usage_ -= freed;
-
-      // Move state to COMPRESSED if still in L2, otherwise PERSISTED
-      if (it->second->compressed_data.empty())
-      {
-        it->second->state = StateEntry::State::PERSISTED;
-      }
-      else
-      {
-        it->second->state = StateEntry::State::COMPRESSED;
-      }
-
-      hot_cache_.erase(it);
-    }
-
-    hot_lru_.pop_back();
-    hot_lru_index_.erase(oldest);
-  }
 }
 
 void StateStore::evict_l2_if_needed(size_t required_bytes)
@@ -1112,7 +1057,9 @@ ssize_t StateStore::load(hash_type hash, std::vector<uint8_t> &out_data)
   // Decompress outside the lock
   if (!compressed_from_l2.empty())
   {
-    std::vector<uint8_t> decompressed = decompress(compressed_from_l2, 0);
+    size_t original_size = StateStorePacked::instance().get_original_size(hash);
+    std::vector<uint8_t> decompressed =
+        decompress(compressed_from_l2, original_size);
     if (decompressed.empty())
     {
       LOG_ERROR("Decompression failed for %016lx", hash);
@@ -1145,40 +1092,62 @@ ssize_t StateStore::load(hash_type hash, std::vector<uint8_t> &out_data)
     return static_cast<ssize_t>(out_data.size());
   }
 
-  // Try disk
+  // Try disk - load compressed data directly to avoid re-compression
   if (exists_on_disk(hash))
   {
-    std::vector<uint8_t> disk_data;
-    if (read_from_disk(hash, disk_data))
+    std::vector<uint8_t> compressed_data;
+    if (read_compressed_from_disk(hash, compressed_data))
     {
-      // Insert to L1 first (move to avoid copy)
-      insert_to_l1(hash, std::move(disk_data));
+      // Get original size before moving compressed_data
+      size_t original_size =
+          StateStorePacked::instance().get_original_size(hash);
 
-      // Reference L1 data for L2 compression and return
-      std::vector<uint8_t> compressed;
+      // Insert to L2 first (already compressed)
+      insert_to_l2(hash, std::move(compressed_data));
+
+      // Get the compressed data from L2 and decompress for L1
+      std::vector<uint8_t> decompressed;
       {
-        std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
-        auto it = hot_cache_.find(hash);
-        if (it != hot_cache_.end() && !it->second->raw_data.empty())
+        std::lock_guard<std::recursive_mutex> lock(warm_mutex_);
+        auto it = warm_cache_.find(hash);
+        if (it != warm_cache_.end() && !it->second->compressed_data.empty())
         {
-          compressed = compress(it->second->raw_data);
-          out_data = it->second->raw_data;
+          decompressed = decompress(it->second->compressed_data, original_size);
         }
       }
 
-      if (!compressed.empty())
+      if (!decompressed.empty())
       {
-        insert_to_l2(hash, std::move(compressed));
-      }
+        insert_to_l1(hash, std::move(decompressed));
 
-      // Update stats
-      {
-        std::lock_guard<std::mutex> lock(stats_mutex_);
-        stats_.disk_reads++;
+        // Reference L1 data for return
+        {
+          std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
+          auto it = hot_cache_.find(hash);
+          if (it != hot_cache_.end() && !it->second->raw_data.empty())
+          {
+            out_data = it->second->raw_data;
+          }
+          else
+          {
+            out_data = std::move(decompressed);
+          }
+        }
+
+        // Update stats
+        {
+          std::lock_guard<std::mutex> lock(stats_mutex_);
+          stats_.disk_reads++;
+        }
+        LOG_TRACE("StateStore load %016lx from disk", hash);
+        return static_cast<ssize_t>(out_data.size());
       }
-      LOG_TRACE("StateStore load %016lx from disk", hash);
-      return static_cast<ssize_t>(out_data.size());
     }
+    LOG_ERROR("Disk read failed for hash %016lx", hash);
+  }
+  else
+  {
+    LOG_ERROR("Hash %016lx not found in L1, L2, or disk", hash);
   }
 
   return -1;
@@ -1236,56 +1205,6 @@ bool StateStore::exists(hash_type hash)
   return exists_on_disk(hash);
 }
 
-StateEntryPtr StateStore::get_entry(hash_type hash)
-{
-  {
-    std::lock_guard<std::recursive_mutex> lock(hot_mutex_);
-    auto it = hot_cache_.find(hash);
-    if (it != hot_cache_.end())
-      return it->second;
-  }
-  {
-    std::lock_guard<std::recursive_mutex> lock(warm_mutex_);
-    auto it = warm_cache_.find(hash);
-    if (it != warm_cache_.end())
-      return it->second;
-  }
-  return nullptr;
-}
-
-bool StateStore::wait_persisted(hash_type hash, uint64_t timeout_ms)
-{
-  // Check disk first
-  if (exists_on_disk(hash))
-    return true;
-
-  // Get entry
-  StateEntryPtr entry = get_entry(hash);
-  if (!entry)
-  {
-    return exists_on_disk(hash);
-  }
-
-  std::unique_lock<std::mutex> lock(entry->mutex);
-
-  auto check_state = [entry]()
-  {
-    auto s = entry->state.load();
-    return s == StateEntry::State::PERSISTED;
-  };
-
-  if (timeout_ms == 0)
-  {
-    entry->cv.wait(lock, check_state);
-    return true;
-  }
-  else
-  {
-    return entry->cv.wait_for(lock, std::chrono::milliseconds(timeout_ms),
-                              check_state);
-  }
-}
-
 void StateStore::wait_for_completion()
 {
   // Wait for all pending IO operations to complete
@@ -1327,12 +1246,9 @@ void StateStore::wait_for_completion()
   }
 
   // Flush packed storage index to ensure index entries are persisted
-  if (config_.use_packed_storage)
-  {
-    StateStorePacked::instance().save_segments_info();
-    StateStorePacked::instance().flush_index();
-    LOG_INFO("StateStore wait_for_completion: flushed packed storage index");
-  }
+  StateStorePacked::instance().save_segments_info();
+  StateStorePacked::instance().flush_index();
+  LOG_INFO("StateStore wait_for_completion: flushed packed storage index");
 }
 
 /* ==============================================================================
@@ -1432,223 +1348,19 @@ void StateStore::io_worker()
 }
 
 /* ==============================================================================
- * Compression
+ * Compression - delegated to StateStorePacked
  * ==============================================================================
  */
-
-/* ==============================================================================
- * ZSTD Context Cache Implementation
- * Prevents repeated 128MB heap segment allocations by reusing contexts
- * ==============================================================================
- */
-
-void StateStore::ZSTDContextCache::reset()
-{
-  if (cctx)
-  {
-    ZSTD_freeCCtx(cctx);
-    cctx = nullptr;
-  }
-  if (dctx)
-  {
-    ZSTD_freeDCtx(dctx);
-    dctx = nullptr;
-  }
-}
-
-ZSTD_CCtx *StateStore::ZSTDContextCache::getCCtx()
-{
-  if (!cctx)
-  {
-    cctx = ZSTD_createCCtx();
-  }
-  return cctx;
-}
-
-ZSTD_DCtx *StateStore::ZSTDContextCache::getDCtx()
-{
-  if (!dctx)
-  {
-    dctx = ZSTD_createDCtx();
-  }
-  return dctx;
-}
-
-StateStore::ZSTDContextCache *StateStore::get_thread_ctx_cache()
-{
-  std::thread::id tid = std::this_thread::get_id();
-
-  {
-    std::lock_guard<std::mutex> lock(ctx_cache_mutex_);
-    auto it = ctx_caches_.find(tid);
-    if (it != ctx_caches_.end())
-    {
-      return it->second.get();
-    }
-  }
-
-  // Create new cache for this thread
-  auto cache = std::make_unique<ZSTDContextCache>();
-  auto *ptr = cache.get();
-
-  {
-    std::lock_guard<std::mutex> lock(ctx_cache_mutex_);
-    ctx_caches_[tid] = std::move(cache);
-  }
-
-  return ptr;
-}
 
 std::vector<uint8_t> StateStore::compress(const std::vector<uint8_t> &data)
 {
-  if (data.empty())
-    return {};
-
-  int level = config_.compression_level;
-  if (level < 1)
-    level = 1;
-  if (level > 22)
-    level = 22;
-
-  size_t bound = ZSTD_compressBound(data.size());
-  if (bound == 0 || bound > SIZE_MAX / 2)
-  {
-    LOG_ERROR("ZSTD_compressBound failed");
-    return {};
-  }
-
-  // Use C-style malloc to avoid std::vector resize using mmap
-  // malloc respects MALLOC_MMAP_THRESHOLD_ env var, vector::resize does not
-  uint8_t *compressed_buf = (uint8_t *)malloc(bound);
-  if (!compressed_buf)
-  {
-    LOG_ERROR("Failed to allocate compression buffer (malloc %zu failed)",
-              bound);
-    return {};
-  }
-
-  // Use cached context to avoid repeated internal allocations
-  auto *cache = get_thread_ctx_cache();
-  std::lock_guard<std::mutex> cache_lock(cache->mutex);
-
-  ZSTD_CCtx *cctx = cache->getCCtx();
-  if (!cctx)
-  {
-    LOG_ERROR("Failed to create ZSTD compression context");
-    free(compressed_buf);
-    return {};
-  }
-
-  size_t result = ZSTD_compressCCtx(cctx, compressed_buf, bound, data.data(),
-                                    data.size(), level);
-
-  if (ZSTD_isError(result))
-  {
-    LOG_ERROR("ZSTD compression failed: %s", ZSTD_getErrorName(result));
-    free(compressed_buf);
-    // Reset context on error (might be corrupted)
-    cache->reset();
-    return {};
-  }
-
-  // Transfer to vector with exact size (this will do heap allocation via
-  // malloc)
-  std::vector<uint8_t> compressed;
-  compressed.reserve(result); // Reserve, don't resize - may avoid mmap
-  compressed.assign(compressed_buf, compressed_buf + result);
-  free(compressed_buf);
-  return compressed;
+  return StateStorePacked::instance().compress(data);
 }
 
 std::vector<uint8_t> StateStore::decompress(const std::vector<uint8_t> &data,
                                             size_t original_size)
 {
-  if (data.empty())
-    return {};
-
-  size_t dst_capacity = original_size;
-  if (original_size == 0 || original_size == ZSTD_CONTENTSIZE_UNKNOWN)
-  {
-    unsigned long long frame_size =
-        ZSTD_getFrameContentSize(data.data(), data.size());
-    if (frame_size != ZSTD_CONTENTSIZE_UNKNOWN &&
-        frame_size != ZSTD_CONTENTSIZE_ERROR)
-    {
-      if (frame_size > SIZE_MAX)
-      {
-        LOG_ERROR("Frame content size too large");
-        return {};
-      }
-      dst_capacity = static_cast<size_t>(frame_size);
-    }
-    else
-    {
-      dst_capacity = data.size() * 10; // Conservative estimate
-    }
-  }
-
-  if (dst_capacity < 64)
-    dst_capacity = 64;
-
-  const size_t max_factor = 500;
-  size_t max_capacity = (data.size() > SIZE_MAX / max_factor)
-                            ? SIZE_MAX
-                            : data.size() * max_factor;
-
-  // Use cached context
-  auto *cache = get_thread_ctx_cache();
-  std::lock_guard<std::mutex> cache_lock(cache->mutex);
-
-  ZSTD_DCtx *dctx = cache->getDCtx();
-  if (!dctx)
-  {
-    LOG_ERROR("Failed to create ZSTD decompression context");
-    return {};
-  }
-
-  while (dst_capacity <= max_capacity)
-  {
-    // Use C-style malloc to avoid std::vector resize using mmap
-    uint8_t *decompressed_buf = (uint8_t *)malloc(dst_capacity);
-    if (!decompressed_buf)
-    {
-      LOG_ERROR("Failed to allocate decompression buffer (malloc %zu failed)",
-                dst_capacity);
-      return {};
-    }
-
-    size_t result = ZSTD_decompressDCtx(dctx, decompressed_buf, dst_capacity,
-                                        data.data(), data.size());
-
-    if (!ZSTD_isError(result))
-    {
-      // Success: transfer to vector with exact size
-      std::vector<uint8_t> decompressed;
-      decompressed.reserve(result);
-      decompressed.assign(decompressed_buf, decompressed_buf + result);
-      free(decompressed_buf);
-      return decompressed;
-    }
-
-    free(decompressed_buf);
-
-    if (ZSTD_getErrorCode(result) == ZSTD_error_dstSize_tooSmall)
-    {
-      if (dst_capacity > max_capacity / 2)
-        break;
-      dst_capacity *= 2;
-    }
-    else
-    {
-      LOG_ERROR("ZSTD decompression failed: %s", ZSTD_getErrorName(result));
-      // Reset context on error
-      cache->reset();
-      return {};
-    }
-  }
-
-  LOG_ERROR("Decompression buffer exceeded max capacity");
-  return {};
+  return StateStorePacked::instance().decompress(data, original_size);
 }
 
 /* ==============================================================================
@@ -1660,214 +1372,29 @@ bool StateStore::write_to_disk(hash_type hash,
                                const std::vector<uint8_t> &compressed_data,
                                size_t original_size)
 {
-  if (config_.use_packed_storage)
-  {
-    StateStorePacked &packed = StateStorePacked::instance();
-    // Pass precomputed hash, mark data as compressed, pass original size
-    hash_type result =
-        packed.save(compressed_data.data(), compressed_data.size(), hash, true,
-                    original_size);
-    return result != 0;
-  }
-
-  std::string path =
-      fileutils::format_hash_filename("memory", ".mem.zstd", hash);
-  fileutils::ensure_directory_for_file(path);
-
-  FILE *fp = fopen(path.c_str(), "wb");
-  if (!fp)
-  {
-    LOG_ERROR("Failed to open %s: %s", path.c_str(), strerror(errno));
-    return false;
-  }
-
-  struct FileGuard
-  {
-    FILE *fp;
-    FileGuard(FILE *f) : fp(f) {}
-    ~FileGuard()
-    {
-      if (fp)
-        fclose(fp);
-    }
-  } file_guard(fp);
-
-  if (fwrite(compressed_data.data(), 1, compressed_data.size(), fp) !=
-      compressed_data.size())
-  {
-    LOG_ERROR("Failed to write data to %s", path.c_str());
-    return false;
-  }
-
-  if (fflush(fp) != 0)
-  {
-    LOG_ERROR("Failed to flush %s: %s", path.c_str(), strerror(errno));
-    return false;
-  }
-
-  return true;
+  StateStorePacked &packed = StateStorePacked::instance();
+  hash_type result = packed.save(compressed_data.data(), compressed_data.size(),
+                                 hash, true, original_size);
+  return result != 0;
 }
 
 bool StateStore::read_from_disk(hash_type hash, std::vector<uint8_t> &data)
 {
-  if (config_.use_packed_storage)
-  {
-    StateStorePacked &packed = StateStorePacked::instance();
-    ssize_t result = packed.load(hash, data);
-    return result > 0;
-  }
-
-  std::string path =
-      fileutils::format_hash_filename("memory", ".mem.zstd", hash);
-
-  if (!fileutils::file_exists(path))
-  {
-    return false;
-  }
-
-  FILE *fp = fopen(path.c_str(), "rb");
-  if (!fp)
-  {
-    LOG_ERROR("Failed to open %s: %s", path.c_str(), strerror(errno));
-    return false;
-  }
-
-  struct FileGuard
-  {
-    FILE *fp;
-    FileGuard(FILE *f) : fp(f) {}
-    ~FileGuard()
-    {
-      if (fp)
-        fclose(fp);
-    }
-  } file_guard(fp);
-
-  if (fseek(fp, 0, SEEK_END) != 0)
-  {
-    LOG_ERROR("Failed to seek end of %s", path.c_str());
-    return false;
-  }
-
-  long size = ftell(fp);
-  if (size < 0)
-  {
-    LOG_ERROR("Failed to get size of %s", path.c_str());
-    return false;
-  }
-
-  if (size == 0)
-  {
-    data.clear();
-    return true;
-  }
-
-  if (fseek(fp, 0, SEEK_SET) != 0)
-  {
-    LOG_ERROR("Failed to seek start of %s", path.c_str());
-    return false;
-  }
-
-  std::vector<uint8_t> compressed(size);
-  if (fread(compressed.data(), 1, size, fp) != static_cast<size_t>(size))
-  {
-    LOG_ERROR("Failed to read %s", path.c_str());
-    return false;
-  }
-
-  data = decompress(compressed, 0);
-  return !data.empty();
+  StateStorePacked &packed = StateStorePacked::instance();
+  ssize_t result = packed.load(hash, data);
+  return result > 0;
 }
 
 bool StateStore::read_compressed_from_disk(
     hash_type hash, std::vector<uint8_t> &compressed_data)
 {
-  if (config_.use_packed_storage)
-  {
-    StateStorePacked &packed = StateStorePacked::instance();
-    std::vector<uint8_t> raw_data;
-    ssize_t result = packed.load(hash, raw_data);
-    if (result > 0)
-    {
-      compressed_data = compress(raw_data);
-      return !compressed_data.empty();
-    }
-    return false;
-  }
-
-  std::string path =
-      fileutils::format_hash_filename("memory", ".mem.zstd", hash);
-
-  if (!fileutils::file_exists(path))
-  {
-    return false;
-  }
-
-  FILE *fp = fopen(path.c_str(), "rb");
-  if (!fp)
-  {
-    LOG_ERROR("Failed to open %s: %s", path.c_str(), strerror(errno));
-    return false;
-  }
-
-  struct FileGuard
-  {
-    FILE *fp;
-    FileGuard(FILE *f) : fp(f) {}
-    ~FileGuard()
-    {
-      if (fp)
-        fclose(fp);
-    }
-  } file_guard(fp);
-
-  if (fseek(fp, 0, SEEK_END) != 0)
-  {
-    LOG_ERROR("Failed to seek end of %s", path.c_str());
-    return false;
-  }
-
-  long size = ftell(fp);
-  if (size <= 0)
-  {
-    return false;
-  }
-
-  if (fseek(fp, 0, SEEK_SET) != 0)
-  {
-    LOG_ERROR("Failed to seek start of %s", path.c_str());
-    return false;
-  }
-
-  try
-  {
-    compressed_data.resize(size);
-  }
-  catch (...)
-  {
-    LOG_ERROR("Failed to allocate buffer for %s", path.c_str());
-    return false;
-  }
-
-  if (fread(compressed_data.data(), 1, size, fp) != static_cast<size_t>(size))
-  {
-    LOG_ERROR("Failed to read %s", path.c_str());
-    return false;
-  }
-
-  return true;
+  StateStorePacked &packed = StateStorePacked::instance();
+  return packed.load_compressed(hash, compressed_data) > 0;
 }
 
 bool StateStore::exists_on_disk(hash_type hash)
 {
-  if (config_.use_packed_storage)
-  {
-    return StateStorePacked::instance().exists(hash);
-  }
-
-  std::string path =
-      fileutils::format_hash_filename("memory", ".mem.zstd", hash);
-  return fileutils::file_exists(path);
+  return StateStorePacked::instance().exists(hash);
 }
 
 /* ==============================================================================

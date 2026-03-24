@@ -1014,6 +1014,48 @@ ssize_t StateStorePacked::load(hash_type hash, std::vector<uint8_t> &data)
   return static_cast<ssize_t>(data.size());
 }
 
+ssize_t StateStorePacked::load_compressed(hash_type hash,
+                                          std::vector<uint8_t> &compressed_data)
+{
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+
+  auto it = index_.find(hash);
+  if (it == index_.end())
+  {
+    return -1;
+  }
+
+  const PackedIndexEntry &entry = it->second;
+
+  /* Open segment file */
+  std::string segment_path = get_segment_data_path(entry.segment_id);
+  int fd = open(segment_path.c_str(), O_RDONLY);
+  if (fd < 0)
+  {
+    return -1;
+  }
+
+  /* Seek to data position (skip header) */
+  if (lseek(fd, entry.offset, SEEK_SET) != static_cast<off_t>(entry.offset))
+  {
+    close(fd);
+    return -1;
+  }
+
+  /* Read compressed data directly */
+  compressed_data.resize(entry.compressed_size);
+  ssize_t read_bytes = read(fd, compressed_data.data(), entry.compressed_size);
+  close(fd);
+
+  if (read_bytes != static_cast<ssize_t>(entry.compressed_size))
+  {
+    return -1;
+  }
+
+  loaded_count_++;
+  return static_cast<ssize_t>(entry.compressed_size);
+}
+
 bool StateStorePacked::exists(hash_type hash)
 {
   std::lock_guard<std::recursive_mutex> lock(mutex_);
@@ -1024,6 +1066,17 @@ bool StateStorePacked::exists(hash_type hash)
               hash, index_.size());
   }
   return found;
+}
+
+size_t StateStorePacked::get_original_size(hash_type hash)
+{
+  std::lock_guard<std::recursive_mutex> lock(mutex_);
+  auto it = index_.find(hash);
+  if (it != index_.end())
+  {
+    return it->second.original_size;
+  }
+  return 0;
 }
 
 bool StateStorePacked::wait_persisted(hash_type hash, uint64_t timeout_ms)

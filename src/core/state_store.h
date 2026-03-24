@@ -110,10 +110,10 @@ class StateStore
   struct Config
   {
     // L1 Hot Cache: raw uncompressed data (fast access)
-    size_t hot_cache_size = 1ULL * 1024 * 1024; // 512MB default
+    size_t hot_cache_size = 512ULL * 1024 * 1024; // 512MB default
 
     // L2 Warm Cache: compressed data (higher capacity)
-    size_t warm_cache_size = 1ULL * 1024 * 1024; // 2GB default
+    size_t warm_cache_size = 2048ULL * 1024 * 1024; // 2GB default
 
     // Compression settings
     int compression_level = 1;
@@ -135,9 +135,8 @@ class StateStore
     size_t malloc_mmap_threshold =
         1024ULL * 1024 * 1024; // Only mmap for >1GB allocations
 
-    // Storage backend
-    bool use_packed_storage = true;
-    std::string packed_storage_path = "memory_packed";
+    // Storage path for packed storage
+    std::string packed_storage_path = "memory";
   };
 
   StateStore();
@@ -159,14 +158,8 @@ class StateStore
   // Check existence
   bool exists(hash_type hash);
 
-  // Wait for persistence
-  bool wait_persisted(hash_type hash, uint64_t timeout_ms = 0);
-
   // Wait for all pending IO operations to complete
   void wait_for_completion();
-
-  // Get entry (advanced usage)
-  StateEntryPtr get_entry(hash_type hash);
 
   // Queue management for transparent prefetch
   void disable_prefetch(void);
@@ -183,20 +176,13 @@ class StateStore
 
   // Queue operations - prefetch happens automatically on pop
   void queue_push_back(hash_type hash);
-  hash_type queue_front();
   void queue_pop_front();
-  hash_type
-  queue_try_pop_front(); // Atomically check and pop, returns 0 if empty
-  bool queue_empty() const;
+  hash_type queue_try_pop_front();
   size_t queue_size() const;
   void queue_clear();
 
   // Get a hash at specific offset from front (for prefetch planning)
   hash_type queue_peek(size_t offset) const;
-
-  // Manual prefetch control (optional)
-  void prefetch(hash_type hash);
-  void prefetch_batch(const std::vector<hash_type> &hashes);
 
   // Check if hash is in L1/L2/prefetching
   bool in_l1(hash_type hash) const;
@@ -355,39 +341,19 @@ class StateStore
   // Cache operations
   void insert_to_l1(hash_type hash, std::vector<uint8_t> &&raw_data);
   void insert_to_l2(hash_type hash, std::vector<uint8_t> &&compressed_data);
-  bool move_l2_to_l1(hash_type hash); // Decompress on demand
-  void evict_l1_if_needed(size_t required_bytes);
+  bool move_l2_to_l1(hash_type hash);
   void evict_l2_if_needed(size_t required_bytes);
   void update_hot_lru(hash_type hash);
   void update_warm_lru(hash_type hash);
 
-  // Compression with context caching to avoid repeated malloc
+  // Compression - delegated to StateStorePacked
   std::vector<uint8_t> compress(const std::vector<uint8_t> &data);
   std::vector<uint8_t> decompress(const std::vector<uint8_t> &data,
                                   size_t original_size);
 
-  // Thread-local ZSTD context cache (to avoid 128MB heap segment allocations)
-  struct ZSTDContextCache
-  {
-    ZSTD_CCtx *cctx = nullptr;
-    ZSTD_DCtx *dctx = nullptr;
-    std::mutex mutex;
-
-    ~ZSTDContextCache() { reset(); }
-    void reset();
-    ZSTD_CCtx *getCCtx();
-    ZSTD_DCtx *getDCtx();
-  };
-
-  // One cache per IO/prefetch thread (indexed by thread id)
-  mutable std::mutex ctx_cache_mutex_;
-  std::unordered_map<std::thread::id, std::unique_ptr<ZSTDContextCache>>
-      ctx_caches_;
-
-  ZSTDContextCache *get_thread_ctx_cache();
-
   // Disk operations
-  bool write_to_disk(hash_type hash, const std::vector<uint8_t> &compressed_data,
+  bool write_to_disk(hash_type hash,
+                     const std::vector<uint8_t> &compressed_data,
                      size_t original_size);
   bool read_from_disk(hash_type hash, std::vector<uint8_t> &data);
   bool read_compressed_from_disk(hash_type hash,
