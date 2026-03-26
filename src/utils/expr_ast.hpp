@@ -196,10 +196,15 @@ class MemberAccessNode : public ExprNode
   MemberOp op_;
   ExprPtr object_;
   std::string member_;
+  mutable ptrdiff_t cached_offset_;
+  mutable std::string cached_base_type_;
+  mutable std::string cached_member_type_;
+  mutable bool offset_computed_;
 
   public:
   MemberAccessNode(MemberOp op, ExprNode *obj, const std::string &mem)
-      : op_(op), object_(obj), member_(mem)
+      : op_(op), object_(obj), member_(mem), cached_offset_(-1),
+        offset_computed_(false), cached_base_type_(), cached_member_type_()
   {
   }
   EvalResult eval(int pid, bool &success) const override;

@@ -184,9 +184,10 @@ typedef struct sys_state
   hash_type ts_hash[NP];
   tracee_state child[NP];
   int status[NP];
+  int error_bound = 5;
 
   // Default constructor - value-initialize all members
-  sys_state() : ss_hash(0), ts_hash{}, child{}, status{} {}
+  sys_state() : ss_hash(0), ts_hash{}, child{}, status{}, error_bound(4) {}
 
   // Copy control
   sys_state(const sys_state &other) = default;

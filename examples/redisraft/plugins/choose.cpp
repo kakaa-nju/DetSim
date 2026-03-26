@@ -8,6 +8,7 @@
 
 #include "../raft/include/raft.h"
 #include "../raft/include/raft_private.h"
+#include "monitor.h"
 #include "emu.h"
 #include "guest.h"
 
@@ -45,7 +46,10 @@ extern "C"
       if (choice == 0)
         *tv_out = tv;
       else
+      {
         *tv_out = tv_addmsec(tv, raft.election_timeout_rand + 1);
+        ptmc_state.error_bound--;
+      }
     }
 
     choose_out *out = new choose_out();

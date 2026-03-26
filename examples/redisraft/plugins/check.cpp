@@ -22,11 +22,99 @@
 extern "C"
 {
 
+  struct EvalCache
+  {
+    std::unordered_map<std::string, long> cache;
+
+    void clear() { cache.clear(); }
+
+    std::string make_key(int node_id, const std::string &expr)
+    {
+      static_assert(NP <= 5, "Node ID exceeds prefix array size");
+      static const std::string prefix[5] = {"0:", "1:", "2:", "3:", "4:"};
+      return prefix[node_id] + expr;
+    }
+
+    bool get(int node_id, const std::string &expr, long *value)
+    {
+      std::string key = make_key(node_id, expr);
+      auto it = cache.find(key);
+      if (it != cache.end())
+      {
+        *value = it->second;
+        return true;
+      }
+      return false;
+    }
+
+    void set(int node_id, const std::string &expr, long value)
+    {
+      cache[make_key(node_id, expr)] = value;
+    }
+  };
+
+  static EvalCache g_eval_cache;
+
+  long eval_cached_long(const std::string &expr, int node_id, bool *success)
+  {
+    long value;
+    if (g_eval_cache.get(node_id, expr, &value))
+    {
+      if (success)
+        *success = true;
+      return value;
+    }
+
+    value = eval<long>(expr.c_str(), node_id, success);
+    if (success && *success)
+    {
+      g_eval_cache.set(node_id, expr, value);
+    }
+    return value;
+  }
+
+  int eval_cached_int(const std::string &expr, int node_id, bool *success)
+  {
+    long value;
+    if (g_eval_cache.get(node_id, expr, &value))
+    {
+      if (success)
+        *success = true;
+      return static_cast<int>(value);
+    }
+
+    int int_value = eval<int>(expr.c_str(), node_id, success);
+    if (success && *success)
+    {
+      g_eval_cache.set(node_id, expr, static_cast<long>(int_value));
+    }
+    return int_value;
+  }
+
+  uintptr_t eval_cached_uintptr(const std::string &expr, int node_id,
+                                bool *success)
+  {
+    long value;
+    if (g_eval_cache.get(node_id, expr, &value))
+    {
+      if (success)
+        *success = true;
+      return static_cast<uintptr_t>(value);
+    }
+
+    uintptr_t ptr_val = eval<uintptr_t>(expr.c_str(), node_id, success);
+    if (success && *success)
+    {
+      g_eval_cache.set(node_id, expr, static_cast<long>(ptr_val));
+    }
+    return ptr_val;
+  }
+
   bool is_node_initialized(int node_id)
   {
-    std::string ptr_expr = fmt::format("(void*)raft");
+    std::string ptr_expr = "(void*)raft";
     bool success = false;
-    uintptr_t ptr_val = eval<uintptr_t>(ptr_expr.c_str(), node_id, &success);
+    uintptr_t ptr_val = eval_cached_uintptr(ptr_expr, node_id, &success);
     return success && ptr_val != 0;
   }
 
@@ -37,8 +125,8 @@ extern "C"
       *success = false;
       return 0;
     }
-    std::string term_expr = fmt::format("((raft_server*)raft)->current_term");
-    return eval<long>(term_expr.c_str(), node_id, success);
+    std::string term_expr = "((raft_server*)raft)->current_term";
+    return eval_cached_long(term_expr, node_id, success);
   }
 
   bool is_node_leader(int node_id, bool *success)
@@ -48,9 +136,9 @@ extern "C"
       *success = false;
       return false;
     }
-    std::string state_expr = fmt::format("((raft_server*)raft)->state");
-    int state = eval<int>(state_expr.c_str(), node_id, success);
-    return *success && state == 4; // RAFT_STATE_LEADER = 4 in redisraft
+    std::string state_expr = "((raft_server*)raft)->state";
+    int state = eval_cached_int(state_expr, node_id, success);
+    return *success && state == 4;
   }
 
   long get_snapshot_term(int node_id, bool *success)
@@ -61,8 +149,20 @@ extern "C"
       return 0;
     }
     std::string snap_term_expr =
-        fmt::format("((raft_server*)raft)->snapshot_last_term");
-    return eval<long>(snap_term_expr.c_str(), node_id, success);
+        "((raft_server*)raft)->snapshot_last_term";
+    return eval_cached_long(snap_term_expr, node_id, success);
+  }
+
+  long get_snapshot_last_idx(int node_id, bool *success)
+  {
+    if (!is_node_initialized(node_id))
+    {
+      *success = false;
+      return 0;
+    }
+    std::string snap_idx_expr =
+        "((raft_server*)raft)->snapshot_last_idx";
+    return eval_cached_long(snap_idx_expr, node_id, success);
   }
 
   long get_voted_for(int node_id, bool *success)
@@ -72,8 +172,8 @@ extern "C"
       *success = false;
       return -1;
     }
-    std::string expr = fmt::format("((raft_server*)raft)->voted_for");
-    return eval<long>(expr.c_str(), node_id, success);
+    std::string expr = "((raft_server*)raft)->voted_for";
+    return eval_cached_long(expr, node_id, success);
   }
 
   long get_commit_idx(int node_id, bool *success)
@@ -83,8 +183,8 @@ extern "C"
       *success = false;
       return 0;
     }
-    std::string expr = fmt::format("((raft_server*)raft)->commit_idx");
-    return eval<long>(expr.c_str(), node_id, success);
+    std::string expr = "((raft_server*)raft)->commit_idx";
+    return eval_cached_long(expr, node_id, success);
   }
 
   long get_last_applied_idx(int node_id, bool *success)
@@ -94,11 +194,10 @@ extern "C"
       *success = false;
       return 0;
     }
-    std::string expr = fmt::format("((raft_server*)raft)->last_applied_idx");
-    return eval<long>(expr.c_str(), node_id, success);
+    std::string expr = "((raft_server*)raft)->last_applied_idx";
+    return eval_cached_long(expr, node_id, success);
   }
 
-  /* Get current log index using redisraft's log structure */
   long get_current_idx(int node_id, bool *success)
   {
     if (!is_node_initialized(node_id))
@@ -106,18 +205,16 @@ extern "C"
       *success = false;
       return 0;
     }
-    // Get log pointer first
-    std::string log_expr = fmt::format("((raft_server*)raft)->log");
-    uintptr_t log_ptr = eval<uintptr_t>(log_expr.c_str(), node_id, success);
+    std::string log_expr = "((raft_server*)raft)->log";
+    uintptr_t log_ptr = eval_cached_uintptr(log_expr, node_id, success);
     if (!*success)
       return 0;
-    // Get base and count, then add them
     std::string base_expr = fmt::format("((raft_log_t*){})->base", log_ptr);
     std::string count_expr = fmt::format("((raft_log_t*){})->count", log_ptr);
-    long base = eval<long>(base_expr.c_str(), node_id, success);
+    long base = eval_cached_long(base_expr, node_id, success);
     if (!*success)
       return 0;
-    long count = eval<long>(count_expr.c_str(), node_id, success);
+    long count = eval_cached_long(count_expr, node_id, success);
     if (!*success)
       return 0;
     return base + count;
@@ -130,8 +227,8 @@ extern "C"
       *success = false;
       return 0;
     }
-    std::string expr = fmt::format("((raft_server*)raft)->num_nodes");
-    return eval<int>(expr.c_str(), node_id, success);
+    std::string expr = "((raft_server*)raft)->num_nodes";
+    return eval_cached_int(expr, node_id, success);
   }
 
   /* Safe helper to get log entry term at specific index
@@ -145,54 +242,48 @@ extern "C"
 
     bool success = false;
 
-    // Get log pointer
-    std::string log_expr = fmt::format("((raft_server*)raft)->log");
-    uintptr_t log_ptr = eval<uintptr_t>(log_expr.c_str(), node_id, &success);
+    std::string log_expr = "((raft_server*)raft)->log";
+    uintptr_t log_ptr = eval_cached_uintptr(log_expr, node_id, &success);
     if (!success)
       return -1;
 
-    // Read count and base from log
     std::string count_expr = fmt::format("((raft_log_t*){})->count", log_ptr);
-    long count = eval<long>(count_expr.c_str(), node_id, &success);
+    long count = eval_cached_long(count_expr, node_id, &success);
     if (!success)
       return -1;
 
     std::string base_expr = fmt::format("((raft_log_t*){})->base", log_ptr);
-    long base = eval<long>(base_expr.c_str(), node_id, &success);
+    long base = eval_cached_long(base_expr, node_id, &success);
     if (!success)
       return -1;
 
-    // Check if index is valid
     if (idx <= base || idx > base + count)
       return -1;
 
-    // Get entries array and other fields for circular buffer calculation
     std::string entries_expr =
         fmt::format("((raft_log_t*){})->entries", log_ptr);
     uintptr_t entries_array =
-        eval<uintptr_t>(entries_expr.c_str(), node_id, &success);
+        eval_cached_uintptr(entries_expr, node_id, &success);
     if (!success || entries_array == 0)
       return -1;
 
     std::string front_expr = fmt::format("((raft_log_t*){})->front", log_ptr);
-    long front = eval<long>(front_expr.c_str(), node_id, &success);
+    long front = eval_cached_long(front_expr, node_id, &success);
     if (!success)
       return -1;
 
     std::string size_expr = fmt::format("((raft_log_t*){})->size", log_ptr);
-    long size = eval<long>(size_expr.c_str(), node_id, &success);
+    long size = eval_cached_long(size_expr, node_id, &success);
     if (!success || size <= 0)
       return -1;
 
-    // Calculate position in circular buffer
     long logical_idx = idx - base - 1;
     long physical_idx = (front + logical_idx) % size;
 
-    // Access entry pointer from entries array
     std::string entry_ptr_expr =
         fmt::format("((raft_entry_t**){})[{}]", entries_array, physical_idx);
     uintptr_t entry_ptr =
-        eval<uintptr_t>(entry_ptr_expr.c_str(), node_id, &success);
+        eval_cached_uintptr(entry_ptr_expr, node_id, &success);
     if (!success || entry_ptr == 0)
       return -1;
 
@@ -275,9 +366,7 @@ extern "C"
         continue;
 
       bool success = false;
-      std::string snap_idx_expr =
-          fmt::format("((raft_server*)raft)->snapshot_last_idx");
-      long snap_idx = eval<long>(snap_idx_expr.c_str(), i, &success);
+      long snap_idx = get_snapshot_last_idx(i, &success);
       long snap_term = get_snapshot_term(i, &success);
       long current_term = get_node_term(i, &success);
 
@@ -304,25 +393,38 @@ extern "C"
         continue;
 
       bool success = false;
+      if (!is_node_leader(i, &success) || !success)
+        continue;
+
       int node_count = get_node_count(i, &success);
       if (!success || node_count <= 0)
         continue;
 
       for (int j = 0; j < node_count; j++)
       {
-        if (j == i)
+        std::string node_id_expr =
+            fmt::format("((raft_server*)raft)->nodes[{}]->id", j);
+        int node_id = eval_cached_int(node_id_expr, i, &success);
+        if (!success)
+          continue;
+        if (node_id == i)
           continue;
 
-        // Access raft_node_t fields directly through nodes array
+        std::string inactive_expr =
+            fmt::format("((raft_server*)raft)->nodes[{}]->flags & 8", j);
+        int is_inactive = eval_cached_int(inactive_expr, i, &success);
+        if (!success || is_inactive)
+          continue;
+
         std::string next_expr =
             fmt::format("((raft_server*)raft)->nodes[{}]->next_idx", j);
         std::string match_expr =
             fmt::format("((raft_server*)raft)->nodes[{}]->match_idx", j);
 
-        long next_idx = eval<long>(next_expr.c_str(), i, &success);
+        long next_idx = eval_cached_long(next_expr, i, &success);
         if (!success)
           continue;
-        long match_idx = eval<long>(match_expr.c_str(), i, &success);
+        long match_idx = eval_cached_long(match_expr, i, &success);
         if (!success)
           continue;
 
@@ -330,7 +432,7 @@ extern "C"
         {
           detsim::ui::ui_printf("\n[CHECK FAILED] Node %d has next_idx(%ld) <= "
                                 "match_idx(%ld) for follower %d!\n",
-                                i, next_idx, match_idx, j);
+                                i, next_idx, match_idx, node_id);
           return 1;
         }
       }
@@ -506,11 +608,10 @@ extern "C"
       int result = get_log_entry_term(leader_idx, idx, &entry_term);
       if (result != 0)
       {
-        long snap_term = get_snapshot_term(leader_idx, &success);
-        if (success && snap_term > 0)
-          entry_term = snap_term;
-        else
+        long snap_idx = get_snapshot_last_idx(leader_idx, &success);
+        if (success && snap_idx > 0 && idx <= snap_idx)
           continue;
+        continue;
       }
       committed_entries[idx] = entry_term;
     }
@@ -528,25 +629,30 @@ extern "C"
 
       for (long idx = 1; idx <= check_limit; idx++)
       {
+        if (!committed_entries.count(idx))
+          continue;
+
         long entry_term = 0;
         int result = get_log_entry_term(i, idx, &entry_term);
 
-        if (result != 0)
+        if (result == 0 && committed_entries[idx] == entry_term)
         {
-          long snap_term = get_snapshot_term(i, &success);
-          if (success && snap_term > 0)
-            entry_term = snap_term;
-          else
-            continue;
-        }
-
-        if (committed_entries[idx] == entry_term)
           committed_entries_quorum[idx]++;
+        }
+        else if (result != 0)
+        {
+          long snap_idx = get_snapshot_last_idx(i, &success);
+          if (success && snap_idx > 0 && idx <= snap_idx)
+            committed_entries_quorum[idx]++;
+        }
       }
     }
 
     for (long idx = 1; idx <= std::min(commit_idx, 20L); idx++)
     {
+      if (!committed_entries.count(idx))
+        continue;
+
       if (committed_entries_quorum[idx] + 1 < (NP + 1) / 2)
       {
         detsim::ui::ui_printf("\n[CHECK FAILED] Committed entry did not reach "
@@ -601,11 +707,10 @@ extern "C"
         int result = get_log_entry_term(i, idx, &entry_term);
         if (result != 0)
         {
-          long snap_term = get_snapshot_term(i, &success);
-          if (success && snap_term > 0)
-            entry_term = snap_term;
-          else
+          long snap_idx = get_snapshot_last_idx(i, &success);
+          if (success && snap_idx > 0 && idx <= snap_idx)
             continue;
+          continue;
         }
 
         if (committed_entries.count(idx))
@@ -635,16 +740,9 @@ extern "C"
 
         if (result != 0)
         {
-          bool success = false;
-          long snap_idx = 0;
-          std::string snap_idx_expr =
-              fmt::format("((raft_server*)raft)->snapshot_last_idx");
-          snap_idx = eval<long>(snap_idx_expr.c_str(), leader_id, &success);
-
+          long snap_idx = get_snapshot_last_idx(leader_id, &success);
           if (success && snap_idx > 0 && idx <= snap_idx)
-          {
             continue;
-          }
 
           detsim::ui::ui_printf(
               "\n[CHECK FAILED] Leader %d missing committed entry %ld!\n",
@@ -733,6 +831,7 @@ extern "C"
 
   int check()
   {
+    g_eval_cache.clear();
     int result = 0;
 
     for (int i = 0; i < NP; i++)

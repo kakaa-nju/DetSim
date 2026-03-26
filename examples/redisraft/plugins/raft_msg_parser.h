@@ -17,6 +17,9 @@ namespace raft
 using raft_term_t = long;
 using raft_index_t = long;
 using raft_node_id_t = int;
+using raft_entry_id_t = long;
+using raft_session_t = unsigned long long;
+using raft_size_t = size_t;
 
 enum RaftMsgType
 {
@@ -29,7 +32,6 @@ enum RaftMsgType
   RAFT_MSG_SNAPSHOT,
   RAFT_MSG_SNAPSHOT_RESPONSE
 };
-
 
 struct raft_requestvote_req_t
 {
@@ -66,8 +68,6 @@ struct raft_appendentries_resp_t
   int success;
   raft_index_t current_idx;
 };
-
-
 
 std::string parse_raft_message(const void *buf, size_t len);
 const char *get_msg_type_name(int type);

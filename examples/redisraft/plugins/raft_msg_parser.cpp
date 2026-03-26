@@ -148,7 +148,49 @@ std::string parse_appendentries(const void *buf, size_t len)
   std::ostringstream oss;
   oss << "APPEND_ENTRIES{term=" << msg.term << ", prev_idx=" << msg.prev_log_idx
       << ", prev_term=" << msg.prev_log_term << ", commit=" << msg.leader_commit
-      << ", n_ent=" << msg.n_entries << "}";
+      << ", n_ent=" << msg.n_entries;
+
+  // Parse entries if present
+  if (msg.n_entries > 0 && remaining >= 56)
+  {
+    oss << ", entries=[";
+    for (int i = 0; i < msg.n_entries && remaining >= 56; i++)
+    {
+      if (i > 0)
+        oss << ", ";
+
+      // Parse entry header (56 bytes)
+      // term(8) + id(8) + session(8) + type(4) + refs(2) + padding(2) +
+      // user_data(8) + free_func(8) + data_len(8)
+      raft_term_t entry_term;
+      raft_entry_id_t entry_id;
+      int entry_type;
+      raft_size_t data_len;
+
+      const uint8_t *entry_ptr = ptr;
+      memcpy(&entry_term, entry_ptr, sizeof(entry_term));
+      entry_ptr += sizeof(entry_term);
+      memcpy(&entry_id, entry_ptr, sizeof(entry_id));
+      entry_ptr += sizeof(entry_id) + sizeof(raft_session_t) + sizeof(int) +
+                   sizeof(unsigned short) + sizeof(void *) + sizeof(void *);
+      memcpy(&data_len, entry_ptr, sizeof(data_len));
+
+      // Calculate actual entry size in the buffer
+      size_t entry_total_size = 56 + data_len;
+
+      oss << "{idx=" << (msg.prev_log_idx + i + 1) << ", term=" << entry_term
+          << ", id=" << entry_id << ", type=" << entry_type
+          << ", len=" << data_len << "}";
+
+      // Skip to next entry
+      if (remaining < entry_total_size)
+        break;
+      skip_bytes(ptr, remaining, entry_total_size);
+    }
+    oss << "]";
+  }
+
+  oss << "}";
   return oss.str();
 }
 
@@ -184,7 +226,8 @@ std::string parse_snapshot(const void *buf, size_t len)
   size_t remaining = len;
 
   // C struct layout with padding: term(8) + leader_id(4) + pad(4) + msg_id(8) +
-  // snapshot_index(8) + snapshot_term(8) + chunk(32)
+  // snapshot_index(8) + snapshot_term(8) + chunk(offset(8) + len(8) +
+  // last_chunk(4))
   raft_term_t term;
   raft_node_id_t leader_id;
   unsigned long msg_id;
@@ -195,7 +238,7 @@ std::string parse_snapshot(const void *buf, size_t len)
     return "SNAPSHOT[malformed]";
   if (!read_value(ptr, remaining, leader_id))
     return "SNAPSHOT[malformed]";
-  if (!skip_bytes(ptr, remaining, 4)) // padding after leader_id
+  if (!skip_bytes(ptr, remaining, 4))
     return "SNAPSHOT[malformed]";
   if (!read_value(ptr, remaining, msg_id))
     return "SNAPSHOT[malformed]";
@@ -204,10 +247,33 @@ std::string parse_snapshot(const void *buf, size_t len)
   if (!read_value(ptr, remaining, snapshot_term))
     return "SNAPSHOT[malformed]";
 
+  // Parse chunk: offset(8) + len(8) + last_chunk(4)
+  raft_size_t chunk_offset = 0;
+  raft_size_t chunk_len = 0;
+  int last_chunk = 0;
+
+  if (remaining >= sizeof(raft_size_t))
+  {
+    memcpy(&chunk_offset, ptr, sizeof(chunk_offset));
+    ptr += sizeof(chunk_offset);
+    remaining -= sizeof(chunk_offset);
+  }
+  if (remaining >= sizeof(raft_size_t))
+  {
+    memcpy(&chunk_len, ptr, sizeof(chunk_len));
+    ptr += sizeof(chunk_len);
+    remaining -= sizeof(chunk_len);
+  }
+  if (remaining >= sizeof(int))
+  {
+    memcpy(&last_chunk, ptr, sizeof(last_chunk));
+  }
+
   std::ostringstream oss;
   oss << "SNAPSHOT{term=" << term << ", leader=" << leader_id
       << ", snap_idx=" << snapshot_index << ", snap_term=" << snapshot_term
-      << "}";
+      << ", chunk=[offset=" << chunk_offset << ", len=" << chunk_len
+      << ", last=" << (last_chunk ? "Y" : "N") << "]}";
   return oss.str();
 }
 

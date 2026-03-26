@@ -97,7 +97,10 @@ static struct
     {"info", "Display current state history", cmd_info},
     {"batch", "Read command list from file", cmd_batch},
     {"p", "Calculate expression", cmd_p},
-    {"x", "Display tracee memory by byte", cmd_x},
+    {"x",
+     "Examine memory: x/[count][format][size] <addr> (formats: x,d,u,o,t,c,s; "
+     "sizes: b,h,w,g)",
+     cmd_x},
     {"bt", "Print backtrace with arguments", cmd_bt},
     {"frame", "Select stack frame", cmd_frame},
     {"locals", "Show local variables in current frame", cmd_locals},
@@ -523,8 +526,12 @@ static void show_udp_buffers()
         std::string from_str = format_addr_short(dg.from);
         size_t content_len = dg.content.size();
 
-        detsim::ui::ui_printf("      [%zu] from=%s, len=%zu\n", count,
-                              from_str.c_str(), content_len);
+        // Parse Raft message content
+        std::string msg_desc =
+            raft::parse_raft_message(dg.content.data(), content_len);
+
+        detsim::ui::ui_printf("      [%zu] from=%s, len=%zu, msg=%s\n", count,
+                              from_str.c_str(), content_len, msg_desc.c_str());
 
         count++;
       }
@@ -628,22 +635,227 @@ static int cmd_x(char *args)
 {
   if (!args)
   {
-    detsim::ui::ui_printf("Usage: x <addr>\n");
+    detsim::ui::ui_printf("Usage: x/[count][format][size] <addr>\n");
+    detsim::ui::ui_printf("  format: x=hex, d=decimal, u=unsigned, o=octal, "
+                          "t=binary, c=char, s=string\n");
+    detsim::ui::ui_printf(
+        "  size: b=byte(1), h=halfword(2), w=word(4), g=giant(8)\n");
+    detsim::ui::ui_printf("  Example: x/16xb 0x400000  (16 bytes in hex)\n");
+    detsim::ui::ui_printf(
+        "           x/4gw 0x7fff0000 (4 giant words in hex)\n");
     return 0;
   }
-  long addr = strtol(args, NULL, 0);
-  detsim::ui::ui_printf("Memory at 0x%lx:\n", addr);
-  for (int i = 0; i < 4; i++)
+
+  char *arg_copy = strdup(args);
+  char *slash_ptr = strchr(arg_copy, '/');
+  char *format_str = NULL;
+  char *addr_str = NULL;
+
+  if (slash_ptr)
   {
-    detsim::ui::ui_printf("  0x%016lx: ", addr + i * 8);
-    for (int j = 0; j < 8; j++)
-    {
-      detsim::ui::ui_printf("%02x ",
-                            tracee_read_byte(ptmc_state.pids[ptmc_state.cursor],
-                                             (void *)(addr + i * 8 + j)));
-    }
-    detsim::ui::ui_printf("\n");
+    *slash_ptr = '\0';
+    format_str = slash_ptr + 1;
+    addr_str = arg_copy;
   }
+  else
+  {
+    addr_str = arg_copy;
+  }
+
+  // Parse format string: [count][format][size]
+  int count = 4;
+  char format = 'x';
+  int size = 1;
+
+  if (format_str && *format_str)
+  {
+    char *p = format_str;
+
+    // Parse count
+    if (isdigit(*p))
+    {
+      count = strtol(p, &p, 10);
+      if (count <= 0 || count > 1024)
+        count = 4;
+    }
+
+    // Parse format
+    if (*p && strchr("xd uotcsi", *p))
+    {
+      format = *p;
+      p++;
+    }
+
+    // Parse size
+    if (*p)
+    {
+      switch (*p)
+      {
+        case 'b':
+          size = 1;
+          break;
+        case 'h':
+          size = 2;
+          break;
+        case 'w':
+          size = 4;
+          break;
+        case 'g':
+          size = 8;
+          break;
+      }
+    }
+  }
+
+  // Skip whitespace in addr_str
+  while (*addr_str && isspace(*addr_str))
+    addr_str++;
+
+  if (!*addr_str)
+  {
+    detsim::ui::ui_printf("Error: No address specified\n");
+    free(arg_copy);
+    return 0;
+  }
+
+  long addr = strtol(addr_str, NULL, 0);
+  int pid = ptmc_state.pids[ptmc_state.cursor];
+
+  // Handle string format specially
+  if (format == 's')
+  {
+    detsim::ui::ui_printf("String at 0x%lx: \"", addr);
+    for (int i = 0; i < count; i++)
+    {
+      char c = tracee_read_byte(pid, (void *)(addr + i));
+      if (c == '\0')
+        break;
+      if (c >= 0x20 && c < 0x7f)
+        detsim::ui::ui_printf("%c", c);
+      else
+        detsim::ui::ui_printf("\\x%02x", (unsigned char)c);
+    }
+    detsim::ui::ui_printf("\"\n");
+    free(arg_copy);
+    return 0;
+  }
+
+  // Display memory
+  detsim::ui::ui_printf("Memory at 0x%lx:\n", addr);
+
+  int items_per_line = (size == 8) ? 2 : (size == 4) ? 4 : (size == 2) ? 8 : 16;
+
+  for (int i = 0; i < count; i++)
+  {
+    if (i % items_per_line == 0)
+    {
+      if (i > 0)
+        detsim::ui::ui_printf("\n");
+      detsim::ui::ui_printf("  0x%016lx: ", addr + i * size);
+    }
+
+    long current_addr = addr + i * size;
+    uint64_t value = 0;
+
+    // Read value based on size
+    switch (size)
+    {
+      case 1:
+        value = tracee_read_byte(pid, (void *)current_addr);
+        break;
+      case 2:
+      {
+        uint8_t bytes[2];
+        for (int j = 0; j < 2; j++)
+          bytes[j] = tracee_read_byte(pid, (void *)(current_addr + j));
+        value = *(uint16_t *)bytes;
+        break;
+      }
+      case 4:
+      {
+        uint8_t bytes[4];
+        for (int j = 0; j < 4; j++)
+          bytes[j] = tracee_read_byte(pid, (void *)(current_addr + j));
+        value = *(uint32_t *)bytes;
+        break;
+      }
+      case 8:
+      {
+        uint8_t bytes[8];
+        for (int j = 0; j < 8; j++)
+          bytes[j] = tracee_read_byte(pid, (void *)(current_addr + j));
+        value = *(uint64_t *)bytes;
+        break;
+      }
+    }
+
+    // Print based on format
+    switch (format)
+    {
+      case 'x':
+        if (size == 1)
+          detsim::ui::ui_printf("%02x ", (unsigned char)value);
+        else if (size == 2)
+          detsim::ui::ui_printf("%04x ", (unsigned short)value);
+        else if (size == 4)
+          detsim::ui::ui_printf("%08x ", (unsigned int)value);
+        else
+          detsim::ui::ui_printf("%016lx ", value);
+        break;
+      case 'd':
+        if (size == 1)
+          detsim::ui::ui_printf("%-4d", (int8_t)value);
+        else if (size == 2)
+          detsim::ui::ui_printf("%-6d", (int16_t)value);
+        else if (size == 4)
+          detsim::ui::ui_printf("%-12d", (int32_t)value);
+        else
+          detsim::ui::ui_printf("%-20ld", (int64_t)value);
+        break;
+      case 'u':
+        if (size == 1)
+          detsim::ui::ui_printf("%-4u", (uint8_t)value);
+        else if (size == 2)
+          detsim::ui::ui_printf("%-6u", (uint16_t)value);
+        else if (size == 4)
+          detsim::ui::ui_printf("%-12u", (uint32_t)value);
+        else
+          detsim::ui::ui_printf("%-20lu", (uint64_t)value);
+        break;
+      case 'o':
+        if (size == 1)
+          detsim::ui::ui_printf("%04o ", (unsigned char)value);
+        else if (size == 2)
+          detsim::ui::ui_printf("%07o ", (unsigned short)value);
+        else if (size == 4)
+          detsim::ui::ui_printf("%013o ", (unsigned int)value);
+        else
+          detsim::ui::ui_printf("%024lo ", value);
+        break;
+      case 't':
+      {
+        int bits = size * 8;
+        uint64_t mask = (bits == 64) ? ~0ULL : ((1ULL << bits) - 1);
+        value &= mask;
+        for (int b = bits - 1; b >= 0; b--)
+          detsim::ui::ui_printf("%c", (value >> b) & 1 ? '1' : '0');
+        detsim::ui::ui_printf(" ");
+        break;
+      }
+      case 'c':
+      {
+        char c = (char)value;
+        if (c >= 0x20 && c < 0x7f)
+          detsim::ui::ui_printf("'%c' ", c);
+        else
+          detsim::ui::ui_printf("\\x%02x ", (unsigned char)c);
+        break;
+      }
+    }
+  }
+  detsim::ui::ui_printf("\n");
+
+  free(arg_copy);
   return 0;
 }
 

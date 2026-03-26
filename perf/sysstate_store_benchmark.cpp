@@ -10,7 +10,6 @@
 #include <unistd.h>
 #include <malloc.h>
 #include "sysstate_store.h"
-#include "xxhash.h"
 #include "utils.h"
 #include "debug.h"
 #include "monitor.h"

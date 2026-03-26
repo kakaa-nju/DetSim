@@ -47,10 +47,13 @@ class TraceParser:
         self.choice_pattern = re.compile(r"Using batch preset choice: (\d+)")
         self.process_pattern = re.compile(r"^\s*Process (\d+):")
         self.datagram_pattern = re.compile(
-            r"\[(\d+)\]\s+from=([\d.]+):\d+,\s+len=\d+,\s+msg=(.+)"
+            r"\[(\d+)\]\s+from=([\d.]+):\d+,\s+len=(\d+)(?:,\s+msg=(.+))?"
         )
         self.msg_type_pattern = re.compile(r"^(\w+)\{")
-        self.recvfrom_content_pattern = re.compile(r'recvfrom\(\d+,\s*[^"]*"([^"]+)"')
+        # recvfrom(3, 0xaddr"CONTENT" or recvfrom(3, 0xaddr, ... for no content
+        self.recvfrom_content_pattern = re.compile(
+            r'recvfrom\(\d+,\s*0x[0-9a-fA-F]+"([^"]*)"'
+        )
 
     def parse_log(self, filepath: str):
         with open(filepath, "r") as f:
@@ -144,7 +147,7 @@ class TraceParser:
             match = self.datagram_pattern.search(stripped)
             if match and current_node is not None:
                 from_ip = match.group(2)
-                msg_content = match.group(3)
+                msg_content = match.group(4) if match.group(4) else ""
                 from_node = self._ip_to_node(from_ip)
                 msg_type = self._extract_msg_type(msg_content)
 

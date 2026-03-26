@@ -37,6 +37,33 @@ bool parse_sockaddr(const std::string &str, struct sockaddr_in &addr);
  * ==============================================================================
  */
 
+/* TCP connection state - identified by addresses, not fds */
+struct TcpConnection
+{
+  // Connection identifiers (for debugging)
+  int local_fd;
+
+  // Connection endpoints
+  struct sockaddr_in local_addr; // Our address
+  struct sockaddr_in peer_addr;  // Remote address
+
+  // Data buffer
+  std::deque<std::string> recv_buffer;
+
+  template <class Archive>
+  void serialize(Archive &ar);
+};
+
+/* UDP datagram structure */
+struct UdpDatagram
+{
+  std::string content;     // Payload
+  struct sockaddr_in from; // Source address
+
+  template <class Archive>
+  void serialize(Archive &ar);
+};
+
 /* Represents a single socket */
 struct Socket
 {
@@ -58,38 +85,15 @@ struct Socket
   int backlog;
   std::deque<int> pending_connections; // FDs of incoming connections
 
+  // Established connections waiting for accept (kernel-managed)
+  // Key: client address (IP:port) -> TcpConnection
+  std::map<uint64_t, TcpConnection> established_connections;
+
   Socket()
       : fd(-1), domain(0), type(0), protocol(0), bound(false), connected(false),
         listening(false), backlog(0)
   {
   }
-
-  template <class Archive>
-  void serialize(Archive &ar);
-};
-
-/* UDP datagram structure */
-struct UdpDatagram
-{
-  std::string content;     // Payload
-  struct sockaddr_in from; // Source address
-
-  template <class Archive>
-  void serialize(Archive &ar);
-};
-
-/* TCP connection state - identified by addresses, not fds */
-struct TcpConnection
-{
-  // Connection identifiers (for debugging)
-  int local_fd;
-
-  // Connection endpoints
-  struct sockaddr_in local_addr; // Our address
-  struct sockaddr_in peer_addr;  // Remote address
-
-  // Data buffer
-  std::deque<std::string> recv_buffer;
 
   template <class Archive>
   void serialize(Archive &ar);

@@ -3,8 +3,8 @@
 
 NP ?= 3
 DETSIM_DIR = ../..
-CFLAGS = -gdwarf-4 -g -D_FORTIFY_SOURCE=0 -I./raft/include -I$(DETSIM_DIR)/src -I$(DETSIM_DIR)/src/core -I$(DETSIM_DIR)/src/utils -I$(DETSIM_DIR)/src/subsys -DNP=$(NP)
-CXXFLAGS = -gdwarf-4 -g -I./raft/include -I$(DETSIM_DIR)/src -I$(DETSIM_DIR)/src/core -I$(DETSIM_DIR)/src/utils -I$(DETSIM_DIR)/src/subsys -D_FORTIFY_SOURCE=0 -DNP=$(NP)
+CFLAGS = -O3 -gdwarf-4 -g -D_FORTIFY_SOURCE=0 -I./raft/include -I$(DETSIM_DIR)/src -I$(DETSIM_DIR)/src/core -I$(DETSIM_DIR)/src/utils -I$(DETSIM_DIR)/src/subsys -DNP=$(NP)
+CXXFLAGS = -O3 -gdwarf-4 -g -I./raft/include -I$(DETSIM_DIR)/src -I$(DETSIM_DIR)/src/core -I$(DETSIM_DIR)/src/utils -I$(DETSIM_DIR)/src/subsys -D_FORTIFY_SOURCE=0 -DNP=$(NP)
 
 RAFT_LIB = ./raft/libraft.a
 

@@ -10,10 +10,11 @@ BUILD_DIR = build
 # Include paths
 INCLUDES = -I. -Isrc -Isrc/core -Isrc/subsys -Isrc/utils -Isrc/ui -Ithird_party -Iexamples/redisraft/plugins
 
-CXXFLAGS ?= $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2 -D_FORTIFY_SOURCE=0 -fno-omit-frame-pointer
-LDFLAGS = -g -ldwarf -lreadline -ldw -lzstd -rdynamic \
-					-lunwind-ptrace -lunwind-x86_64 -lunwind -lelf -lfmt \
-					-lncurses -lpthread -fno-omit-frame-pointer
+CXXFLAGS ?= $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2 -D_FORTIFY_SOURCE=0 -fno-omit-frame-pointer \
+						-mavx2 -mbmi -mbmi2
+LDFLAGS = -g -ldwarf -lreadline -ldw -lzstd -lxxhash -rdynamic \
+				-lunwind-ptrace -lunwind-x86_64 -lunwind -lelf -lfmt \
+				-lncurses -lpthread -fno-omit-frame-pointer
 
 # Source files with new directory structure
 SRCS = src/main.cpp\
@@ -37,10 +38,10 @@ YACC_HDR = src/utils/expr_parser.hpp
 
 all: release
 
-release: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -msse4.2
+release: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -msse4.2 -mavx2 -mbmi -mbmi2
 release: tracer
 
-debug: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2
+debug: CXXFLAGS = $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2 -mavx2 -mbmi -mbmi2
 debug: LDFLAGS += 
 debug: tracer
 

@@ -60,22 +60,29 @@ std::unordered_map<std::string, var_info> global_vars;
 /* Type cache */
 std::unordered_map<std::string, type_info> type_cache;
 
+/* Type size cache */
+std::unordered_map<std::string, size_t> type_size_cache;
+
+/* Member offset cache: struct_type -> member_name -> offset */
+std::unordered_map<std::string, std::unordered_map<std::string, ptrdiff_t>>
+    member_offset_cache;
+
 /* ELF symbol cache for symbols not in DWARF (e.g., _dl_x86_cpu_features) */
 struct elf_symbol
 {
   std::string name;
-  uintptr_t address = 0;  /* Runtime address (base + offset) */
+  uintptr_t address = 0; /* Runtime address (base + offset) */
   size_t size = 0;
-  int type = 0; /* STT_OBJECT, STT_FUNC, etc. */
-  int bind = 0; /* STB_GLOBAL, STB_LOCAL, etc. */
-  std::string lib_path;   /* Which library this symbol comes from */
+  int type = 0;         /* STT_OBJECT, STT_FUNC, etc. */
+  int bind = 0;         /* STB_GLOBAL, STB_LOCAL, etc. */
+  std::string lib_path; /* Which library this symbol comes from */
 };
 
 /* Per-library symbol cache */
 struct library_symbols
 {
   std::string path;
-  uintptr_t base_addr = 0;  /* Runtime load address */
+  uintptr_t base_addr = 0; /* Runtime load address */
   std::unordered_map<std::string, elf_symbol> symbols;
 };
 
@@ -771,6 +778,8 @@ void dwarf_init(const char *executable)
             var_info info;
             info.name = var_name;
             info.type_name = get_type_name_internal(dbg, type_die);
+
+            cache_type_info(dbg, info.type_name, type_die);
             info.is_global = true;
             info.is_local = false;
             info.stack_offset = 0;
@@ -789,6 +798,86 @@ void dwarf_init(const char *executable)
   }
 
   LOG_INFO("DWARF: Parsed %zu global variables", global_vars.size());
+
+  {
+    while (dwarf_next_cu_header(dbg, &cu_header_length, &version_stamp,
+                                &abbrev_offset, &address_size, &next_cu_header,
+                                &err) == DW_DLV_OK)
+    {
+    }
+
+    while (dwarf_next_cu_header(dbg, &cu_header_length, &version_stamp,
+                                &abbrev_offset, &address_size, &next_cu_header,
+                                &err) == DW_DLV_OK)
+    {
+      Dwarf_Die no_die = 0;
+      Dwarf_Die cu_die;
+
+      if (dwarf_siblingof(dbg, no_die, &cu_die, &err) != DW_DLV_OK)
+        continue;
+
+      std::stack<Dwarf_Die> die_stack;
+      Dwarf_Die child_die;
+      if (dwarf_child(cu_die, &child_die, &err) == DW_DLV_OK)
+      {
+        die_stack.push(child_die);
+      }
+
+      while (!die_stack.empty())
+      {
+        Dwarf_Die current_die = die_stack.top();
+        die_stack.pop();
+
+        Dwarf_Half tag;
+        if (dwarf_tag(current_die, &tag, &err) != DW_DLV_OK)
+          goto next_die;
+
+        if (tag == DW_TAG_structure_type || tag == DW_TAG_union_type ||
+            tag == DW_TAG_typedef || tag == DW_TAG_enumeration_type)
+        {
+          char *type_name = nullptr;
+          if (dwarf_diename(current_die, &type_name, &err) == DW_DLV_OK &&
+              type_name)
+          {
+            if (type_cache.find(type_name) == type_cache.end())
+            {
+              Dwarf_Bool is_declaration = 0;
+              Dwarf_Attribute decl_attr;
+              if (dwarf_attr(current_die, DW_AT_declaration, &decl_attr,
+                             &err) == DW_DLV_OK)
+              {
+                dwarf_formflag(decl_attr, &is_declaration, &err);
+              }
+
+              if (!is_declaration)
+              {
+                type_info info;
+                info.name = type_name;
+                parse_type_info(dbg, current_die, info);
+                if (!info.name.empty())
+                {
+                  type_cache[info.name] = info;
+                }
+              }
+            }
+          }
+        }
+
+      next_die:
+        Dwarf_Die sibling_die;
+        if (dwarf_siblingof(dbg, current_die, &sibling_die, &err) == DW_DLV_OK)
+        {
+          die_stack.push(sibling_die);
+        }
+
+        Dwarf_Die next_child;
+        if (dwarf_child(current_die, &next_child, &err) == DW_DLV_OK)
+        {
+          die_stack.push(next_child);
+        }
+      }
+    }
+  }
 
   LOG_INFO("DWARF: Cached %zu types", type_cache.size());
 
@@ -811,6 +900,8 @@ void dwarf_cleanup(void)
   }
   global_vars.clear();
   type_cache.clear();
+  type_size_cache.clear();
+  member_offset_cache.clear();
   elf_library_cache.clear();
   current_elf_path.clear();
   elf_symbols_loaded_for_pid = -1;
@@ -849,6 +940,8 @@ void cleanup_dwarf(void)
   /* Clear all caches */
   global_vars.clear();
   type_cache.clear();
+  type_size_cache.clear();
+  member_offset_cache.clear();
   elf_library_cache.clear();
 }
 
@@ -856,9 +949,9 @@ void cleanup_dwarf(void)
  * Section 5.5: ELF Symbol Table Parsing (fallback for non-DWARF symbols)
  * ====================================================================== */
 
-/* Parse /proc/<pid>/maps and return list of loaded shared libraries with base addresses
- * Format: <start_addr>-<end_addr> <perms> <offset> <dev> <inode> <pathname>
- * Returns map of pathname -> base_address */
+/* Parse /proc/<pid>/maps and return list of loaded shared libraries with base
+ * addresses Format: <start_addr>-<end_addr> <perms> <offset> <dev> <inode>
+ * <pathname> Returns map of pathname -> base_address */
 static std::unordered_map<std::string, uintptr_t> parse_proc_maps(int pid)
 {
   std::unordered_map<std::string, uintptr_t> libraries;
@@ -877,18 +970,18 @@ static std::unordered_map<std::string, uintptr_t> parse_proc_maps(int pid)
   {
     uintptr_t start_addr;
     char path[256] = {0};
-    
+
     /* Parse: start_addr-end_addr perms offset dev inode [path] */
     if (sscanf(line, "%lx-%*x %*s %*s %*s %*s %255s", &start_addr, path) >= 1)
     {
       /* Skip if no path or path is special */
       if (path[0] == '\0' || path[0] == '[')
         continue;
-      
+
       /* Skip if already seen (we want the first mapping which is the base) */
       if (libraries.find(path) != libraries.end())
         continue;
-      
+
       /* For executables and shared libraries, the first mapping is the base */
       libraries[path] = start_addr;
     }
@@ -988,7 +1081,7 @@ static void load_symbols_from_file(const char *path, uintptr_t base_addr)
 
       /* Get binding info */
       int bind = GELF_ST_BIND(sym.st_info);
-      
+
       /* Skip local symbols (reduces cache size) - keep global and weak */
       if (bind != STB_GLOBAL && bind != STB_WEAK && bind != STB_LOCAL)
         continue;
@@ -1049,7 +1142,8 @@ static void load_elf_symbols(const char *executable)
   elf_library_cache.clear();
   current_elf_path = executable;
 
-  /* Load main executable with base=0 (we'll fix this when we know runtime base) */
+  /* Load main executable with base=0 (we'll fix this when we know runtime base)
+   */
   load_symbols_from_file(executable, 0);
 }
 
@@ -1057,7 +1151,7 @@ static void load_elf_symbols(const char *executable)
 static void load_shared_library_symbols(int pid)
 {
   auto libraries = parse_proc_maps(pid);
-  
+
   for (const auto &[path, base_addr] : libraries)
   {
     /* Skip main executable (already loaded) */
@@ -1071,12 +1165,13 @@ static void load_shared_library_symbols(int pid)
         if (it->second.base_addr == 0 && base_addr != 0)
         {
           /* This is a PIE executable, update symbol addresses */
-          for (auto &[sym_name, sym] : it->second.symbols)
+          for (auto &sym_pair : it->second.symbols)
           {
-            sym.address += base_addr;
+            sym_pair.second.address += base_addr;
           }
           it->second.base_addr = base_addr;
-          LOG_INFO("ELF: Updated base address for %s to 0x%lx", path, base_addr);
+          LOG_INFO("ELF: Updated base address for %s to 0x%lx", path.c_str(),
+                   base_addr);
         }
       }
       continue;
@@ -1103,7 +1198,7 @@ static uintptr_t lookup_elf_symbol(const char *symname)
     auto it = lib.symbols.find(symname);
     if (it != lib.symbols.end())
     {
-      LOG_DEBUG("ELF: Found symbol %s at 0x%lx in %s", symname, 
+      LOG_DEBUG("ELF: Found symbol %s at 0x%lx in %s", symname,
                 it->second.address, path.c_str());
       return it->second.address;
     }
@@ -1164,7 +1259,7 @@ void dwarf_load_shared_library_symbols(int pid)
 {
   if (elf_symbols_loaded_for_pid == pid)
     return; /* Already loaded for this PID */
-  
+
   LOG_INFO("ELF: Loading shared library symbols for PID %d", pid);
   load_shared_library_symbols(pid);
   elf_symbols_loaded_for_pid = pid;
@@ -1261,11 +1356,14 @@ std::string dwarf_get_element_type(const char *type_name)
   return "";
 }
 
-type_info dwarf_get_type_info(const char *type_name)
+/* Static empty type_info for "not found" cases */
+static type_info empty_type_info;
+
+const type_info &dwarf_get_type_info(const char *type_name)
 {
   if (!type_name || !*type_name)
   {
-    return {};
+    return empty_type_info;
   }
 
   std::string name_str(type_name);
@@ -1276,11 +1374,13 @@ type_info dwarf_get_type_info(const char *type_name)
   parse_type_name(name_str, base_type, is_array, is_pointer, array_size);
 
   /* Handle array type name like "point[]" - construct a synthetic type_info
+   * Use thread_local to store result safely for returning by reference
    */
   if (is_array)
   {
-    type_info elem_info = dwarf_get_type_info(base_type.c_str());
-    type_info array_info;
+    const type_info &elem_info = dwarf_get_type_info(base_type.c_str());
+    thread_local type_info array_info;
+    array_info = type_info();
     array_info.name = type_name;
     array_info.is_array = true;
     array_info.element_type = base_type;
@@ -1305,8 +1405,8 @@ type_info dwarf_get_type_info(const char *type_name)
     ptr_info.size = 8;
     ptr_info.is_struct = false;
     ptr_info.is_array = false;
-    type_cache[type_name] = ptr_info;
-    return ptr_info;
+    type_cache[type_name] = std::move(ptr_info);
+    return type_cache.find(type_name)->second;
   }
 
   /* First try the original type name */
@@ -1345,7 +1445,7 @@ type_info dwarf_get_type_info(const char *type_name)
     }
   }
 
-  return {};
+  return empty_type_info;
 }
 
 /* ======================================================================
@@ -1354,12 +1454,33 @@ type_info dwarf_get_type_info(const char *type_name)
 
 size_t dwarf_type_size(const char *type_name)
 {
+  std::string key(type_name);
+  auto it = type_size_cache.find(key);
+  if (it != type_size_cache.end())
+  {
+    return it->second;
+  }
+
   type_info info = dwarf_get_type_info(type_name);
+  type_size_cache[key] = info.size;
   return info.size;
 }
 
 ptrdiff_t dwarf_member_offset(const char *struct_type, const char *member)
 {
+  std::string struct_key(struct_type);
+  std::string member_key(member);
+
+  auto struct_it = member_offset_cache.find(struct_key);
+  if (struct_it != member_offset_cache.end())
+  {
+    auto member_it = struct_it->second.find(member_key);
+    if (member_it != struct_it->second.end())
+    {
+      return member_it->second;
+    }
+  }
+
   type_info info = dwarf_get_type_info(struct_type);
   if (!info.is_struct && info.members.empty())
   {
@@ -1375,6 +1496,7 @@ ptrdiff_t dwarf_member_offset(const char *struct_type, const char *member)
   {
     if (m.name == member)
     {
+      member_offset_cache[struct_key][member_key] = m.offset;
       return m.offset;
     }
   }

@@ -478,7 +478,6 @@ std::string PostfixOpNode::to_string() const
 /* MemberAccessNode */
 EvalResult MemberAccessNode::eval(int pid, bool &success) const
 {
-  /* Get the member address and type */
   EvalResult addr_res = eval_address(pid, success);
   if (!success)
     return EvalResult(0L);
@@ -486,30 +485,24 @@ EvalResult MemberAccessNode::eval(int pid, bool &success) const
   uint64_t addr = addr_res.as_address();
   std::string member_type = addr_res.type_name;
 
-  /* Check if member is a struct or array - return address with type */
   if (!member_type.empty())
   {
-    type_info member_info = dwarf_get_type_info(member_type.c_str());
+    const type_info &member_info = dwarf_get_type_info(member_type.c_str());
+
     if (member_info.is_struct || member_info.is_array)
     {
       EvalResult res(addr);
       res.type_name = member_type;
       return res;
     }
-  }
 
-  /* For basic types, read the value */
-  long val = read_memory_long(pid, addr, success);
-  if (!success)
-    return EvalResult(0L);
+    long val = read_memory_long(pid, addr, success);
+    if (!success)
+      return EvalResult(0L);
 
-  /* Truncate based on member size if we have type info */
-  if (!member_type.empty())
-  {
-    type_info member_info = dwarf_get_type_info(member_type.c_str());
     size_t size = member_info.size;
     if (size == 0)
-      size = 4; /* default */
+      size = 4;
 
     if (size == 1)
       val = static_cast<int8_t>(val);
@@ -517,7 +510,15 @@ EvalResult MemberAccessNode::eval(int pid, bool &success) const
       val = static_cast<int16_t>(val);
     else if (size == 4)
       val = static_cast<int32_t>(val);
+
+    EvalResult res(val);
+    res.type_name = member_type;
+    return res;
   }
+
+  long val = read_memory_long(pid, addr, success);
+  if (!success)
+    return EvalResult(0L);
 
   EvalResult res(val);
   res.type_name = member_type;
@@ -577,20 +578,34 @@ EvalResult MemberAccessNode::eval_address(int pid, bool &success) const
     return EvalResult(0L);
   }
 
-  /* Get type info for the base type */
-  type_info base_info = dwarf_get_type_info(base_type.c_str());
-
-  /* Find member by name */
   ptrdiff_t offset = -1;
   std::string member_type;
-  for (const auto &m : base_info.members)
+
+  if (offset_computed_ && cached_base_type_ == base_type)
   {
-    if (m.name == member_)
+    offset = cached_offset_;
+    member_type = cached_member_type_;
+  }
+  else
+  {
+    const type_info &base_info = dwarf_get_type_info(base_type.c_str());
+
+    for (const auto &m : base_info.members)
     {
-      offset = m.offset;
-      member_type =
-          m.type_name; /* This includes [] for arrays, * for pointers */
-      break;
+      if (m.name == member_)
+      {
+        offset = m.offset;
+        member_type = m.type_name;
+        break;
+      }
+    }
+
+    if (offset >= 0)
+    {
+      cached_offset_ = offset;
+      cached_member_type_ = member_type;
+      cached_base_type_ = base_type;
+      offset_computed_ = true;
     }
   }
 
@@ -602,7 +617,7 @@ EvalResult MemberAccessNode::eval_address(int pid, bool &success) const
 
   success = true;
   EvalResult res(base_addr + offset);
-  res.type_name = member_type; /* Preserve full type name like "point[]" */
+  res.type_name = member_type;
   return res;
 }
 

@@ -98,8 +98,7 @@ uintptr_t dwarf_get_global_addr(const char *varname);
 /* Get global variable type */
 std::string dwarf_get_global_type(const char *varname);
 
-/* Get type information by name */
-type_info dwarf_get_type_info(const char *type_name);
+const type_info &dwarf_get_type_info(const char *type_name);
 
 /* ======================================================================
  * Stack Analysis

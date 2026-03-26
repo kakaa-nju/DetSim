@@ -65,6 +65,8 @@ struct PTMC_STATE
   /* Raft consensus checking state - stored per-process */
   raft_check_state raft_states[NP];
 
+  int error_bound = 5;
+
   // Constructor to ensure proper initialization
   PTMC_STATE() = default;
 };

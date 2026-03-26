@@ -115,6 +115,7 @@ sys_state::sys_state(const struct syscall_info info[])
   auto old_state = ptmc_state.running_state;
   auto active_idx = ptmc_state.cursor;
   hash_type ss_hash_tmp = 0;
+  error_bound = ptmc_state.error_bound;
 
   if (old_state.ss_hash == 0)
   {
@@ -128,7 +129,6 @@ sys_state::sys_state(const struct syscall_info info[])
     ss_hash = ss_hash_tmp;
     goto ret;
   }
-  
 
   for (int j = 0; j < NP; j++)
   {
@@ -356,7 +356,6 @@ void tracee_state::restore_memory_mappings(
           while (std::getline(iss, line))
           {
             maps_item item = {};
-            memset(&item, 0, sizeof(item));
             uint32_t offset, a, b, inode;
             if (sscanf(line.c_str(), "%lx-%lx %4s %x %d:%d %d %511s",
                        &item.start, &item.end, item.flags, &offset, &a, &b,
@@ -755,99 +754,20 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
   }
 
   // ========================================================================
-  // Optimization 1: Aggregated IO - Batch reads with process_vm_readv
-  // ========================================================================
-  constexpr int MAX_IOV_BATCH = 256;
-
-  struct BatchRegion
-  {
-    uint64_t start;
-    size_t size;
-    std::vector<uint8_t> data;
-  };
-  std::vector<BatchRegion> batch_regions;
-  batch_regions.reserve(regions_to_capture.size());
-
-  // Pre-allocate all data buffers
-  for (auto &region : regions_to_capture)
-  {
-    BatchRegion br;
-    br.start = region.start;
-    br.size = region.size;
-    br.data.resize(region.size);
-    batch_regions.push_back(std::move(br));
-  }
-
-  // Batch read with process_vm_readv
-  for (size_t batch_start = 0; batch_start < batch_regions.size();
-       batch_start += MAX_IOV_BATCH)
-  {
-    size_t batch_end =
-        std::min(batch_start + MAX_IOV_BATCH, batch_regions.size());
-    size_t batch_count = batch_end - batch_start;
-
-    struct iovec local_iov[MAX_IOV_BATCH];
-    struct iovec remote_iov[MAX_IOV_BATCH];
-
-    for (size_t i = 0; i < batch_count; i++)
-    {
-      auto &br = batch_regions[batch_start + i];
-      local_iov[i].iov_base = br.data.data();
-      local_iov[i].iov_len = br.size;
-      remote_iov[i].iov_base = (void *)br.start;
-      remote_iov[i].iov_len = br.size;
-    }
-
-    ssize_t n = syscall(SYS_process_vm_readv, pid, local_iov, batch_count,
-                        remote_iov, batch_count, 0);
-    if (n < 0)
-    {
-      LOG_ERROR("Batch process_vm_readv failed: %s", strerror(errno));
-      // Fallback: individual reads
-      for (size_t i = 0; i < batch_count; i++)
-      {
-        auto &br = batch_regions[batch_start + i];
-        struct iovec local = {br.data.data(), br.size};
-        struct iovec remote = {(void *)br.start, br.size};
-        ssize_t nr =
-            syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0);
-        if ((size_t)nr != br.size)
-        {
-          LOG_ERROR("Fallback read failed for %p-%p", (void *)br.start,
-                    (void *)(br.start + br.size));
-          memset(br.data.data(), 0, br.size);
-        }
-      }
-    }
-  }
-
-  // ========================================================================
-  // Post-process: handle rseq and build final region data
-  // ========================================================================
   std::vector<RegionInfo> regions;
-  std::vector<std::vector<uint8_t>> region_data;
+  regions.reserve(regions_to_capture.size());
 
-  for (size_t i = 0; i < regions_to_capture.size(); i++)
+  size_t regions_data_size = 0;
+  for (auto &src : regions_to_capture)
   {
-    auto &src = regions_to_capture[i];
-    auto &br = batch_regions[i];
-
-    // Handle rseq structure
-    if ((uintptr_t)rseq_struct[pid] >= src.start &&
-        (uintptr_t)rseq_struct[pid] < src.end)
-    {
-      uintptr_t rseq_offset = (uintptr_t)rseq_struct[pid] - src.start;
-      memset(br.data.data() + rseq_offset, 0x55, rseq_len[pid]);
-    }
-
     RegionInfo info;
     info.start = src.start;
     info.end = src.end;
     info.prot = src.prot;
     memcpy(info.flags, src.flags, 5);
+    info.offset = regions_data_size;
     regions.push_back(info);
-
-    region_data.push_back(std::move(br.data));
+    regions_data_size += src.size;
 
     LOG_TRACE("dump %lx-%lx (prot=%x), %s", src.start, src.end, src.prot,
               src.name);
@@ -903,71 +823,112 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
   struct user_regs_struct regs;
   ptrace(PTRACE_GETREGS, pid, NULL, &regs);
 
-  // Build final buffer with header
+  // Allocate final buffer
   size_t header_size = sizeof(StateDataHeader);
   size_t regions_size = regions.size() * sizeof(RegionInfo);
   size_t tstate_size = tstate_data.size();
   size_t maps_size = maps_data.size();
-  size_t data_size = 0;
-  for (auto &rd : region_data)
-  {
-    data_size += rd.size();
-  }
 
   size_t total_size = header_size + regions_size + tstate_size + maps_size +
-                      data_size + sizeof(regs);
-  std::vector<uint8_t> all_data(total_size);
+                      regions_data_size + sizeof(regs);
+  uint8_t *all_data = new uint8_t[total_size];
 
-  // Fill header
-  StateDataHeader *header = (StateDataHeader *)all_data.data();
-  header->magic = 0x4453544D; // 'DSTM'
-  header->version = 3;        // Version 3 with integrated mappings
+  StateDataHeader *header = (StateDataHeader *)all_data;
+  header->magic = 0x4453544D;
+  header->version = 3;
   header->num_regions = regions.size();
   header->tstate_offset = header_size + regions_size;
   header->tstate_size = tstate_size;
   header->maps_offset = header_size + regions_size + tstate_size;
   header->maps_size = maps_size;
   header->regs_offset =
-      header_size + regions_size + tstate_size + maps_size + data_size;
+      header_size + regions_size + tstate_size + maps_size + regions_data_size;
 
-  // Fill region info
-  RegionInfo *region_infos = (RegionInfo *)(all_data.data() + header_size);
-  size_t current_offset = header_size + regions_size + tstate_size + maps_size;
-  for (size_t i = 0; i < regions.size(); i++)
+  // Fill region info and read data directly into all_data
+  RegionInfo *region_infos = (RegionInfo *)(all_data + header_size);
+  size_t region_data_offset =
+      header_size + regions_size + tstate_size + maps_size;
+
+  constexpr int MAX_IOV_BATCH = 256;
+  for (size_t batch_start = 0; batch_start < regions.size();
+       batch_start += MAX_IOV_BATCH)
   {
-    region_infos[i].start = regions[i].start;
-    region_infos[i].end = regions[i].end;
-    region_infos[i].offset = current_offset;
+    size_t batch_end = std::min(batch_start + MAX_IOV_BATCH, regions.size());
+    size_t batch_count = batch_end - batch_start;
 
-    // Copy region data
-    memcpy(all_data.data() + current_offset, region_data[i].data(),
-           region_data[i].size());
-    current_offset += region_data[i].size();
+    struct iovec local_iov[MAX_IOV_BATCH];
+    struct iovec remote_iov[MAX_IOV_BATCH];
+
+    for (size_t i = 0; i < batch_count; i++)
+    {
+      size_t idx = batch_start + i;
+      auto &src = regions_to_capture[idx];
+      region_infos[idx].start = src.start;
+      region_infos[idx].end = src.end;
+      region_infos[idx].offset = region_data_offset + regions[idx].offset;
+
+      uint8_t *dest = all_data + region_infos[idx].offset;
+      local_iov[i].iov_base = dest;
+      local_iov[i].iov_len = src.size;
+      remote_iov[i].iov_base = (void *)src.start;
+      remote_iov[i].iov_len = src.size;
+    }
+
+    ssize_t n = syscall(SYS_process_vm_readv, pid, local_iov, batch_count,
+                        remote_iov, batch_count, 0);
+    if (n < 0)
+    {
+      LOG_ERROR("Batch process_vm_readv failed: %s", strerror(errno));
+      for (size_t i = 0; i < batch_count; i++)
+      {
+        size_t idx = batch_start + i;
+        auto &src = regions_to_capture[idx];
+        uint8_t *dest = all_data + region_infos[idx].offset;
+        struct iovec local = {dest, src.size};
+        struct iovec remote = {(void *)src.start, src.size};
+        ssize_t nr =
+            syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0);
+        if ((size_t)nr != src.size)
+        {
+          LOG_ERROR("Fallback read failed for %p-%p", (void *)src.start,
+                    (void *)(src.start + src.size));
+          memset(dest, 0, src.size);
+        }
+      }
+    }
+
+    for (size_t i = 0; i < batch_count; i++)
+    {
+      size_t idx = batch_start + i;
+      auto &src = regions_to_capture[idx];
+      if ((uintptr_t)rseq_struct[pid] >= src.start &&
+          (uintptr_t)rseq_struct[pid] < src.end)
+      {
+        uintptr_t rseq_offset = (uintptr_t)rseq_struct[pid] - src.start;
+        uint8_t *dest = all_data + region_infos[idx].offset;
+        memset(dest + rseq_offset, 0x55, rseq_len[pid]);
+      }
+    }
   }
 
-  // Copy tstate data
-  memcpy(all_data.data() + header->tstate_offset, tstate_data.data(),
-         tstate_size);
+  memcpy(all_data + header->tstate_offset, tstate_data.data(), tstate_size);
 
-  // Copy maps data
   if (maps_size > 0)
   {
-    memcpy(all_data.data() + header->maps_offset, maps_data.data(), maps_size);
+    memcpy(all_data + header->maps_offset, maps_data.data(), maps_size);
     LOG_TRACE("Copied maps data: offset=%lu, size=%zu", header->maps_offset,
               maps_size);
   }
 
-  // Copy registers
-  memcpy(all_data.data() + header->regs_offset, &regs, sizeof(regs));
+  memcpy(all_data + header->regs_offset, &regs, sizeof(regs));
 
-  // Store via StateStore - returns immediately with hash
-  // Background thread handles compression and disk write
-  hash_type ts_hash =
-      StateStore::instance().save(all_data.data(), all_data.size());
+  hash_type ts_hash = StateStore::instance().save(all_data, total_size);
+
+  delete[] all_data;
 
   LOG_DEBUG("StateStore saved hash %016lx, size=%zu, regions=%zu, tstate=%zu, "
             "maps=%zu",
-            ts_hash, all_data.size(), regions.size(), tstate_size, maps_size);
+            ts_hash, total_size, regions.size(), tstate_size, maps_size);
   return ts_hash;
 }
 
@@ -1015,7 +976,8 @@ hash_type tracee_state::save(int pid)
 bool tracee_state::metadata_equal(const tracee_state &other) const
 {
   // Compare complex state using serialization
-  auto serialize_to_string = [](const tracee_state &ts) -> std::string {
+  auto serialize_to_string = [](const tracee_state &ts) -> std::string
+  {
     std::ostringstream oss;
     {
       cereal::BinaryOutputArchive ar(oss);
@@ -1108,7 +1070,6 @@ void get_maps_item(std::vector<maps_item> &items, FILE *maps)
   char line[1024];
   while (fgets(line, sizeof(line), maps) != NULL)
   {
-    memset(&item, 0, sizeof(item));
     /* Use width-limited format specifiers to prevent buffer overflow */
     if (sscanf(line, "%lx-%lx %4s %x %d:%d %d %511s", &item.start, &item.end,
                item.flags, &item.offset, &item.a, &item.b, &item.inode,
@@ -1155,6 +1116,7 @@ void show_state_stats()
 
 void sys_state::recover_running_state() const
 {
+  ptmc_state.error_bound = error_bound;
   for (int i = 0; i < NP; i++)
   {
     if (ts_hash[i] == ptmc_state.running_state.ts_hash[i])

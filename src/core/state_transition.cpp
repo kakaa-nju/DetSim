@@ -231,23 +231,23 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
                        info.args[5]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_gettimeofday:
       ret = emu_gettimeofday((struct timeval *)info.args[0],
                              (struct timezone *)info.args[1]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_NO;
+      return CKPT_YES;
     case SYS_socket:
       ret = emu_socket(info.args[0], info.args[1], info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_listen:
       ret = emu_listen(info.args[0], info.args[1]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_bind:
       ret = emu_bind(info.args[0], (const struct sockaddr *)info.args[1],
                      info.args[2]);
@@ -259,14 +259,14 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
                         info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
 
     case SYS_chdir:
     {
       ret = emu_chdir((const char *)info.args[0]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     }
 
     case SYS_exit_group:
@@ -279,18 +279,18 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
                            info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_openat:
       ret = emu_vfs_openat(info.args[0], (const char *)info.args[1],
                            info.args[2], info.args[3]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_read:
       ret = emu_vfs_read(info.args[0], (void *)info.args[1], info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_write:
       ret =
           emu_vfs_write(info.args[0], (const void *)info.args[1], info.args[2]);
@@ -301,18 +301,18 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
       ret = emu_vfs_close(info.args[0]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_lseek:
       ret = emu_vfs_lseek(info.args[0], info.args[1], info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_stat:
       ret =
           emu_vfs_stat((const char *)info.args[0], (struct stat *)info.args[1]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_fstat:
       ret = emu_vfs_fstat(info.args[0], (struct stat *)info.args[1]);
       tracee_set_rax(pid, ret);
@@ -370,59 +370,59 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
       }
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     }
 
     case SYS_epoll_create:
       ret = emu_epoll_create(info.args[0]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_epoll_create1:
       ret = emu_epoll_create1(info.args[0]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_epoll_ctl:
       ret = emu_epoll_ctl(info.args[0], info.args[1], info.args[2],
                           (struct epoll_event *)info.args[3]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_epoll_wait:
       ret = emu_epoll_wait(info.args[0], (struct epoll_event *)info.args[1],
                            info.args[2], info.args[3]);
-      LOG_INFO("epoll_wait(epfd=%ld) returned %ld events", info.args[0], ret);
+      // LOG_INFO("epoll_wait(epfd=%ld) returned %ld events", info.args[0], ret);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_setsockopt:
       ret = emu_setsockopt(info.args[0], info.args[1], info.args[2],
                            (void *)info.args[3], info.args[4]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_getsockopt:
       ret = emu_getsockopt(info.args[0], info.args[1], info.args[2],
                            (void *)info.args[3], (socklen_t *)info.args[4]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_fsync:
       ret = emu_fsync(info.args[0]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_fdatasync:
       ret = emu_fdatasync(info.args[0]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
     case SYS_fcntl:
       ret = emu_fcntl(info.args[0], info.args[1], info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
 
     case SYS_accept:
     case SYS_accept4:
@@ -430,7 +430,7 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
                        (socklen_t *)info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
-      return CKPT_YES;
+      return CKPT_NO;
 
     case SYS_nanosleep:
     case SYS_brk:

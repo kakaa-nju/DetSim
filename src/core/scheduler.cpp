@@ -419,6 +419,10 @@ static void status_monitor_thread()
                stats.evict_calls, format_bytes(stats.evict_bytes).c_str(),
                sock_state_total, fs_state_total, state_queue_internal);
       ui->set_status_line(4, buf);
+
+      /* Line 5: State stats */
+      snprintf(buf, sizeof(buf), "Error Bound: %d", ptmc_state.error_bound);
+      ui->set_status_line(5, buf);
     }
     else
     {
@@ -540,13 +544,15 @@ static void stop_status_monitor()
 
 bool state_to_be_discarded(int index, syscall_info *infos)
 {
-  return 0;
+  if (ptmc_state.error_bound <= 0)
+    return true;
+
   if (index == 0)
   {
-    uintptr_t raft = eval<uintptr_t>("((raft_server_private_t *)raft)", 0);
+    uintptr_t raft = eval<uintptr_t>("raft", 0);
     if (raft == 0)
       return false; // If we can't evaluate, don't discard
-    int state = eval<int>("((raft_server_private_t *)raft)->state", 0);
+    int state = eval<int>("((raft_server*)raft)->state", 0);
     if (state == 2 || state == 3)
     {
       return true;
@@ -734,6 +740,30 @@ int exec_bfs()
 
 static int states_searched_this_run = 0;
 static int states_new_this_run = 0;
+
+struct DFSFrame
+{
+  hash_type ss_hash;
+  int depth;
+  int i;
+  int state;
+  sys_state s;
+  std::vector<int> indexes;
+  size_t index_pos;
+  std::vector<int> choices;
+  int n_choose;
+  int choosed;
+  int ptmc_n_choose;
+  int ptmc_choose;
+  struct syscall_info si_arr[NP];
+
+  DFSFrame()
+      : ss_hash(0), depth(0), i(0), state(0), index_pos(0), n_choose(-1),
+        choosed(0), ptmc_n_choose(0), ptmc_choose(-1)
+  {
+  }
+};
+
 int do_dfs(hash_type ss_hash, int depth)
 {
   states_searched_this_run++;
@@ -870,6 +900,217 @@ int do_dfs(hash_type ss_hash, int depth)
   return 0;
 }
 
+int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth)
+{
+  std::vector<DFSFrame> stack;
+  stack.reserve(1024);
+
+  DFSFrame root;
+  root.ss_hash = initial_ss_hash;
+  root.depth = initial_depth;
+  root.i = 0;
+  root.state = 0;
+  root.index_pos = 0;
+  stack.push_back(std::move(root));
+
+  while (!stack.empty())
+  {
+    DFSFrame &frame = stack.back();
+
+    if (frame.state == 0)
+    {
+      states_searched_this_run++;
+      bool is_new = !state_set.count(frame.ss_hash);
+      if (!is_new)
+      {
+        stack.pop_back();
+        continue;
+      }
+      state_set.emplace(frame.ss_hash);
+      states_new_this_run++;
+
+      if (frame.depth <= 0)
+      {
+        stack.pop_back();
+        continue;
+      }
+
+      frame.s = sys_state(frame.ss_hash);
+      for (int j = 0; j < NP; j++)
+      {
+        ptmc_state.status[j] = frame.s.status[j];
+        frame.indexes.push_back(j);
+        if (frame.s.ts_hash[j] == 0)
+        {
+          LOG_CRIT(
+              "Child state hash is 0 for tracee %d. This should not happen if "
+              "the state is properly saved.",
+              j);
+          print_call_stack();
+        }
+      }
+      shuffle(frame.indexes.begin(), frame.indexes.end(),
+              std::default_random_engine(rand()));
+
+      frame.state = 1;
+      frame.index_pos = 0;
+    }
+
+    if (frame.state == 1)
+    {
+      if (frame.index_pos >= frame.indexes.size())
+      {
+        stack.pop_back();
+        continue;
+      }
+
+      int i = frame.indexes[frame.index_pos];
+      frame.i = i;
+
+      if (DISDEAD(frame.s.status[i]))
+      {
+        frame.index_pos++;
+        continue;
+      }
+
+      frame.choices.clear();
+      frame.n_choose = -1;
+      frame.choosed = 0;
+      ptmc_state.n_choose = 0;
+      ptmc_state.choose = -1;
+      frame.ptmc_n_choose = 0;
+      frame.ptmc_choose = -1;
+
+      frame.state = 2;
+    }
+
+    if (frame.state == 2)
+    {
+      int i = frame.i;
+
+      for (int j = 0; j < NP; j++)
+      {
+        ptmc_state.status[j] = frame.s.status[j];
+      }
+      g_restore_count++;
+      g_states_searched = states_searched_this_run;
+      g_states_new = states_new_this_run;
+      g_queue_size = 0;
+
+      if (frame.choosed)
+      {
+        ptmc_state.n_choose = frame.ptmc_n_choose;
+        ptmc_state.choose = frame.choices.back();
+        frame.choices.pop_back();
+      }
+
+      TransitionResult result = state_transition(frame.s, i);
+      g_save_time_us += result.save_time.count();
+      g_restore_time_us += result.restore_time.count();
+
+      frame.ptmc_n_choose = ptmc_state.n_choose;
+
+      if (!frame.choosed && frame.choices.empty() && frame.ptmc_n_choose > 1)
+      {
+        frame.choosed = 1;
+        for (int c = 0; c < ptmc_state.n_choose; c++)
+          if (c != ptmc_state.choose)
+            frame.choices.push_back(c);
+        shuffle(frame.choices.begin(), frame.choices.end(),
+                std::default_random_engine(rand()));
+      }
+
+      g_save_count++;
+      if (check_state() != 0)
+      {
+        stop_status_monitor();
+        detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu "
+                              "sys_states (new: %zu)\n",
+                              states_searched_this_run, states_new_this_run);
+        show_syscall_history();
+        double time_used = gettime() - start_time;
+        detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
+                              time_used, states_searched_this_run / time_used);
+        StateStore::instance().print_stats();
+        return 1;
+      }
+
+      if (result.code != CKPT_DISCARD &&
+          !state_to_be_discarded(i, frame.si_arr))
+      {
+        LOG_DEBUG("DFS depth %d, tracee %d, choose %d, hash %016lx",
+                  frame.depth, i, ptmc_state.choose, result.new_state.ss_hash);
+
+        if (!frame.choices.empty())
+        {
+          frame.state = 3;
+        }
+        else
+        {
+          frame.index_pos++;
+          frame.state = 1;
+        }
+
+        DFSFrame new_frame;
+        new_frame.ss_hash = result.new_state.ss_hash;
+        new_frame.depth = frame.depth - 1;
+        new_frame.i = 0;
+        new_frame.state = 0;
+        new_frame.index_pos = 0;
+        stack.push_back(std::move(new_frame));
+        continue;
+      }
+
+      if (frame.choices.empty())
+      {
+        frame.index_pos++;
+        frame.state = 1;
+      }
+    }
+
+    if (frame.state == 3)
+    {
+      if (sigint_received)
+      {
+        stop_status_monitor();
+        detsim::ui::ui_printf("Program received signal SIGINT, Interrupt.\n");
+        detsim::ui::ui_printf("Flushing pending state writes...\n");
+        StateStore::instance().wait_for_completion();
+        StateStorePacked::instance().flush_index();
+        SysStateStore::instance().flush_index();
+        detsim::ui::ui_printf(
+            "Searched for %zu sys_states (new: %zu), total unique: %zu\n",
+            states_searched_this_run, states_new_this_run, state_set.size());
+        if (ptmc_state.running_state.ss_hash == 0)
+          LOG_CRIT(
+              "Current state hash is 0. This should not happen if states are "
+              "properly saved.");
+        show_syscall_history();
+        stop_status_monitor();
+        double time_used = gettime() - start_time;
+        detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
+                              time_used, states_searched_this_run / time_used);
+        StateStore::instance().print_stats();
+        sigint_received = 0;
+        state_set.clear();
+        return 1;
+      }
+
+      if (frame.choices.empty())
+      {
+        frame.index_pos++;
+        frame.state = 1;
+      }
+      else
+      {
+        frame.state = 2;
+      }
+    }
+  }
+
+  return 0;
+}
+
 int exec_dfs(int depth)
 {
   srand(time(NULL));
@@ -885,7 +1126,7 @@ int exec_dfs(int depth)
   StateStore::instance().queue_clear();
   start_time = gettime();
 
-  do_dfs(ptmc_state.running_state.ss_hash, depth);
+  do_dfs_iterative(ptmc_state.running_state.ss_hash, depth);
 
   stop_status_monitor();
   detsim::ui::ui_printf(

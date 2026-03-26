@@ -7,7 +7,6 @@
 #include "state_store_packed.h"
 #include "debug.h"
 #include "utils.h"
-#include "xxhash.h"
 
 #include <zstd.h>
 #include <zstd_errors.h>
@@ -33,7 +32,7 @@
 
 static uint64_t compute_xxhash(const void *data, size_t len)
 {
-  return XXHash64::hash(data, len, 0);
+  return XXHash64::hash(data, len);
 }
 
 StateStorePacked::~StateStorePacked()

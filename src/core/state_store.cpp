@@ -27,7 +27,7 @@ StateStorePacked &state_store_packed_instance()
 
 static uint64_t compute_hash(const void *data, size_t len)
 {
-  return XXHash64::hash(data, len, 0);
+  return XXHash64::hash(data, len);
 }
 
 /* ==============================================================================

@@ -225,6 +225,7 @@ int SockState::do_connect(int fd, const struct sockaddr *addr,
   sock->peer_addr = peer_addr;
 
   // Cross-process: find listening socket by port (handle 0.0.0.0 binding)
+  bool listener_found = false;
   for (int pid = 0; pid < NP; pid++)
   {
     // Match by port only, since server may bind to 0.0.0.0 (INADDR_ANY)
@@ -238,15 +239,30 @@ int SockState::do_connect(int fd, const struct sockaddr *addr,
       {
         // Add to pending connections of the listener's process
         listener->pending_connections.push_back(fd);
+
+        // Create TcpConnection in the listener's process (kernel-managed)
+        // This allows the client to send data before accept() is called
+        TcpConnection conn;
+        conn.local_fd = fd;
+        conn.local_addr = sock->local_addr;
+        conn.peer_addr = peer_addr;
+
+        // Use client address (IP:port) as key
+        uint64_t client_key =
+            ((uint64_t)sock->local_addr.sin_addr.s_addr << 32) |
+            sock->local_addr.sin_port;
+        listener->established_connections[client_key] = conn;
+
+        listener_found = true;
         LOG_TRACE("connect(fd=%d) -> listener fd=%d on process %d (port=%d), "
-                  "added to pending",
+                  "created established connection",
                   fd, listen_fd, pid, ntohs(peer_addr.sin_port));
         break;
       }
     }
   }
 
-  // Create or update TCP connection
+  // Create or update TCP connection in our own process
   TcpConnection conn;
   conn.local_fd = fd;
   conn.local_addr = sock->local_addr;
@@ -285,6 +301,35 @@ int SockState::do_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
   int client_fd = listener->pending_connections.front();
   listener->pending_connections.pop_front();
 
+  // Find the client socket to get its address
+  const Socket *client_sock = nullptr;
+  int client_pid = -1;
+  for (int pid = 0; pid < NP; pid++)
+  {
+    client_sock = ptmc_state.sock_states[pid].get_socket(client_fd);
+    if (client_sock)
+    {
+      client_pid = pid;
+      break;
+    }
+  }
+  if (!client_sock)
+  {
+    return -ECONNRESET; // Client closed connection
+  }
+
+  // Compute client address key
+  uint64_t client_key =
+      ((uint64_t)client_sock->local_addr.sin_addr.s_addr << 32) |
+      client_sock->local_addr.sin_port;
+
+  // Look up existing established connection (created by connect())
+  auto established_it = listener->established_connections.find(client_key);
+  if (established_it == listener->established_connections.end())
+  {
+    return -ECONNRESET; // No established connection found
+  }
+
   // Allocate new fd for accepted socket
   int new_fd = allocate_fd(FdType::SOCKET);
   if (new_fd < 0)
@@ -307,28 +352,22 @@ int SockState::do_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
             &new_sock.local_addr.sin_addr);
   new_sock.local_addr.sin_port = listener->local_addr.sin_port;
 
-  // Get client socket and find its real address
-  for (int pid = 0; pid < NP; pid++)
-  {
-    const Socket *client_sock =
-        ptmc_state.sock_states[pid].get_socket(client_fd);
-    if (client_sock)
-    {
-      // Client's peer address from its view: use client's real IP
-      new_sock.peer_addr.sin_family = AF_INET;
-      inet_pton(AF_INET, ptmc_state.addrs[pid].c_str(),
-                &new_sock.peer_addr.sin_addr);
-      new_sock.peer_addr.sin_port = client_sock->local_addr.sin_port;
-      break;
-    }
-  }
+  // Client's peer address: use client's real IP
+  new_sock.peer_addr.sin_family = AF_INET;
+  inet_pton(AF_INET, ptmc_state.addrs[client_pid].c_str(),
+            &new_sock.peer_addr.sin_addr);
+  new_sock.peer_addr.sin_port = client_sock->local_addr.sin_port;
+
   sockets_[new_fd] = new_sock;
 
-  TcpConnection new_conn;
-  new_conn.local_fd = new_fd;
-  new_conn.local_addr = new_sock.local_addr;
-  new_conn.peer_addr = new_sock.peer_addr;
-  tcp_connections_[new_fd] = new_conn;
+  // Adopt the existing TcpConnection with its buffered data
+  TcpConnection conn = std::move(established_it->second);
+  conn.local_fd = new_fd;
+  conn.local_addr = new_sock.local_addr;
+  // peer_addr is already set correctly from connect()
+  tcp_connections_[new_fd] = std::move(conn);
+
+  listener->established_connections.erase(established_it);
 
   // Return peer address to caller
   if (addr && addrlen)
@@ -363,10 +402,16 @@ ssize_t SockState::do_send(int fd, const void *buf, size_t len, int flags)
   std::string data(len, '\0');
   memcpy_guest2host(&data[0], buf, len);
 
-  // Route by address: find socket with matching local_addr == our peer_addr
+  // Compute our address key to look up in peer's established_connections
+  uint64_t our_key = ((uint64_t)sock->local_addr.sin_addr.s_addr << 32) |
+                     sock->local_addr.sin_port;
+
+  // Route by address: find the peer and deliver data
   for (int pid = 0; pid < NP; pid++)
   {
     SockState &remote_state = ptmc_state.sock_states[pid];
+
+    // First: try to find an accepted connection (in tcp_connections_)
     for (auto &kv : remote_state.sockets_)
     {
       Socket &remote_sock = kv.second;
@@ -396,6 +441,27 @@ ssize_t SockState::do_send(int fd, const void *buf, size_t len, int flags)
                     kv.first, pid);
           return len;
         }
+      }
+    }
+
+    // Second: try to find a pending connection in listener's
+    // established_connections
+    for (auto &kv : remote_state.sockets_)
+    {
+      Socket &remote_sock = kv.second;
+      if (!remote_sock.listening)
+        continue;
+
+      // Check if this listener has our connection in established_connections
+      auto established_it = remote_sock.established_connections.find(our_key);
+      if (established_it != remote_sock.established_connections.end())
+      {
+        established_it->second.recv_buffer.push_back(data);
+        LOG_TRACE(
+            "send(fd=%d, len=%zu) -> pending connection on listener fd=%d "
+            "in process %d",
+            fd, len, kv.first, pid);
+        return len;
       }
     }
   }
@@ -553,6 +619,7 @@ ssize_t SockState::do_recvfrom_with_choice(int fd, void *buf, size_t len,
   // Have only one datagram but postpone
   if (choice == 1 && static_cast<int>(it->second.size()) == 1)
   {
+    ptmc_state.error_bound--;
     return -EAGAIN;
   }
 
@@ -561,6 +628,7 @@ ssize_t SockState::do_recvfrom_with_choice(int fd, void *buf, size_t len,
   if (choice == 1 && it->second.size() >= 2)
   {
     // Choice 1: receive second message (for message reordering)
+    ptmc_state.error_bound--;
     ++dg_it;
   }
 
@@ -605,7 +673,7 @@ int SockState::get_recvfrom_choices(int fd) const
     return 0; // No messages available
   }
 
-  if (it->second.size() >= 2)
+  if (it->second.size() >= 1)
   {
     return 2; // 2 choices: receive first or second message
   }
@@ -752,14 +820,15 @@ int SockState::do_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen)
 
 void SockState::deliver_udp_datagram(int recv_fd, const UdpDatagram &dg)
 {
-  udp_recv_buffers_[recv_fd].push_back(dg);
 
-  const size_t MAX_UDP_BUFFER = 100;
-  if (udp_recv_buffers_[recv_fd].size() > MAX_UDP_BUFFER)
+  const size_t MAX_UDP_BUFFER = 3;
+  if (udp_recv_buffers_[recv_fd].size() >= MAX_UDP_BUFFER)
   {
-    udp_recv_buffers_[recv_fd].pop_front();
-    LOG_WARN("UDP buffer overflow for fd=%d", recv_fd);
+    ptmc_state.error_bound--;
+    LOG_TRACE("UDP buffer overflow for fd=%d", recv_fd);
+    return;
   }
+  udp_recv_buffers_[recv_fd].push_back(dg);
 }
 
 /* ==============================================================================
@@ -851,9 +920,21 @@ void TcpConnection::serialize(Archive &ar)
 }
 
 template <class Archive>
+void EpollEvent::serialize(Archive &ar)
+{
+  ar(events, fd);
+}
+
+template <class Archive>
+void EpollInstance::serialize(Archive &ar)
+{
+  ar(epoll_fd, watched_fds, ready_events);
+}
+
+template <class Archive>
 void SockState::serialize(Archive &ar)
 {
-  ar(sockets_, udp_recv_buffers_, tcp_connections_);
+  ar(sockets_, udp_recv_buffers_, tcp_connections_, epoll_instances_);
 }
 
 /* Explicit instantiations */
@@ -868,6 +949,14 @@ template void UdpDatagram::serialize<cereal::BinaryOutputArchive>(
 template void TcpConnection::serialize<cereal::BinaryInputArchive>(
     cereal::BinaryInputArchive &);
 template void TcpConnection::serialize<cereal::BinaryOutputArchive>(
+    cereal::BinaryOutputArchive &);
+template void
+EpollEvent::serialize<cereal::BinaryInputArchive>(cereal::BinaryInputArchive &);
+template void EpollEvent::serialize<cereal::BinaryOutputArchive>(
+    cereal::BinaryOutputArchive &);
+template void EpollInstance::serialize<cereal::BinaryInputArchive>(
+    cereal::BinaryInputArchive &);
+template void EpollInstance::serialize<cereal::BinaryOutputArchive>(
     cereal::BinaryOutputArchive &);
 template void
 SockState::serialize<cereal::BinaryInputArchive>(cereal::BinaryInputArchive &);

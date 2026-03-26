@@ -9,6 +9,25 @@
 #include <optional>
 #include <string>
 
+#include <xxhash.h>
+#include <cstddef>
+#include <cstdint>
+
+class XXHash64
+{
+  public:
+  static uint64_t hash(const void *input, size_t len)
+  {
+    return XXH3_64bits(input, len);
+  }
+
+  static uint32_t hash32(const void *input, size_t len)
+  {
+    return static_cast<uint32_t>(hash(input, len));
+  }
+};
+
+using hash_type = uint64_t;
 int is_dynamically_linked(const char *filename);
 void fcopy(char *source_filename, char *destination_filename);
 int filecmp(const char *file1, const char *file2);

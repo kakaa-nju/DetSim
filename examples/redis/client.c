@@ -1,9 +1,11 @@
+#include <assert.h>
 #include <stdio.h>
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
 
 #define REDIS_HOST "192.168.0.1"
+/* #define REDIS_HOST "0.0.0.0" */
 #define REDIS_PORT 6379
 #define BUFFER_SIZE 1024
 
@@ -42,19 +44,21 @@ int main() {
 
     // SET x 1
     len = build_resp(send_buf, set_cmd, 3);
-    write(sock, send_buf, len);
+    assert(write(sock, send_buf, len) == len);
     
     memset(recv_buf, 0, BUFFER_SIZE);
-    read(sock, recv_buf, BUFFER_SIZE - 1);
+    while (read(sock, recv_buf, BUFFER_SIZE - 1) < 0);
     printf("SET response: %s", recv_buf);
+    assert(!strcmp(recv_buf, "+OK\r\n"));
 
     // GET x
     len = build_resp(send_buf, get_cmd, 2);
-    write(sock, send_buf, len);
+    assert(write(sock, send_buf, len) == len);
     
     memset(recv_buf, 0, BUFFER_SIZE);
-    read(sock, recv_buf, BUFFER_SIZE - 1);
+    while (read(sock, recv_buf, BUFFER_SIZE - 1) < 0);
     printf("GET response: %s", recv_buf);
+    assert(!strcmp(recv_buf, "$1\r\n1\r\n"));
 
     close(sock);
     return 0;
