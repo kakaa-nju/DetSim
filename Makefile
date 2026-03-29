@@ -1,4 +1,4 @@
-.PHONY: all debug release wc clean clear benchmark
+.PHONY: all debug release wc clean clear benchmark pgo-generate pgo-use pgo-clean
 
 CC = ccache gcc
 CXX = ccache g++
@@ -167,4 +167,67 @@ $(BUILD_DIR)/$(TOOLS_DIR)/%.o: $(TOOLS_DIR)/%.cpp | $(BUILD_DIR)
 	fi
 	@mkdir -p $(dir $@)
 	@echo "Compiling tool $<"
+	@start=$$(date +%s.%N); \
 	$(CXX) $< $(CXXFLAGS) -c -o $@ -DNP=$(NP)
+
+# ==============================================================================
+# Profile-Guided Optimization (PGO) Targets - Simplified Design
+# ==============================================================================
+# Usage:
+#   1. make pgo-generate NP=3     # Build instrumented binary
+#   2. ./tracer-pgo <workload>    # Run to generate .gcda files
+#   3. make pgo-use NP=3          # Recompile with profile data
+#   4. ./tracer-pgo               # Run optimized binary
+# ==============================================================================
+
+PGO_BUILD_DIR = build-pgo
+PGO_PROF_DIR = pgo-profiles
+
+# PGO object files
+PGO_OBJS = $(patsubst %.cpp,$(PGO_BUILD_DIR)/%.o,$(SRCS))
+PGO_NRCALL = $(PGO_BUILD_DIR)/nr2call.o
+
+# Step 1: Generate profile (instrumented build)
+.PHONY: pgo-generate
+pgo-generate: PGO_CXXFLAGS = $(CXXFLAGS) -fprofile-generate -fprofile-dir=$(PGO_PROF_DIR) -ffile-prefix-map=$(CURDIR)=.
+pgo-generate: PGO_LDFLAGS = $(LDFLAGS) -fprofile-generate -fprofile-dir=$(PGO_PROF_DIR)
+pgo-generate: $(PGO_BUILD_DIR) $(PGO_OBJS) $(PGO_NRCALL)
+	$(LD) $(PGO_OBJS) $(PGO_NRCALL) $(PGO_LDFLAGS) -o tracer-pgo
+	@echo "==> PGO instrumented binary: ./tracer-pgo"
+	@echo "==> Run it to generate profile data, then: make pgo-use NP=$(NP)"
+
+# Step 2: Use profile (optimized build)  
+.PHONY: pgo-use
+pgo-use: PGO_CXXFLAGS = $(CXXFLAGS) -fprofile-use -fprofile-dir=$(PGO_PROF_DIR) -fprofile-correction -ffile-prefix-map=$(CURDIR)=.
+pgo-use: PGO_LDFLAGS = $(LDFLAGS)
+pgo-use: pgo-clean-objs $(PGO_OBJS) $(PGO_NRCALL)
+	$(LD) $(PGO_OBJS) $(PGO_NRCALL) $(PGO_LDFLAGS) -o tracer-pgo
+	@echo "==> PGO optimized binary: ./tracer-pgo"
+
+# Clean only object files (keep .gcda profile data)
+.PHONY: pgo-clean-objs
+pgo-clean-objs:
+	@rm -f $(PGO_OBJS) $(PGO_NRCALL)
+
+# Clean everything including profile data
+.PHONY: pgo-clean
+pgo-clean:
+	@rm -rf $(PGO_BUILD_DIR) $(PGO_PROF_DIR)
+	@rm -f tracer-pgo
+	@echo "==> PGO files cleaned"
+
+# Build directory
+$(PGO_BUILD_DIR):
+	@mkdir -p $(PGO_BUILD_DIR)/src/core $(PGO_BUILD_DIR)/src/subsys \
+		$(PGO_BUILD_DIR)/src/utils $(PGO_BUILD_DIR)/src/ui \
+		$(PGO_BUILD_DIR)/examples/redisraft/plugins
+	@mkdir -p $(PGO_PROF_DIR)
+
+# Generic rule for PGO object files (flags determined by target)
+$(PGO_BUILD_DIR)/%.o: %.cpp | $(PGO_BUILD_DIR)
+	@if [ -z "$(NP)" ]; then echo "NP not set"; exit 1; fi
+	@mkdir -p $(dir $@)
+	$(CXX) $< $(PGO_CXXFLAGS) -c -o $@ -DNP=$(NP)
+
+$(PGO_BUILD_DIR)/nr2call.o: nr2call.c | $(PGO_BUILD_DIR)
+	$(CC) -c $< -O3 -g $(PGO_CFLAGS) -o $@
