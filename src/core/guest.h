@@ -16,7 +16,9 @@ extern int running_process;
 
 void tracee_set_rax(int pid, uint64_t val);
 void tracee_set_orig_rax(int pid, uint64_t val);
+void tracee_set_rdi(int pid, uint64_t val);
 void tracee_set_ret(int pid, uint64_t val);
+uint64_t tracee_get_rdi(int pid);
 uint64_t tracee_get_rip(int pid);
 uint64_t tracee_get_rbp(int pid);
 uint64_t tracee_get_rsp(int pid);

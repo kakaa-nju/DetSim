@@ -13,6 +13,9 @@
 #include <unordered_set>
 #include <optional>
 
+// Forward declaration for FutexState
+class FutexState;
+
 /* ======================================================================
  * State Data Format (shared with StateStore)
  * ====================================================================== */
@@ -55,6 +58,51 @@ struct syscall_info
 
   template <class Archive>
   void serialize(Archive &ar);
+};
+
+/* ======================================================================
+ * Thread State (Single Thread State for Multi-threading Support)
+ * ====================================================================== */
+
+/* Per-thread state for multi-threading support */
+struct thread_state
+{
+  pid_t tid;                      // Thread ID
+  struct user_regs_struct regs;   // Register context
+  uint64_t clone_flags;           // Clone flags used to create this thread
+  uint64_t stack_addr;            // Stack address (for clone)
+  pid_t ptid;                     // Parent thread TID
+  bool is_main;                   // Whether this is the main thread
+
+  thread_state() : tid(0), clone_flags(0), stack_addr(0), ptid(0), is_main(false)
+  {
+    // regs will be zero-initialized by the default member initializer
+  }
+
+  template <class Archive>
+  void serialize(Archive &ar)
+  {
+    ar(tid, regs.r15, regs.r14, regs.r13, regs.r12, regs.rbp, regs.rbx,
+       regs.r11, regs.r10, regs.r9, regs.r8, regs.rax, regs.rcx, regs.rdx,
+       regs.rsi, regs.rdi, regs.orig_rax, regs.rip, regs.cs, regs.eflags,
+       regs.rsp, regs.ss, regs.fs_base, regs.gs_base, regs.ds, regs.es,
+       regs.fs, regs.gs, clone_flags, stack_addr, ptid, is_main);
+  }
+};
+
+/* Thread creation record for tracking clone parameters */
+struct thread_create_info
+{
+  pid_t tid;
+  uint64_t clone_flags;
+  uint64_t stack_addr;
+  pid_t ptid;
+
+  template <class Archive>
+  void serialize(Archive &ar)
+  {
+    ar(tid, clone_flags, stack_addr, ptid);
+  }
 };
 
 /* ======================================================================
@@ -106,6 +154,35 @@ typedef struct tracee_state
   /* FdManager state - saved to preserve fd allocation state */
   FdManager fd_manager_state;
 
+  /* Multi-threading support */
+  std::vector<thread_state> threads;        // All thread states
+  std::vector<thread_create_info> thread_create_records;  // Thread creation history
+  pid_t main_tid;                           // Main thread TID
+  int current_thread_idx;                   // Currently selected thread index
+
+  /* Futex state for thread synchronization */
+  struct FutexState *futex_state;           // Futex emulation state (pointer for lazy init)
+
+  /* ---------------------------------------------------------
+   * Thread Management Methods
+   * --------------------------------------------------------- */
+
+  // Add a new thread to this tracee's state
+  void add_thread(pid_t tid, uint64_t clone_flags, uint64_t stack, pid_t ptid, bool is_main = false);
+
+  // Remove a thread from this tracee's state
+  void remove_thread(pid_t tid);
+
+  // Find a thread by TID
+  thread_state* find_thread(pid_t tid);
+  const thread_state* find_thread(pid_t tid) const;
+
+  // Get the number of threads
+  size_t thread_count() const { return threads.size(); }
+
+  // Find thread index by TID
+  int find_thread_index(pid_t tid) const;
+
   /* ---------------------------------------------------------
    * Constructors
    * --------------------------------------------------------- */
@@ -119,7 +196,8 @@ typedef struct tracee_state
   // Default constructor - value-initialize all members
   tracee_state()
       : si{}, brk(0), tv{0, 0}, fs_state(), sock_state(),
-        raft_state()
+        raft_state(), threads(), thread_create_records(),
+        main_tid(0), current_thread_idx(0), futex_state(nullptr)
   {
   }
 

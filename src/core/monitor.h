@@ -49,6 +49,13 @@ struct PTMC_STATE
 
   int pids[NP] = {};
 
+  /* Multi-threading support */
+  int current_thread_idx[NP] = {};  /* Currently selected thread index per tracee */
+
+  /* Get current thread TID for a tracee */
+  pid_t get_current_tid(int tracee_idx) const;
+  void set_current_thread(int tracee_idx, int thread_idx);
+
   struct tracee_info
   {
     char *executable = nullptr;

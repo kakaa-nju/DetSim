@@ -113,9 +113,13 @@ int SockState::do_socket(int domain, int type, int protocol)
     return -EAFNOSUPPORT;
   }
 
-  if (type != SOCK_STREAM && type != SOCK_DGRAM)
+  // Extract socket type flags (SOCK_NONBLOCK, SOCK_CLOEXEC are Linux-specific)
+  int type_flags = type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
+  int base_type = type & ~(SOCK_NONBLOCK | SOCK_CLOEXEC);
+
+  if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM)
   {
-    LOG_ERROR("socket: unsupported type %d", type);
+    LOG_ERROR("socket: unsupported type %d (base_type=%d, flags=%d)", type, base_type, type_flags);
     return -EPROTONOSUPPORT;
   }
 
@@ -128,15 +132,16 @@ int SockState::do_socket(int domain, int type, int protocol)
   Socket sock;
   sock.fd = fd;
   sock.domain = domain;
-  sock.type = type;
+  sock.type = base_type;
   sock.protocol = protocol;
+  sock.flags = type_flags;
   sock.bound = false;
   sock.connected = false;
   sock.listening = false;
 
   sockets_[fd] = sock;
 
-  LOG_TRACE("socket(%d, %d, %d) -> fd=%d", domain, type, protocol, fd);
+  LOG_TRACE("socket(%d, %d, %d) -> fd=%d (base_type=%d, flags=%d)", domain, type, protocol, fd, base_type, type_flags);
   return fd;
 }
 
@@ -1220,6 +1225,7 @@ int SockState::do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
   }
   else if (op != EPOLL_CTL_DEL)
   {
+    LOG_ERROR("do_epoll_ctl: invalid operation %d", op);
     return -EINVAL;
   }
 
@@ -1240,6 +1246,7 @@ int SockState::do_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event)
       LOG_TRACE("do_epoll_ctl: DEL fd %d from epoll %d", fd, epfd);
       break;
     default:
+      LOG_ERROR("do_epoll_ctl: invalid operation %d", op);
       return -EINVAL;
   }
 
@@ -1376,6 +1383,31 @@ int emu_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
 {
   return ptmc_state.sock_states[ptmc_state.cursor].do_epoll_wait(
       epfd, events, maxevents, timeout);
+}
+
+int emu_epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
+                    int timeout, const sigset_t *sigmask, size_t sigsetsize)
+{
+  // sigmask is handled by ptrace, just delegate to epoll_wait
+  (void)sigmask;
+  (void)sigsetsize;
+  return ptmc_state.sock_states[ptmc_state.cursor].do_epoll_wait(
+      epfd, events, maxevents, timeout);
+}
+
+int emu_epoll_pwait2(int epfd, struct epoll_event *events, int maxevents,
+                     const struct timespec *timeout, const sigset_t *sigmask,
+                     size_t sigsetsize)
+{
+  // Convert timespec to milliseconds and delegate
+  int timeout_ms = -1;  // Default to infinite
+  if (timeout) {
+    timeout_ms = timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000;
+  }
+  (void)sigmask;
+  (void)sigsetsize;
+  return ptmc_state.sock_states[ptmc_state.cursor].do_epoll_wait(
+      epfd, events, maxevents, timeout_ms);
 }
 
 /* ==============================================================================

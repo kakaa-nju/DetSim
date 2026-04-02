@@ -29,9 +29,15 @@ class XXHash64
 
 using hash_type = uint64_t;
 int is_dynamically_linked(const char *filename);
+int is_go_program(const char *filename);
 void fcopy(char *source_filename, char *destination_filename);
 int filecmp(const char *file1, const char *file2);
 FILE *create_anonymous_tmp(const char *id, const char *mode);
+
+/* Multi-threading support functions */
+std::vector<pid_t> get_thread_list(pid_t pid);
+int get_thread_count(pid_t pid);
+bool is_thread_in_process(pid_t pid, pid_t tid);
 
 namespace fileutils
 {

@@ -1,7 +1,9 @@
 #include "utils.h"
 #include "common.h"
 #include "state.h"
+#include "log_wrapper.h"
 #include <cstdio>
+#include <dirent.h>
 #include <fcntl.h>
 #include <filesystem>
 #include <fmt/printf.h>
@@ -21,6 +23,7 @@
 #include <unistd.h>
 #include <vector>
 #include <zstd.h>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -44,7 +47,7 @@ int filecmp(const char *file1, const char *file2)
 
   if (!fp1 || !fp2)
   {
-    fprintf(stderr, "Error opening files.\n");
+    LOG_INFO("Error opening files.\n");
     if (fp1)
       fclose(fp1);
     if (fp2)
@@ -166,7 +169,7 @@ int is_dynamically_linked(const char *filename)
 {
   if (elf_version(EV_CURRENT) == EV_NONE)
   {
-    fprintf(stderr, "ELF library initialization failed\n");
+    LOG_INFO("ELF library initialization failed\n");
     return -1;
   }
 
@@ -180,7 +183,7 @@ int is_dynamically_linked(const char *filename)
   Elf *e = elf_begin(fd, ELF_C_READ, NULL);
   if (!e)
   {
-    fprintf(stderr, "elf_begin failed: %s\n", elf_errmsg(-1));
+    LOG_INFO("elf_begin failed: %s\n", elf_errmsg(-1));
     close(fd);
     return -1;
   }
@@ -188,7 +191,7 @@ int is_dynamically_linked(const char *filename)
   size_t phnum;
   if (elf_getphdrnum(e, &phnum) != 0)
   {
-    fprintf(stderr, "elf_getphdrnum failed\n");
+    LOG_INFO("elf_getphdrnum failed\n");
     elf_end(e);
     close(fd);
     return -1;
@@ -199,7 +202,7 @@ int is_dynamically_linked(const char *filename)
     GElf_Phdr phdr;
     if (gelf_getphdr(e, i, &phdr) != &phdr)
     {
-      fprintf(stderr, "gelf_getphdr failed\n");
+      LOG_INFO("gelf_getphdr failed\n");
       continue;
     }
 
@@ -337,4 +340,99 @@ void ensure_directory_for_file(const std::string &path)
   }
 }
 
+
+
+
 } // namespace fileutils
+
+// Detect if binary is a Go program by checking for Go-specific ELF sections
+int is_go_program(const char *filename)
+{
+  // Force output to stderr for debugging
+  fprintf(stderr, "*** is_go_program called with: %s", filename);
+  LOG_INFO("is_go_program: checking %s", filename);
+  elf_version(EV_CURRENT);
+  int fd = open(filename, O_RDONLY);
+  if (fd < 0) {
+    LOG_INFO("is_go_program: open failed: %s", strerror(errno));
+    return 0;
+  }
+  LOG_INFO("is_go_program: opened fd=%d", fd);
+
+  Elf *e = elf_begin(fd, ELF_C_READ, NULL);
+  if (!e) {
+    LOG_INFO("is_go_program: elf_begin failed");
+    close(fd);
+    return 0;
+  }
+
+  // Check for Go-specific sections
+  Elf_Scn *scn = NULL;
+  size_t shstrndx;
+  int is_go = 0;
+  while ((scn = elf_nextscn(e, scn)) != NULL) {
+    GElf_Shdr shdr;
+    if (gelf_getshdr(scn, &shdr) != NULL) {
+      const char *name = elf_strptr(e, elf_getshdrstrndx(e, &shstrndx), shdr.sh_name);
+      if (name && (strcmp(name, ".go.buildinfo") == 0 ||
+                     strcmp(name, ".gopclntab") == 0 ||
+                     strncmp(name, ".go.", 4) == 0)) {
+        is_go = 1;
+        break;
+      }
+    }
+  }
+
+  elf_end(e);
+  close(fd);
+  return is_go;
+}
+
+/* ======================================================================
+ * Multi-threading support functions
+ * ====================================================================== */
+
+#include <dirent.h>
+#include <algorithm>
+
+// Get list of all thread TIDs in a process
+std::vector<pid_t> get_thread_list(pid_t pid)
+{
+  std::vector<pid_t> threads;
+  std::string task_dir = fmt::format("/proc/{}/task", pid);
+
+  DIR *dir = opendir(task_dir.c_str());
+  if (!dir) {
+    LOG_ERROR("Failed to open %s: %s", task_dir.c_str(), strerror(errno));
+    return threads;
+  }
+
+  struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL) {
+    if (entry->d_name[0] == '.')
+      continue;
+
+    pid_t tid = atoi(entry->d_name);
+    if (tid > 0) {
+      threads.push_back(tid);
+    }
+  }
+
+  closedir(dir);
+  std::sort(threads.begin(), threads.end());
+  return threads;
+}
+
+// Get thread count for a process
+int get_thread_count(pid_t pid)
+{
+  auto threads = get_thread_list(pid);
+  return static_cast<int>(threads.size());
+}
+
+// Check if a TID belongs to a process
+bool is_thread_in_process(pid_t pid, pid_t tid)
+{
+  auto threads = get_thread_list(pid);
+  return std::find(threads.begin(), threads.end(), tid) != threads.end();
+}

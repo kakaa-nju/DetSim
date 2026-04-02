@@ -62,6 +62,7 @@ static int cmd_bfs(char *args);
 static int cmd_q(char *args);
 static int cmd_help(char *args);
 static int cmd_sw(char *args);
+static int cmd_thread(char *args);
 static int cmd_si(char *args);
 static int cmd_load(char *args);
 static int cmd_info(char *args);
@@ -93,6 +94,7 @@ static struct
     {"q", "Exit ptraceMC", cmd_q},
     {"si", "Step from current state, on focused process", cmd_si},
     {"sw", "Switch control focus on the n-th process", cmd_sw},
+    {"thread", "Switch to thread N in current process (thread to list)", cmd_thread},
     {"load", "Load state of given StateHash", cmd_load},
     {"info", "Display current state history", cmd_info},
     {"batch", "Read command list from file", cmd_batch},
@@ -319,6 +321,50 @@ static int cmd_sw(char *args)
   ptmc_state.cursor = proc;
   detsim::ui::ui_printf("Switched to process %d (pid=%d)\n", proc,
                         ptmc_state.pids[proc]);
+  return 0;
+}
+
+static int cmd_thread(char *args)
+{
+  int tracee_idx = ptmc_state.cursor;
+  if (tracee_idx < 0 || tracee_idx >= NP) {
+    detsim::ui::ui_printf("No process selected\n");
+    return 0;
+  }
+
+  // Get current tracee's threads
+  auto& threads = ptmc_state.running_state.child[tracee_idx].threads;
+
+  if (args == NULL || strlen(args) == 0)
+  {
+    // List threads
+    int current = ptmc_state.current_thread_idx[tracee_idx];
+    detsim::ui::ui_printf("Threads in process %d (pid=%d):\n",
+                          tracee_idx, ptmc_state.pids[tracee_idx]);
+    if (threads.empty()) {
+      detsim::ui::ui_printf("  (single-threaded, main thread only)\n");
+    } else {
+      for (size_t i = 0; i < threads.size(); i++) {
+        const char* marker = (i == (size_t)current) ? "*" : " ";
+        detsim::ui::ui_printf("%s [%zu] TID %d %s\n",
+                              marker, i, threads[i].tid,
+                              threads[i].is_main ? "(main)" : "");
+      }
+    }
+    return 0;
+  }
+
+  int thread_idx = atoi(args);
+  if (thread_idx < 0 || thread_idx >= (int)threads.size())
+  {
+    detsim::ui::ui_printf("Invalid thread index %d (must be 0-%zu)\n",
+                          thread_idx, threads.size() - 1);
+    return 0;
+  }
+
+  ptmc_state.current_thread_idx[tracee_idx] = thread_idx;
+  detsim::ui::ui_printf("Switched to thread %d (TID=%d) in process %d\n",
+                        thread_idx, threads[thread_idx].tid, tracee_idx);
   return 0;
 }
 
@@ -2195,5 +2241,34 @@ void ui_mainloop()
       detsim::ui::ui_printf("Unknown command '%s'\n", cmd);
     strncpy(lastcmd, lastbuf, sizeof(lastcmd) - 1);
     lastcmd[sizeof(lastcmd) - 1] = '\0';
+  }
+}
+
+/* ======================================================================
+ * PTMC_STATE Multi-threading Methods
+ * ====================================================================== */
+
+pid_t PTMC_STATE::get_current_tid(int tracee_idx) const
+{
+  if (tracee_idx < 0 || tracee_idx >= NP) return -1;
+
+  const auto& threads = running_state.child[tracee_idx].threads;
+  int tidx = current_thread_idx[tracee_idx];
+
+  if (tidx >= 0 && tidx < (int)threads.size()) {
+    return threads[tidx].tid;
+  }
+
+  // Fallback to main pid if no threads recorded
+  return pids[tracee_idx];
+}
+
+void PTMC_STATE::set_current_thread(int tracee_idx, int thread_idx)
+{
+  if (tracee_idx < 0 || tracee_idx >= NP) return;
+
+  const auto& threads = running_state.child[tracee_idx].threads;
+  if (thread_idx >= 0 && thread_idx < (int)threads.size()) {
+    current_thread_idx[tracee_idx] = thread_idx;
   }
 }

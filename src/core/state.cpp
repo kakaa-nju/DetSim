@@ -20,6 +20,7 @@
 #include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
+#include <set>
 #include <stack>
 #include <stdint.h>
 #include <stdio.h>
@@ -27,9 +28,11 @@
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
+#include <sys/signal.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
 #include <sys/user.h>
+#include <sys/wait.h>
 
 /* ======================================================================
  * Section 1: Global State Variables
@@ -605,14 +608,125 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps,
 /* Main entry: recover running state for a process */
 void tracee_state::recover_running_state(int index, hash_type ts_hash) const
 {
+  pid_t main_pid = ptmc_state.pids[index];
   std::vector<maps_item> maps;
-  restore_memory_mappings(ts_hash, ptmc_state.pids[index], maps);
+  restore_memory_mappings(ts_hash, main_pid, maps);
 
   /* Restore brk (heap) - must be done before restoring memory content */
-  tracee_do_syscall(ptmc_state.pids[index], SYS_brk, brk, 0, 0, 0, 0, 0);
+  tracee_do_syscall(main_pid, SYS_brk, brk, 0, 0, 0, 0, 0);
   LOG_DEBUG("restored brk = 0x%x", brk);
 
-  recover_mem_reg_snapshot(maps, ts_hash, ptmc_state.pids[index]);
+  recover_mem_reg_snapshot(maps, ts_hash, main_pid);
+
+  /* ======================================================================
+   * Multi-threading support: restore thread state
+   * ====================================================================== */
+
+  // Get current thread list
+  auto current_threads = get_thread_list(main_pid);
+  std::set<pid_t> current_tids(current_threads.begin(), current_threads.end());
+  std::set<pid_t> target_tids;
+  for (const auto& ts : threads) {
+    target_tids.insert(ts.tid);
+  }
+
+  LOG_INFO("Recovering threads for process %d: current=%zu, target=%zu",
+           index, current_tids.size(), target_tids.size());
+
+  // Step 1: Terminate threads that shouldn't exist
+  for (pid_t current_tid : current_threads) {
+    if (target_tids.find(current_tid) == target_tids.end()) {
+      LOG_INFO("Thread %d not in target state, terminating it", current_tid);
+
+      // Check if this is the main thread
+      if (current_tid == main_pid) {
+        LOG_WARN("Cannot terminate main thread %d, keeping it", current_tid);
+        continue;
+      }
+
+      // Use tgkill to send SIGTERM, then the thread should exit
+      // Note: This is tricky because we need the thread to handle the signal
+      // For now, we use tracee_do_syscall to make the thread call exit
+      // This requires the thread to be stopped and controllable
+      int status;
+      pid_t result = waitpid(current_tid, &status, WNOHANG);
+      if (result == 0) {
+        // Thread is running, we need to stop it first
+        // This is complex - for now, log a warning
+        LOG_WARN("Thread %d is running, cannot terminate cleanly", current_tid);
+      } else if (result == current_tid) {
+        // Thread has stopped or exited
+        if (WIFSTOPPED(status)) {
+          // Thread is stopped, we can make it exit
+          tracee_do_syscall(current_tid, SYS_exit, 0, 0, 0, 0, 0, 0);
+          LOG_INFO("Terminated thread %d via exit syscall", current_tid);
+        }
+      }
+    }
+  }
+
+  // Step 2: Create threads that don't exist
+  for (const auto& target_ts : threads) {
+    if (current_tids.find(target_ts.tid) == current_tids.end()) {
+      LOG_INFO("Thread %d not found, need to create it (clone_flags=0x%lx)",
+               target_ts.tid, target_ts.clone_flags);
+
+      // Only create if we have clone flags
+      if (target_ts.clone_flags != 0) {
+        // Prepare clone parameters
+        uint64_t flags = target_ts.clone_flags | SIGCHLD | CLONE_PTRACE;
+
+        // Execute clone in the main thread
+        pid_t new_tid = (pid_t)tracee_do_syscall((int)main_pid, SYS_clone,
+                                                  flags,
+                                                  target_ts.stack_addr,
+                                                  (uint64_t)target_ts.ptid,
+                                                  0, 0, 0);
+
+        if (new_tid > 0) {
+          LOG_INFO("Created new thread %d (requested %d)", new_tid, target_ts.tid);
+
+          // Wait for the new thread to stop
+          int wstatus;
+          pid_t waited = waitpid(new_tid, &wstatus, 0);
+          if (waited == new_tid && WIFSTOPPED(wstatus)) {
+            // Restore registers for the new thread
+            // Note: We use the saved registers but need to adjust some fields
+            struct user_regs_struct new_regs = target_ts.regs;
+            // RAX contains return value from clone (0 for child)
+            new_regs.rax = 0;
+            ptrace(PTRACE_SETREGS, new_tid, NULL, &new_regs);
+            LOG_INFO("Restored registers for new thread %d", new_tid);
+          }
+        } else {
+          LOG_ERROR("Failed to create thread: %ld", (long)new_tid);
+        }
+      } else {
+        LOG_WARN("No clone flags for thread %d, cannot recreate", target_ts.tid);
+      }
+    }
+  }
+
+  // Step 3: Restore registers for all existing threads
+  for (const auto& target_ts : threads) {
+    pid_t tid = target_ts.tid;
+
+    // Check if thread still exists (might have been recreated with different tid)
+    if (!is_thread_in_process(main_pid, tid)) {
+      LOG_WARN("Thread %d no longer exists, skipping register restore", tid);
+      continue;
+    }
+
+    // Restore registers
+    if (ptrace(PTRACE_SETREGS, tid, NULL, (void*)&target_ts.regs) == 0) {
+      LOG_TRACE("Restored registers for thread %d", tid);
+    } else {
+      LOG_ERROR("Failed to restore registers for thread %d: %s", tid, strerror(errno));
+    }
+  }
+
+  // Restore current thread index
+  ptmc_state.current_thread_idx[index] = current_thread_idx;
 
   /* Restore subsystems */
   ptmc_state.sock_states[index] = sock_state;
@@ -819,7 +933,47 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
     }
   }
 
-  // Get registers
+  // ========================================================================
+  // Multi-threading support: save all thread registers
+  // ========================================================================
+  threads.clear();
+  auto thread_list = get_thread_list(pid);
+
+  for (pid_t tid : thread_list) {
+    struct user_regs_struct thread_regs;
+    if (ptrace(PTRACE_GETREGS, tid, NULL, &thread_regs) == 0) {
+      thread_state ts;
+      ts.tid = tid;
+      ts.regs = thread_regs;
+
+      // Find clone flags from creation records
+      ts.clone_flags = 0;
+      for (const auto& record : thread_create_records) {
+        if (record.tid == tid) {
+          ts.clone_flags = record.clone_flags;
+          ts.stack_addr = record.stack_addr;
+          ts.ptid = record.ptid;
+          break;
+        }
+      }
+
+      ts.is_main = (tid == pid);
+      threads.push_back(ts);
+
+      LOG_TRACE("Saved thread %d (main=%d) registers", tid, ts.is_main);
+    } else {
+      LOG_WARN("Failed to get registers for thread %d", tid);
+    }
+  }
+
+  if (!threads.empty()) {
+    main_tid = pid;
+    current_thread_idx = 0;
+  }
+
+  LOG_INFO("Saved state for %zu threads in process %d", threads.size(), pid);
+
+  // Get main thread registers (for backward compatibility)
   struct user_regs_struct regs;
   ptrace(PTRACE_GETREGS, pid, NULL, &regs);
 
@@ -987,6 +1141,78 @@ bool tracee_state::metadata_equal(const tracee_state &other) const
   };
 
   return serialize_to_string(*this) == serialize_to_string(other);
+}
+
+/* ======================================================================
+ * Section 8.5: Thread Management Methods
+ * ====================================================================== */
+
+void tracee_state::add_thread(pid_t tid, uint64_t clone_flags, uint64_t stack, pid_t ptid, bool is_main)
+{
+  thread_state ts;
+  ts.tid = tid;
+  ts.clone_flags = clone_flags;
+  ts.stack_addr = stack;
+  ts.ptid = ptid;
+  ts.is_main = is_main;
+
+  // Record creation info
+  thread_create_info record;
+  record.tid = tid;
+  record.clone_flags = clone_flags;
+  record.stack_addr = stack;
+  record.ptid = ptid;
+  thread_create_records.push_back(record);
+
+  threads.push_back(ts);
+
+  if (is_main) {
+    main_tid = tid;
+  }
+
+  LOG_INFO("Added thread %d (main=%d, flags=0x%lx)", tid, is_main, clone_flags);
+}
+
+void tracee_state::remove_thread(pid_t tid)
+{
+  // Remove from threads vector
+  for (auto it = threads.begin(); it != threads.end(); ++it) {
+    if (it->tid == tid) {
+      threads.erase(it);
+      LOG_INFO("Removed thread %d from state", tid);
+      break;
+    }
+  }
+}
+
+thread_state* tracee_state::find_thread(pid_t tid)
+{
+  for (auto& ts : threads) {
+    if (ts.tid == tid) {
+      return &ts;
+    }
+  }
+  return nullptr;
+}
+
+const thread_state* tracee_state::find_thread(pid_t tid) const
+{
+  for (const auto& ts : threads) {
+    if (ts.tid == tid) {
+      return &ts;
+    }
+  }
+  return nullptr;
+}
+
+int tracee_state::find_thread_index(pid_t tid) const
+{
+  for (size_t i = 0; i < threads.size(); i++) {
+    if (threads[i].tid == tid) {
+      return i;
+    }
+  }
+  return -1;
 }
 
 /* ======================================================================
