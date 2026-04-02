@@ -707,21 +707,24 @@ void tracee_state::recover_running_state(int index, hash_type ts_hash) const
     }
   }
 
-  // Step 3: Restore registers for all existing threads
-  for (const auto& target_ts : threads) {
-    pid_t tid = target_ts.tid;
+  // Step 3: Restore registers for all threads
+  // After thread creation, we have current_threads list matching our threads vector
+  // Map virtual TIDs (index+1) to physical TIDs from current thread list
+  current_threads = get_thread_list(main_pid);
+  std::sort(current_threads.begin(), current_threads.end());
 
-    // Check if thread still exists (might have been recreated with different tid)
-    if (!is_thread_in_process(main_pid, tid)) {
-      LOG_WARN("Thread %d no longer exists, skipping register restore", tid);
-      continue;
-    }
+  for (size_t i = 0; i < threads.size() && i < current_threads.size(); i++) {
+    const auto& target_ts = threads[i];
+    pid_t physical_tid = current_threads[i];
+    int virtual_tid = target_ts.tid;
 
-    // Restore registers
-    if (ptrace(PTRACE_SETREGS, tid, NULL, (void*)&target_ts.regs) == 0) {
-      LOG_TRACE("Restored registers for thread %d", tid);
+    // Restore registers for this thread
+    if (ptrace(PTRACE_SETREGS, physical_tid, NULL, (void*)&target_ts.regs) == 0) {
+      LOG_TRACE("Restored registers for virtual thread %d (physical %d)",
+                virtual_tid, physical_tid);
     } else {
-      LOG_ERROR("Failed to restore registers for thread %d: %s", tid, strerror(errno));
+      LOG_ERROR("Failed to restore registers for virtual thread %d (physical %d): %s",
+                virtual_tid, physical_tid, strerror(errno));
     }
   }
 
@@ -935,21 +938,23 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
 
   // ========================================================================
   // Multi-threading support: save all thread registers
+  // Use virtual TIDs (thread indices + 1) for consistency across save/restore
   // ========================================================================
   threads.clear();
   auto thread_list = get_thread_list(pid);
 
-  for (pid_t tid : thread_list) {
+  int virtual_tid = 1;
+  for (pid_t physical_tid : thread_list) {
     struct user_regs_struct thread_regs;
-    if (ptrace(PTRACE_GETREGS, tid, NULL, &thread_regs) == 0) {
+    if (ptrace(PTRACE_GETREGS, physical_tid, NULL, &thread_regs) == 0) {
       thread_state ts;
-      ts.tid = tid;
+      ts.tid = virtual_tid;  // Use virtual TID (index + 1)
       ts.regs = thread_regs;
 
-      // Find clone flags from creation records
+      // Find clone flags from creation records by virtual TID
       ts.clone_flags = 0;
       for (const auto& record : thread_create_records) {
-        if (record.tid == tid) {
+        if ((int)record.tid == ts.tid) {
           ts.clone_flags = record.clone_flags;
           ts.stack_addr = record.stack_addr;
           ts.ptid = record.ptid;
@@ -957,18 +962,32 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
         }
       }
 
-      ts.is_main = (tid == pid);
+      ts.is_main = (physical_tid == pid);
       threads.push_back(ts);
 
-      LOG_TRACE("Saved thread %d (main=%d) registers", tid, ts.is_main);
+      LOG_TRACE("Saved thread physical=%d virtual=%d (main=%d) registers",
+                physical_tid, ts.tid, ts.is_main);
     } else {
-      LOG_WARN("Failed to get registers for thread %d", tid);
+      LOG_WARN("Failed to get registers for thread %d", physical_tid);
     }
+    virtual_tid++;
   }
 
   if (!threads.empty()) {
-    main_tid = pid;
-    current_thread_idx = 0;
+    main_tid = 1;  // Main thread is always virtual TID 1
+    // Use the currently selected thread index from ptmc_state
+    int tracee_idx = -1;
+    for (int i = 0; i < NP; i++) {
+      if (ptmc_state.pids[i] == pid) {
+        tracee_idx = i;
+        break;
+      }
+    }
+    if (tracee_idx >= 0) {
+      current_thread_idx = ptmc_state.current_thread_idx[tracee_idx];
+    } else {
+      current_thread_idx = 0;
+    }
   }
 
   LOG_INFO("Saved state for %zu threads in process %d", threads.size(), pid);
@@ -1147,18 +1166,21 @@ bool tracee_state::metadata_equal(const tracee_state &other) const
  * Section 8.5: Thread Management Methods
  * ====================================================================== */
 
-void tracee_state::add_thread(pid_t tid, uint64_t clone_flags, uint64_t stack, pid_t ptid, bool is_main)
+void tracee_state::add_thread(pid_t physical_tid, uint64_t clone_flags, uint64_t stack, pid_t ptid, bool is_main)
 {
+  // Assign virtual TID (thread index + 1) for consistency across save/restore
+  int virtual_tid = threads.size() + 1;
+
   thread_state ts;
-  ts.tid = tid;
+  ts.tid = virtual_tid;  // Use virtual TID
   ts.clone_flags = clone_flags;
   ts.stack_addr = stack;
   ts.ptid = ptid;
   ts.is_main = is_main;
 
-  // Record creation info
+  // Record creation info with virtual TID
   thread_create_info record;
-  record.tid = tid;
+  record.tid = virtual_tid;
   record.clone_flags = clone_flags;
   record.stack_addr = stack;
   record.ptid = ptid;
@@ -1167,10 +1189,11 @@ void tracee_state::add_thread(pid_t tid, uint64_t clone_flags, uint64_t stack, p
   threads.push_back(ts);
 
   if (is_main) {
-    main_tid = tid;
+    main_tid = virtual_tid;
   }
 
-  LOG_INFO("Added thread %d (main=%d, flags=0x%lx)", tid, is_main, clone_flags);
+  LOG_INFO("Added thread physical=%d virtual=%d (main=%d, flags=0x%lx)",
+           physical_tid, virtual_tid, is_main, clone_flags);
 }
 
 void tracee_state::remove_thread(pid_t tid)

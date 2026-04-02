@@ -18,6 +18,7 @@
 #include <sys/syscall.h>
 #include <sys/user.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #include <monitor.h>
 
@@ -113,6 +114,30 @@ static void on_syscall_enter(pid_t pid, int nr)
 
     case SYS_clone:;
       tracee_set_rdi(pid, tracee_get_rdi(pid) | CLONE_PTRACE);
+      break;
+
+    case SYS_clone3:;
+      {
+        // clone3 takes a struct clone_args *args and size_t size
+        // struct clone_args {
+        //     uint64_t flags;
+        //     uint64_t pidfd;
+        //     uint64_t child_tid;
+        //     uint64_t parent_tid;
+        //     uint64_t exit_signal;
+        //     uint64_t stack;
+        //     uint64_t stack_size;
+        //     ...
+        // };
+        uint64_t args_ptr = ptrace(PTRACE_PEEKUSER, pid,
+                                   offsetof(struct user_regs_struct, rdi), NULL);
+        // Read current flags from clone_args
+        uint64_t flags = ptrace(PTRACE_PEEKDATA, pid, args_ptr, NULL);
+        // Add CLONE_PTRACE flag
+        flags |= CLONE_PTRACE;
+        ptrace(PTRACE_POKEDATA, pid, args_ptr, flags);
+        LOG_INFO("Modified clone3 flags at %p to add CLONE_PTRACE", (void*)args_ptr);
+      }
       break;
 
     /* Do not allow process quit. While still allow thread quit(TODO). */
@@ -495,8 +520,13 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
         tracee_read_mem(pid, (void*)uaddr, &stackval, sizeof(int));
       }
 
+      // Use virtual TID (thread index + 1) instead of physical PID for futex state
+      // This ensures consistency across save/restore cycles
+      int thread_idx = ptmc_state.current_thread_idx[tracee_idx];
+      int virtual_tid = thread_idx + 1;  // +1 to avoid 0
+
       int result = child_state.futex_state->handle_futex(
-          pid, uaddr, futex_op, val, timeout, uaddr2, val3,
+          virtual_tid, uaddr, futex_op, val, timeout, uaddr2, val3,
           (futex_op & 0x7F) == FUTEX_WAIT || (futex_op & 0x7F) == FUTEX_WAIT_BITSET ? &stackval : nullptr);
 
       if (result < 0) {
@@ -510,9 +540,27 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
       }
 
       // Check if current thread is now waiting on futex
-      if (child_state.futex_state->is_thread_waiting(pid)) {
-        LOG_INFO("Thread %d is now waiting on futex at %p", pid, (void*)uaddr);
-        // Mark thread as blocked - scheduler should skip it
+      int op_type = futex_op & 0x7F;
+      if (op_type == FUTEX_WAIT || op_type == FUTEX_WAIT_BITSET) {
+        if (child_state.futex_state->is_thread_waiting(virtual_tid)) {
+          LOG_INFO("Thread %d (vTID %d) is now waiting on futex at %p", pid, virtual_tid, (void*)uaddr);
+          // Mark thread as blocked - scheduler should skip it
+          ptmc_state.thread_blocked[tracee_idx][thread_idx] = true;
+        }
+      } else if (op_type == FUTEX_WAKE || op_type == FUTEX_WAKE_BITSET) {
+        // Threads were woken up - clear their blocked flags
+        // result contains the number of threads woken
+        if (result > 0) {
+          LOG_DEBUG("FUTEX_WAKE waked %d threads, unblocking them", result);
+          // Get the list of waiters that were at this address
+          auto waiters = child_state.futex_state->get_waiters(uaddr);
+          for (pid_t waiter_vtid : waiters) {
+            int waiter_idx = waiter_vtid - 1;  // Convert back to 0-based index
+            if (waiter_idx >= 0 && waiter_idx < 64) {
+              ptmc_state.thread_blocked[tracee_idx][waiter_idx] = false;
+            }
+          }
+        }
       }
 
       return CKPT_YES;
@@ -597,24 +645,62 @@ int do_one_syscall(pid_t pid, syscall_info &si)
 }
 
 /* loaded, exec 1 STEP, not stored. Save Last syscall into `info` *
- * 1 STEP = critical syscall step */
+ * 1 STEP = critical syscall step
+ * For multi-threading: when current thread blocks, try other threads */
 int exec_once(const sys_state &s, syscall_info &info)
 {
   int index = ptmc_state.cursor;
-  pid_t pid = pids[index];
 
-  if (DISDEAD(s.status[index]))
-    return -1;
-  LOG_DEBUG("exec_once from state " HASH_FORMAT ":" HASH_FORMAT, s.ss_hash,
-            s.ts_hash[index]);
+  // Get number of threads for this tracee
+  const auto& threads = ptmc_state.running_state.child[index].threads;
+  int num_threads = threads.size();
+  if (num_threads == 0) num_threads = 1;  // At least main thread
 
-  while (true)
-  {
+  // Initialize thread_blocked from FutexState
+  auto futex_state = ptmc_state.running_state.child[index].futex_state;
+  if (futex_state) {
+    for (int i = 0; i < num_threads; i++) {
+      int vtid = i + 1;
+      ptmc_state.thread_blocked[index][i] = futex_state->is_thread_waiting(vtid);
+    }
+  } else {
+    memset(ptmc_state.thread_blocked[index], 0, sizeof(ptmc_state.thread_blocked[index]));
+  }
+
+  // Try each thread in round-robin fashion
+  for (int attempt = 0; attempt < num_threads; attempt++) {
+    int thread_idx = ptmc_state.current_thread_idx[index];
+
+    // Check if current thread is blocked on futex
+    bool thread_blocked = ptmc_state.thread_blocked[index][thread_idx];
+
+    if (thread_blocked) {
+      // Current thread is blocked, try next thread
+      int next_idx = (thread_idx + 1) % num_threads;
+      ptmc_state.set_current_thread(index, next_idx);
+      LOG_DEBUG("Thread %d blocked, switching to thread %d", thread_idx, next_idx);
+      continue;
+    }
+
+    // Get current thread TID
+    pid_t pid = ptmc_state.get_current_tid(index);
+    if (pid < 0) {
+      pid = pids[index];  // Fallback to main thread
+    }
+
+    if (DISDEAD(s.status[index]))
+      return -1;
+    LOG_DEBUG("exec_once from state " HASH_FORMAT ":" HASH_FORMAT " on TID %d (thread %d/%d)",
+              s.ss_hash, s.ts_hash[index], pid, thread_idx, num_threads);
+
     int result = do_one_syscall(pid, info);
 
     switch (result)
     {
       case CKPT_NO:
+        // Thread made progress but no checkpoint needed
+        // Continue executing same thread
+        attempt--;  // Don't count this as an attempt
         continue;
       case CKPT_DISCARD:
       case CKPT_YES:
@@ -629,7 +715,29 @@ int exec_once(const sys_state &s, syscall_info &info)
         return result;
     }
   }
-  return 0;
+
+  // Check if all threads have exited
+  bool all_exited = true;
+  for (int i = 0; i < num_threads; i++) {
+    pid_t tid = threads[i].tid;
+    // Check process status
+    int status = 0;
+    pid_t w = waitpid(tid, &status, WNOHANG);
+    if (w == 0 || (!WIFEXITED(status) && !WIFSIGNALED(status))) {
+      all_exited = false;
+      break;
+    }
+  }
+
+  if (all_exited) {
+    LOG_INFO("All %d threads have exited", num_threads);
+    ptmc_state.status[index] = dstatus_exit(0);
+    return CKPT_EXIT;
+  }
+
+  // All threads are blocked - this is a deadlock or completion
+  LOG_WARN("All %d threads are blocked, possible deadlock", num_threads);
+  return CKPT_YES;  // Save state to record the deadlock
 }
 
 TransitionResult state_transition(const sys_state &source_state,
@@ -719,13 +827,17 @@ syscall_info extract_one_syscall(pid_t pid)
     LOG_INFO("Modified clone flags to add CLONE_PTRACE");
   }
 
-  /* Handle clone3 similarly */
+  /* Handle clone3: modify clone_args.flags to add CLONE_PTRACE */
   if (ret.nr == SYS_clone3) {
-    // clone3 has a struct clone_args pointer in args[0]
-    // We need to read/modify the flags field in that struct
-    // For now, log that we saw it
-    LOG_INFO("clone3 syscall detected, flags=0x%lx", ret.args[1]);
-    // Note: Full clone3 support would require reading/writing the clone_args struct
+    uint64_t args_ptr = ret.args[0];
+    if (args_ptr != 0) {
+      // Read flags from clone_args (first field)
+      uint64_t flags = ptrace(PTRACE_PEEKDATA, pid, args_ptr, NULL);
+      // Add CLONE_PTRACE flag
+      flags |= 0x00002000; /* CLONE_PTRACE */
+      ptrace(PTRACE_POKEDATA, pid, args_ptr, flags);
+      LOG_INFO("Modified clone3 args at %p, flags=0x%lx", (void*)args_ptr, flags);
+    }
   }
 
   /* exit */
@@ -771,6 +883,64 @@ syscall_info extract_one_syscall(pid_t pid)
     tracee_set_orig_rax(pid, 0);
     LOG_INFO("Neutralize getcpu, return 0 and do nothing to arguments");
   }
+
+  /* Record new thread creation from clone/clone3 */
+  if ((ret.nr == SYS_clone || ret.nr == SYS_clone3) && ret.rval > 0)
+  {
+    pid_t new_tid = (pid_t)ret.rval;
+    LOG_INFO("New thread created: TID %d from parent %d", new_tid, pid);
+
+    // Record thread creation in tracee_state
+    int tracee_idx = ptmc_state.cursor;
+    if (tracee_idx >= 0 && tracee_idx < NP)
+    {
+      auto &child_state = ptmc_state.running_state.child[tracee_idx];
+
+      // Get clone flags from arguments
+      uint64_t clone_flags = 0;
+      uint64_t stack_addr = 0;
+      if (ret.nr == SYS_clone)
+      {
+        clone_flags = ret.args[0];
+        stack_addr = ret.args[1];
+      }
+      else if (ret.nr == SYS_clone3)
+      {
+        uint64_t args_ptr = ret.args[0];
+        if (args_ptr != 0)
+        {
+          clone_flags = ptrace(PTRACE_PEEKDATA, pid, args_ptr, NULL);
+          // stack is at offset 5*8 = 40 bytes in clone_args (after flags, pidfd, child_tid, parent_tid, exit_signal)
+          stack_addr = ptrace(PTRACE_PEEKDATA, pid, args_ptr + 40, NULL);
+        }
+      }
+
+      // Add thread to state
+      child_state.add_thread(new_tid, clone_flags, stack_addr, pid, false);
+
+      LOG_INFO("Recorded thread %d in tracee %d state (flags=0x%lx)",
+               new_tid, tracee_idx, clone_flags);
+    }
+
+    // Wait for the new thread to stop (SIGSTOP from CLONE_PTRACE)
+    int wstatus_new;
+    pid_t waited = waitpid(new_tid, &wstatus_new, WNOHANG);
+    if (waited == 0)
+    {
+      // Thread hasn't stopped yet, wait briefly
+      usleep(1000);
+      waited = waitpid(new_tid, &wstatus_new, WNOHANG);
+    }
+    if (waited == new_tid && WIFSTOPPED(wstatus_new))
+    {
+      LOG_INFO("New thread %d stopped with signal %d", new_tid, WSTOPSIG(wstatus_new));
+    }
+    else
+    {
+      LOG_WARN("New thread %d not in expected stopped state (waited=%d)", new_tid, waited);
+    }
+  }
+
   return ret;
 }
 

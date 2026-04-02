@@ -1,6 +1,9 @@
 #include "cereal/archives/binary.hpp"
+#include "cereal/types/map.hpp"
+#include "cereal/types/vector.hpp"
 #include "fd_manager.h"
 #include "fsstate.h"
+#include "futexstate.h"
 #include "sockstate.h"
 #include "state.h"
 
@@ -13,7 +16,18 @@ void syscall_info::serialize(Archive &ar)
 template <class Archive>
 void tracee_state::serialize(Archive &ar)
 {
-  ar(si, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state, raft_state, fd_manager_state);
+  // Serialize futex_state pointer specially
+  bool has_futex = (futex_state != nullptr);
+  ar(has_futex);
+  if (has_futex) {
+    if (Archive::is_loading::value && futex_state == nullptr) {
+      futex_state = new FutexState();
+    }
+    ar(*futex_state);
+  }
+
+  ar(si, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state, raft_state, fd_manager_state,
+     threads, thread_create_records, main_tid, current_thread_idx);
 }
 
 template <class Archive>

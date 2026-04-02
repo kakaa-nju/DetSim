@@ -2256,10 +2256,17 @@ pid_t PTMC_STATE::get_current_tid(int tracee_idx) const
   int tidx = current_thread_idx[tracee_idx];
 
   if (tidx >= 0 && tidx < (int)threads.size()) {
-    return threads[tidx].tid;
+    // Virtual TID is threads[tidx].tid (which is tidx + 1)
+    // Need to map to physical TID from actual thread list
+    auto physical_threads = get_thread_list(pids[tracee_idx]);
+    std::sort(physical_threads.begin(), physical_threads.end());
+
+    if (tidx < (int)physical_threads.size()) {
+      return physical_threads[tidx];
+    }
   }
 
-  // Fallback to main pid if no threads recorded
+  // Fallback to main pid if no threads recorded or index out of range
   return pids[tracee_idx];
 }
 
