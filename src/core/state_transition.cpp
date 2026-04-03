@@ -738,9 +738,19 @@ bool handle_thread_exit(pid_t pid, pid_t wait_result, int wstatus, syscall_info 
   return true;
 }
 
-/* loaded, exec 1 STEP, not stored. Save Last syscall into `info` *
- * 1 STEP = critical syscall step
- * For multi-threading: when current thread blocks, try other threads */
+/**
+ * @brief Execute one critical syscall step for the current tracee
+ *
+ * This function implements the multi-threaded scheduling logic:
+ * 1. Initialize thread state arrays (blocked/exited) from saved state
+ * 2. Handle edge case: process marked exited but has live threads (load scenario)
+ * 3. Try each thread in round-robin until one makes progress
+ * 4. Handle case where all threads are blocked or exited
+ *
+ * @param s Current system state (for status checking)
+ * @param info Output: syscall information for the step that was executed
+ * @return CKPT_YES/CKPT_NO/CKPT_EXIT/CKPT_STOP based on result
+ */
 int exec_once(const sys_state &s, syscall_info &info)
 {
   int index = ptmc_state.cursor;
@@ -750,11 +760,16 @@ int exec_once(const sys_state &s, syscall_info &info)
   int num_threads = threads.size();
   if (num_threads == 0) num_threads = 1;  // At least main thread
 
-  // Initialize thread_blocked from FutexState
+  /*
+   * Step 1: Initialize thread state arrays from saved state
+   *
+   * thread_blocked[i]: true if thread i is waiting on a futex
+   * thread_exited[i]: true if thread i has exited (physical_tid == 0)
+   */
   auto futex_state = ptmc_state.running_state.child[index].futex_state;
   if (futex_state) {
     for (int i = 0; i < num_threads; i++) {
-      int vtid = i + 1;
+      int vtid = i + 1;  // Virtual TID is 1-based
       ptmc_state.thread_blocked[index][i] = futex_state->is_thread_waiting(vtid);
     }
   } else {
@@ -770,11 +785,12 @@ int exec_once(const sys_state &s, syscall_info &info)
     }
   }
 
-  // Also reset ptmc_state.status if process was marked exited but we're loading a state
-  // with live threads (e.g., via load command). This ensures we can continue execution
-  // from a loaded state that has live threads.
+  /*
+   * Step 2: Handle edge case - process was marked exited but we're loading
+   * a state with live threads. This can happen when using the 'load' command
+   * to go back to a previous state.
+   */
   if (DISDEAD(ptmc_state.status[index])) {
-    // Check if any threads are actually alive in the saved state
     bool has_live_threads = false;
     for (int i = 0; i < num_threads; i++) {
       if (i < (int)threads.size() && threads[i].physical_tid != 0) {
@@ -788,7 +804,16 @@ int exec_once(const sys_state &s, syscall_info &info)
     }
   }
 
-  // Try each thread in round-robin fashion
+  /*
+   * Step 3: Try each thread in round-robin fashion until one makes progress
+   *
+   * We skip threads that are:
+   * - Blocked on a futex (waiting for wakeup)
+   * - Already exited
+   *
+   * If a thread makes progress without needing a checkpoint (CKPT_NO),
+   * we continue executing the same thread (round-robin within thread).
+   */
   for (int attempt = 0; attempt < num_threads; attempt++) {
     int thread_idx = ptmc_state.current_thread_idx[index];
 
@@ -844,7 +869,15 @@ int exec_once(const sys_state &s, syscall_info &info)
     }
   }
 
-  // Check if all threads have exited (using thread_exited array)
+  /*
+   * Step 4: Handle case where no thread could make progress
+   *
+   * This happens when all threads are either:
+   * - Exited (all_exited = true) -> return CKPT_EXIT
+   * - Blocked on futex -> possible deadlock, save state anyway
+   */
+
+  // Check if all threads have exited
   bool all_exited = true;
   for (int i = 0; i < num_threads; i++) {
     if (!ptmc_state.thread_exited[index][i]) {
@@ -859,9 +892,10 @@ int exec_once(const sys_state &s, syscall_info &info)
     return CKPT_EXIT;
   }
 
-  // All threads are blocked - this is a deadlock or completion
+  // All threads are blocked on futex - this may be a deadlock
+  // Save state anyway so the user can investigate
   LOG_WARN("All %d threads are blocked, possible deadlock", num_threads);
-  return CKPT_YES;  // Save state to record the deadlock
+  return CKPT_YES;
 }
 
 TransitionResult state_transition(const sys_state &source_state,
