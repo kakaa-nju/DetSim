@@ -261,7 +261,15 @@ typedef struct tracee_state
   /* Recover memory and registers */
   void recover_mem_reg_snapshot(std::vector<maps_item> &maps, hash_type ts_hash, int pid) const;
 
+  /* ---------------------------------------------------------
+   * Thread Recovery Helpers
+   * --------------------------------------------------------- */
+private:
+  void terminate_extra_threads(pid_t main_pid, int threads_to_terminate) const;
+  void create_missing_threads(pid_t main_pid) const;
+  void restore_thread_registers(pid_t main_pid) const;
 
+public:
   /* ---------------------------------------------------------
    * Serialization
    * --------------------------------------------------------- */

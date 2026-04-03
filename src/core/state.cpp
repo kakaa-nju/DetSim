@@ -608,86 +608,56 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps,
 }
 
 /* Main entry: recover running state for a process */
-void tracee_state::recover_running_state(int index, hash_type ts_hash) const
+/* Helper: Terminate threads that shouldn't exist during recovery */
+void tracee_state::terminate_extra_threads(pid_t main_pid, int threads_to_terminate) const
 {
-  pid_t main_pid = ptmc_state.pids[index];
-  std::vector<maps_item> maps;
-  restore_memory_mappings(ts_hash, main_pid, maps);
-
-  /* Restore brk (heap) - must be done before restoring memory content */
-  tracee_do_syscall(main_pid, SYS_brk, brk, 0, 0, 0, 0, 0);
-  LOG_DEBUG("restored brk = 0x%x", brk);
-
-  recover_mem_reg_snapshot(maps, ts_hash, main_pid);
-
-  /* ======================================================================
-   * Multi-threading support: restore thread state
-   * ====================================================================== */
-
-  // Count non-exited threads in saved state
-  size_t saved_live_thread_count = 0;
-  for (const auto& ts : threads) {
-    if (ts.physical_tid != 0) {
-      saved_live_thread_count++;
-    }
-  }
-
-  // Get current thread list
   auto current_threads = get_thread_list(main_pid);
 
-  LOG_INFO("Recovering threads for process %d: current=%zu, saved_live=%zu, saved_total=%zu",
-           index, current_threads.size(), saved_live_thread_count, threads.size());
+  for (pid_t current_tid : current_threads) {
+    if (threads_to_terminate <= 0) break;
 
-  // Step 1: Terminate threads that shouldn't exist
-  // Compare current physical thread count with saved non-exited thread count
-  if (current_threads.size() > saved_live_thread_count) {
-    int threads_to_terminate = current_threads.size() - saved_live_thread_count;
-    LOG_INFO("Need to terminate %d threads", threads_to_terminate);
+    // Don't terminate the main thread
+    if (current_tid == main_pid) {
+      continue;
+    }
 
-    for (pid_t current_tid : current_threads) {
-      if (threads_to_terminate <= 0) break;
-
-      // Don't terminate the main thread
-      if (current_tid == main_pid) {
-        continue;
+    // Check if this physical TID is in the saved state as a live thread
+    bool should_exist = false;
+    for (const auto& ts : threads) {
+      if (ts.physical_tid == current_tid) {
+        should_exist = true;
+        break;
       }
+    }
 
-      // Check if this physical TID is in the saved state as a live thread
-      bool should_exist = false;
-      for (const auto& ts : threads) {
-        if (ts.physical_tid == current_tid) {
-          should_exist = true;
-          break;
-        }
-      }
+    if (should_exist) {
+      continue;  // This thread should exist, skip
+    }
 
-      if (should_exist) {
-        continue;  // This thread should exist, skip
-      }
+    LOG_INFO("Terminating thread %d", current_tid);
 
-      LOG_INFO("Terminating thread %d", current_tid);
-
-      // Use tracee_do_syscall to make the thread call exit
-      int status;
-      pid_t result = waitpid(current_tid, &status, WNOHANG);
-      if (result == 0) {
-        // Thread is running, we need to stop it first
-        LOG_WARN("Thread %d is running, cannot terminate cleanly", current_tid);
-      } else if (result == current_tid) {
-        // Thread has stopped or exited
-        if (WIFSTOPPED(status)) {
-          // Thread is stopped, we can make it exit
-          tracee_do_syscall(current_tid, SYS_exit, 0, 0, 0, 0, 0, 0);
-          LOG_INFO("Terminated thread %d via exit syscall", current_tid);
-          threads_to_terminate--;
-        }
+    // Use tracee_do_syscall to make the thread call exit
+    int status;
+    pid_t result = waitpid(current_tid, &status, WNOHANG);
+    if (result == 0) {
+      // Thread is running, we need to stop it first
+      LOG_WARN("Thread %d is running, cannot terminate cleanly", current_tid);
+    } else if (result == current_tid) {
+      // Thread has stopped or exited
+      if (WIFSTOPPED(status)) {
+        // Thread is stopped, we can make it exit
+        tracee_do_syscall(current_tid, SYS_exit, 0, 0, 0, 0, 0, 0);
+        LOG_INFO("Terminated thread %d via exit syscall", current_tid);
+        threads_to_terminate--;
       }
     }
   }
+}
 
-  // Step 2: Create threads that don't exist
-  // We need to create threads for saved threads that don't have a corresponding physical thread
-  current_threads = get_thread_list(main_pid);
+/* Helper: Create threads that don't exist during recovery */
+void tracee_state::create_missing_threads(pid_t main_pid) const
+{
+  auto current_threads = get_thread_list(main_pid);
   std::set<pid_t> current_tids(current_threads.begin(), current_threads.end());
 
   for (const auto& target_ts : threads) {
@@ -743,10 +713,12 @@ void tracee_state::recover_running_state(int index, hash_type ts_hash) const
       LOG_WARN("No clone flags for thread %d, cannot recreate", target_ts.tid);
     }
   }
+}
 
-  // Step 3: Restore registers for all threads
-  // Map saved threads to current physical threads using stored physical_tid
-  current_threads = get_thread_list(main_pid);
+/* Helper: Restore registers for all threads during recovery */
+void tracee_state::restore_thread_registers(pid_t main_pid) const
+{
+  auto current_threads = get_thread_list(main_pid);
 
   for (const auto& target_ts : threads) {
     // Skip exited threads
@@ -787,6 +759,50 @@ void tracee_state::recover_running_state(int index, hash_type ts_hash) const
       LOG_WARN("Could not find physical thread for virtual thread %d", target_ts.tid);
     }
   }
+}
+
+void tracee_state::recover_running_state(int index, hash_type ts_hash) const
+{
+  pid_t main_pid = ptmc_state.pids[index];
+  std::vector<maps_item> maps;
+  restore_memory_mappings(ts_hash, main_pid, maps);
+
+  /* Restore brk (heap) - must be done before restoring memory content */
+  tracee_do_syscall(main_pid, SYS_brk, brk, 0, 0, 0, 0, 0);
+  LOG_DEBUG("restored brk = 0x%x", brk);
+
+  recover_mem_reg_snapshot(maps, ts_hash, main_pid);
+
+  /* ======================================================================
+   * Multi-threading support: restore thread state
+   * ====================================================================== */
+
+  // Count non-exited threads in saved state
+  size_t saved_live_thread_count = 0;
+  for (const auto& ts : threads) {
+    if (ts.physical_tid != 0) {
+      saved_live_thread_count++;
+    }
+  }
+
+  // Get current thread list
+  auto current_threads = get_thread_list(main_pid);
+
+  LOG_INFO("Recovering threads for process %d: current=%zu, saved_live=%zu, saved_total=%zu",
+           index, current_threads.size(), saved_live_thread_count, threads.size());
+
+  // Step 1: Terminate threads that shouldn't exist
+  if (current_threads.size() > saved_live_thread_count) {
+    int threads_to_terminate = current_threads.size() - saved_live_thread_count;
+    LOG_INFO("Need to terminate %d threads", threads_to_terminate);
+    terminate_extra_threads(main_pid, threads_to_terminate);
+  }
+
+  // Step 2: Create threads that don't exist
+  create_missing_threads(main_pid);
+
+  // Step 3: Restore registers for all threads
+  restore_thread_registers(main_pid);
 
   // Restore current thread index
   ptmc_state.current_thread_idx[index] = current_thread_idx;
