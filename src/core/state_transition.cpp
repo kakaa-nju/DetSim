@@ -182,62 +182,86 @@ int analyze_choose(struct syscall_info &info)
 }
 
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui();
+
+/* ======================================================================
+ * Choice Handling
+ * ====================================================================== */
+
+static void handle_user_choice()
+{
+  // Check if there's a preset choice from batch file
+  if (ptmc_state.batch_choice_preset >= 0 &&
+      ptmc_state.batch_choice_preset < ptmc_state.n_choose)
+  {
+    ptmc_state.choose = ptmc_state.batch_choice_preset;
+    ptmc_state.batch_choice_preset = -1; // Clear preset after use
+    UI_LOG_INFO("Using batch preset choice: %d", ptmc_state.choose);
+    return;
+  }
+
+  detsim::ui::NCursesUI *ui = get_ncurses_ui();
+  if (ui)
+  {
+    /* Use NCursesUI prompt */
+    char prompt_buf[256];
+    snprintf(prompt_buf, sizeof(prompt_buf), "Choose from %d options",
+             ptmc_state.n_choose);
+    ptmc_state.choose =
+        ui->prompt_int(prompt_buf, 0, 0, ptmc_state.n_choose - 1);
+  }
+  else
+  {
+    /* Fallback to readline */
+    static char *line_read;
+    UI_LOG_INFO("Here comes with %d choices.", ptmc_state.n_choose);
+    line_read = readline("You choose? [0, N): ");
+    while (sscanf(line_read, "%d", &ptmc_state.choose) != 1 ||
+           ptmc_state.choose < 0 ||
+           ptmc_state.choose >= ptmc_state.n_choose)
+    {
+      free(line_read);
+      line_read = readline("Please make legal choice: ");
+    }
+    free(line_read);
+  }
+}
+
+static void handle_auto_choice()
+{
+  if (ptmc_state.n_choose == 0)
+    return;
+
+  switch (ptmc_state.mode)
+  {
+    case PTMC_STATE::MODE_RAND:
+      ptmc_state.choose = rand() % ptmc_state.n_choose;
+      break;
+    case PTMC_STATE::MODE_DFS:
+      if (ptmc_state.choose < 0)
+      {
+        ptmc_state.choose = rand() % ptmc_state.n_choose;
+      }
+      break;
+    default:
+      break;
+  }
+}
+
 /* parse syscall_info */
 static int on_syscall_exit(pid_t pid, struct syscall_info &info)
 {
   /* calculate choose_n from context */
   ptmc_state.n_choose = analyze_choose(info);
 
-  if (!is_auto_mode() && ptmc_state.n_choose != 0) /* ask for choose */
+  if (ptmc_state.n_choose != 0)
   {
-    // Check if there's a preset choice from batch file
-    if (ptmc_state.batch_choice_preset >= 0 &&
-        ptmc_state.batch_choice_preset < ptmc_state.n_choose)
+    if (is_auto_mode())
     {
-      ptmc_state.choose = ptmc_state.batch_choice_preset;
-      ptmc_state.batch_choice_preset = -1; // Clear preset after use
-      UI_LOG_INFO("Using batch preset choice: %d", ptmc_state.choose);
+      handle_auto_choice();
     }
     else
     {
-      detsim::ui::NCursesUI *ui = get_ncurses_ui();
-      if (ui)
-      {
-        /* Use NCursesUI prompt */
-        char prompt_buf[256];
-        snprintf(prompt_buf, sizeof(prompt_buf), "Choose from %d options",
-                 ptmc_state.n_choose);
-        ptmc_state.choose =
-            ui->prompt_int(prompt_buf, 0, 0, ptmc_state.n_choose - 1);
-      }
-      else
-      {
-        /* Fallback to readline */
-        static char *line_read;
-        UI_LOG_INFO("Here comes with %d choices.", ptmc_state.n_choose);
-        line_read = readline("You choose? [0, N): ");
-        while (sscanf(line_read, "%d", &ptmc_state.choose) != 1 ||
-               ptmc_state.choose < 0 ||
-               ptmc_state.choose >= ptmc_state.n_choose)
-        {
-          free(line_read);
-          line_read = readline("Please make legal choice: ");
-        }
-        free(line_read);
-      }
-    }
-  }
-  else if (is_auto_mode() && ptmc_state.n_choose != 0 &&
-           ptmc_state.mode == PTMC_STATE::MODE_RAND)
-  {
-    ptmc_state.choose = rand() % ptmc_state.n_choose;
-  }
-  else if (is_auto_mode() && ptmc_state.n_choose != 0 &&
-           ptmc_state.mode == PTMC_STATE::MODE_DFS)
-  {
-    if (ptmc_state.choose < 0)
-    {
-      ptmc_state.choose = rand() % ptmc_state.n_choose;
+      handle_user_choice();
     }
   }
 
