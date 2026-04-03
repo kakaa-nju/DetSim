@@ -604,6 +604,22 @@ bool state_to_be_discarded(int index, syscall_info *infos)
 }
 
 /* auto mode: */
+/**
+ * @brief Execute Breadth-First Search (BFS) state space exploration
+ *
+ * This function implements BFS exploration:
+ * 1. Initialize statistics and reset StateStore
+ * 2. Add initial state to queue
+ * 3. While queue not empty:
+ *    - Pop state from queue
+ *    - For each alive process:
+ *      - Execute state transition
+ *      - If new state found, add to queue
+ *    - Check for illegal states
+ * 4. Report final statistics
+ *
+ * @return 0 on completion, 1 if stopped early
+ */
 int exec_bfs()
 {
   ptmc_state.mode = PTMC_STATE::MODE_BFS;
@@ -805,6 +821,20 @@ struct DFSFrame
   }
 };
 
+/**
+ * @brief Recursive DFS state space exploration
+ *
+ * Recursively explores the state space depth-first:
+ * 1. Track visited states to avoid revisiting
+ * 2. Stop if max depth reached
+ * 3. For each alive process, try all choice combinations
+ * 4. Recursively explore each new state
+ * 5. Check for illegal states and SIGINT
+ *
+ * @param ss_hash Hash of current state to explore
+ * @param depth Remaining depth to explore
+ * @return 0 on completion, 1 if stopped early
+ */
 int do_dfs(hash_type ss_hash, int depth)
 {
   states_searched_this_run++;
