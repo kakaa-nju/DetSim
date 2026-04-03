@@ -2256,18 +2256,38 @@ pid_t PTMC_STATE::get_current_tid(int tracee_idx) const
   int tidx = current_thread_idx[tracee_idx];
 
   if (tidx >= 0 && tidx < (int)threads.size()) {
-    // Virtual TID is threads[tidx].tid (which is tidx + 1)
-    // Need to map to physical TID from actual thread list
-    auto physical_threads = get_thread_list(pids[tracee_idx]);
-    std::sort(physical_threads.begin(), physical_threads.end());
-
-    if (tidx < (int)physical_threads.size()) {
-      return physical_threads[tidx];
+    // Use the stored physical_tid from thread_state
+    pid_t physical_tid = threads[tidx].physical_tid;
+    if (physical_tid > 0) {
+      return physical_tid;
     }
   }
 
   // Fallback to main pid if no threads recorded or index out of range
   return pids[tracee_idx];
+}
+
+pid_t PTMC_STATE::get_thread_tid(int tracee_idx, int thread_idx) const
+{
+  if (tracee_idx < 0 || tracee_idx >= NP) return -1;
+
+  const auto& threads = running_state.child[tracee_idx].threads;
+  if (thread_idx < 0 || thread_idx >= (int)threads.size()) {
+    return -1;
+  }
+
+  // Use the stored physical_tid from thread_state
+  pid_t physical_tid = threads[thread_idx].physical_tid;
+  if (physical_tid > 0) {
+    return physical_tid;
+  }
+
+  // Fallback: if thread index is 0, return main pid
+  if (thread_idx == 0) {
+    return pids[tracee_idx];
+  }
+
+  return -1;
 }
 
 void PTMC_STATE::set_current_thread(int tracee_idx, int thread_idx)

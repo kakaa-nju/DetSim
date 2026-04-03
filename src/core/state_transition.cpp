@@ -140,10 +140,13 @@ static void on_syscall_enter(pid_t pid, int nr)
       }
       break;
 
-    /* Do not allow process quit. While still allow thread quit(TODO). */
+    /* Do not allow process exit_group, but allow thread exit (SYS_exit).
+     * SYS_exit is handled in do_one_syscall to properly clean up thread state. */
     case SYS_exit_group:
-    case SYS_exit:
       do_nosys(pid);
+      break;
+    case SYS_exit:
+      /* Allow SYS_exit to execute - thread cleanup happens after syscall completes */
       break;
 
     /* act normally. SYS_sched_yield is preserved for state check */
@@ -543,9 +546,11 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
       int op_type = futex_op & 0x7F;
       if (op_type == FUTEX_WAIT || op_type == FUTEX_WAIT_BITSET) {
         if (child_state.futex_state->is_thread_waiting(virtual_tid)) {
-          LOG_INFO("Thread %d (vTID %d) is now waiting on futex at %p", pid, virtual_tid, (void*)uaddr);
+          LOG_INFO("Thread %d (vTID %d) is now waiting on futex at %p - DISCARDING this execution", pid, virtual_tid, (void*)uaddr);
           // Mark thread as blocked - scheduler should skip it
           ptmc_state.thread_blocked[tracee_idx][thread_idx] = true;
+          // Return CKPT_DISCARD to cancel this execution and roll back state
+          return CKPT_DISCARD;
         }
       } else if (op_type == FUTEX_WAKE || op_type == FUTEX_WAKE_BITSET) {
         // Threads were woken up - clear their blocked flags
@@ -630,11 +635,59 @@ int do_one_syscall(pid_t pid, syscall_info &si)
   for (int i = 0; i < 6; i++)
     si.args[i] = info.entry.args[i];
 
-  if (si.nr == SYS_exit || si.nr == SYS_exit_group)
+  /* Mark process as exited only for exit_group, not for single thread exit */
+  if (si.nr == SYS_exit_group)
     ptmc_state.status[ptmc_state.cursor] = dstatus_exit(info.entry.args[0]);
 
   /* exit */
   ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
+
+  /* Special handling for SYS_exit: the thread will actually exit, not stop with SIGTRAP */
+  if (si.nr == SYS_exit) {
+    pid_t wait_result = waitpid(pid, &wstatus, 0);
+    if (wait_result == pid && (WIFEXITED(wstatus) || WIFSIGNALED(wstatus))) {
+      /* Thread has exited - mark thread as exited but keep process running */
+      int tracee_idx = ptmc_state.cursor;
+      auto &child_state = ptmc_state.running_state.child[tracee_idx];
+
+      /* Find the exited thread index */
+      int exited_thread_idx = -1;
+      for (int i = 0; i < (int)child_state.threads.size(); i++) {
+        pid_t thread_tid = ptmc_state.get_thread_tid(tracee_idx, i);
+        if (thread_tid == pid) {
+          exited_thread_idx = i;
+          break;
+        }
+      }
+
+      if (exited_thread_idx >= 0) {
+        /* Mark thread as exited in ptmc_state */
+        ptmc_state.thread_exited[tracee_idx][exited_thread_idx] = true;
+        /* Also mark in child_state */
+        int virtual_tid = exited_thread_idx + 1;
+        child_state.remove_thread(virtual_tid);
+        LOG_INFO("Thread %d (PID %d) exited, marked as exited", virtual_tid, pid);
+      } else {
+        LOG_WARN("Exited thread PID %d not found in state", pid);
+      }
+
+      /* Return CKPT_NO to continue with other threads */
+      si.rval = 0;
+      return CKPT_NO;
+    } else if (wait_result == pid && WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == PTRACE_TRAP_SIG) {
+      /* Thread didn't actually exit (maybe exit was prevented) - continue normally */
+      ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(info), &info);
+      if (info.op == PTRACE_SYSCALL_INFO_EXIT) {
+        si.rval = info.exit.rval;
+        return on_syscall_exit(pid, si);
+      }
+    }
+    /* Unexpected state - fall through to error handling */
+    LOG_ERROR("Unexpected waitpid result for SYS_exit: pid=%d, wstatus=%d", wait_result, wstatus);
+    return CKPT_STOP;
+  }
+
+  /* Normal syscall exit handling for non-SYS_exit syscalls */
   waitpid(pid, &wstatus, 0);
   assert(WIFSTOPPED(wstatus) && (WSTOPSIG(wstatus) == PTRACE_TRAP_SIG));
 
@@ -667,6 +720,33 @@ int exec_once(const sys_state &s, syscall_info &info)
     memset(ptmc_state.thread_blocked[index], 0, sizeof(ptmc_state.thread_blocked[index]));
   }
 
+  // Initialize thread_exited from threads vector (physical_tid == 0 means exited)
+  for (int i = 0; i < num_threads; i++) {
+    if (i < (int)threads.size()) {
+      ptmc_state.thread_exited[index][i] = (threads[i].physical_tid == 0);
+    } else {
+      ptmc_state.thread_exited[index][i] = false;
+    }
+  }
+
+  // Also reset ptmc_state.status if process was marked exited but we're loading a state
+  // with live threads (e.g., via load command). This ensures we can continue execution
+  // from a loaded state that has live threads.
+  if (DISDEAD(ptmc_state.status[index])) {
+    // Check if any threads are actually alive in the saved state
+    bool has_live_threads = false;
+    for (int i = 0; i < num_threads; i++) {
+      if (i < (int)threads.size() && threads[i].physical_tid != 0) {
+        has_live_threads = true;
+        break;
+      }
+    }
+    if (has_live_threads) {
+      LOG_INFO("Process %d was marked exited but loaded state has live threads, resetting status", index);
+      ptmc_state.status[index] = dstatus_normal();  // Reset to running state
+    }
+  }
+
   // Try each thread in round-robin fashion
   for (int attempt = 0; attempt < num_threads; attempt++) {
     int thread_idx = ptmc_state.current_thread_idx[index];
@@ -674,11 +754,18 @@ int exec_once(const sys_state &s, syscall_info &info)
     // Check if current thread is blocked on futex
     bool thread_blocked = ptmc_state.thread_blocked[index][thread_idx];
 
-    if (thread_blocked) {
-      // Current thread is blocked, try next thread
+    // Check if current thread has exited
+    bool thread_exited = ptmc_state.thread_exited[index][thread_idx];
+
+    if (thread_blocked || thread_exited) {
+      // Current thread is blocked or exited, try next thread
       int next_idx = (thread_idx + 1) % num_threads;
       ptmc_state.set_current_thread(index, next_idx);
-      LOG_DEBUG("Thread %d blocked, switching to thread %d", thread_idx, next_idx);
+      if (thread_blocked) {
+        LOG_DEBUG("Thread %d blocked, switching to thread %d", thread_idx, next_idx);
+      } else {
+        LOG_DEBUG("Thread %d exited, switching to thread %d", thread_idx, next_idx);
+      }
       continue;
     }
 
@@ -716,14 +803,10 @@ int exec_once(const sys_state &s, syscall_info &info)
     }
   }
 
-  // Check if all threads have exited
+  // Check if all threads have exited (using thread_exited array)
   bool all_exited = true;
   for (int i = 0; i < num_threads; i++) {
-    pid_t tid = threads[i].tid;
-    // Check process status
-    int status = 0;
-    pid_t w = waitpid(tid, &status, WNOHANG);
-    if (w == 0 || (!WIFEXITED(status) && !WIFSIGNALED(status))) {
+    if (!ptmc_state.thread_exited[index][i]) {
       all_exited = false;
       break;
     }

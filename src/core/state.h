@@ -67,14 +67,15 @@ struct syscall_info
 /* Per-thread state for multi-threading support */
 struct thread_state
 {
-  pid_t tid;                      // Thread ID
+  pid_t tid;                      // Virtual TID (stable thread index + 1)
+  pid_t physical_tid;             // Physical TID (actual kernel thread ID)
   struct user_regs_struct regs;   // Register context
   uint64_t clone_flags;           // Clone flags used to create this thread
   uint64_t stack_addr;            // Stack address (for clone)
   pid_t ptid;                     // Parent thread TID
   bool is_main;                   // Whether this is the main thread
 
-  thread_state() : tid(0), clone_flags(0), stack_addr(0), ptid(0), is_main(false)
+  thread_state() : tid(0), physical_tid(0), clone_flags(0), stack_addr(0), ptid(0), is_main(false)
   {
     // regs will be zero-initialized by the default member initializer
   }
@@ -82,7 +83,7 @@ struct thread_state
   template <class Archive>
   void serialize(Archive &ar)
   {
-    ar(tid, regs.r15, regs.r14, regs.r13, regs.r12, regs.rbp, regs.rbx,
+    ar(tid, physical_tid, regs.r15, regs.r14, regs.r13, regs.r12, regs.rbp, regs.rbx,
        regs.r11, regs.r10, regs.r9, regs.r8, regs.rax, regs.rcx, regs.rdx,
        regs.rsi, regs.rdi, regs.orig_rax, regs.rip, regs.cs, regs.eflags,
        regs.rsp, regs.ss, regs.fs_base, regs.gs_base, regs.ds, regs.es,
@@ -93,7 +94,8 @@ struct thread_state
 /* Thread creation record for tracking clone parameters */
 struct thread_create_info
 {
-  pid_t tid;
+  pid_t virtual_tid;     // Virtual TID (stable thread index + 1)
+  pid_t physical_tid;    // Physical TID (actual kernel thread ID)
   uint64_t clone_flags;
   uint64_t stack_addr;
   pid_t ptid;
@@ -101,7 +103,7 @@ struct thread_create_info
   template <class Archive>
   void serialize(Archive &ar)
   {
-    ar(tid, clone_flags, stack_addr, ptid);
+    ar(virtual_tid, physical_tid, clone_flags, stack_addr, ptid);
   }
 };
 

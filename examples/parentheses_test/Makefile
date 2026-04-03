@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -O2 -g -pthread -D_GNU_SOURCE
+CFLAGS = -O2 -g -pthread -static -D_GNU_SOURCE
 
 TARGETS = simple_write parentheses
 
