@@ -6,11 +6,11 @@
 #include "config.h"
 #include "common.h"
 #include "debug.h"
-#include "emu.h"
-#include "fsstate.h"
+#include "net/emu.h"
+#include "fs/fsstate.h"
 #include "guest.h"
 #include "monitor.h"
-#include "state_store.h"
+#include "state/state_store.h"
 #include <dlfcn.h>
 #include <filesystem>
 #include <fstream>

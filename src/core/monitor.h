@@ -5,9 +5,9 @@
 #ifndef __MONITOR_H
 #define __MONITOR_H
 
-#include "fd_manager.h"
-#include "sockstate.h"
-#include "state.h"
+#include "fs/fd_manager.h"
+#include "net/sockstate.h"
+#include "state/state.h"
 #include "types.h"
 #include <memory>
 #include <string>

@@ -6,8 +6,8 @@
 #include "cereal/archives/binary.hpp"
 #include "config.h"
 #include "debug.h"
-#include "fd_manager.h"
-#include "fsstate.h"
+#include "../fs/fd_manager.h"
+#include "../fs/fsstate.h"
 #include "guest.h"
 #include "monitor.h"
 #include "proc_status.h"
@@ -874,7 +874,6 @@ void sys_state::clear()
  * Section 7: Memory Capture
  * ====================================================================== */
 
-uint64_t crc32(FILE *fp);
 
 /*
  * Capture memory, registers, and tracee_state, store via StateStore
@@ -964,17 +963,6 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
 
     LOG_TRACE("dump %lx-%lx (prot=%x), %s", src.start, src.end, src.prot,
               src.name);
-  }
-
-  std::vector<uint8_t> tstate_data;
-  {
-    std::ostringstream oss;
-    {
-      cereal::BinaryOutputArchive ar(oss);
-      ar(*this);
-    }
-    std::string str = oss.str();
-    tstate_data.assign(str.begin(), str.end());
   }
 
   // Read mappings data from /proc/PID/maps
@@ -1074,6 +1062,18 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
   // Get main thread registers (for backward compatibility)
   struct user_regs_struct regs;
   ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+
+  // Serialize tracee_state AFTER threads have been populated
+  std::vector<uint8_t> tstate_data;
+  {
+    std::ostringstream oss;
+    {
+      cereal::BinaryOutputArchive ar(oss);
+      ar(*this);
+    }
+    std::string str = oss.str();
+    tstate_data.assign(str.begin(), str.end());
+  }
 
   // Allocate final buffer
   size_t header_size = sizeof(StateDataHeader);

@@ -5,8 +5,8 @@
 #ifndef __STATE_H
 #define __STATE_H
 
-#include "fsstate.h"
-#include "sockstate.h"
+#include "../fs/fsstate.h"
+#include "../net/sockstate.h"
 #include <sys/user.h>
 #include <unistd.h>
 #include <unordered_map>

@@ -6,7 +6,7 @@
  */
 
 #include "guest.h"
-#include "state.h"
+#include "state/state.h"
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <stdio.h>

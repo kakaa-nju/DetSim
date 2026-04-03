@@ -1,17 +1,18 @@
 #include "scheduler.h"
+#include "scheduler/scheduler.h"
 #include "debug.h"
-#include "emu.h"
+#include "net/emu.h"
 #include "expr_eval.hpp"
-#include "fsstate.h"
+#include "fs/fsstate.h"
 #include "guest.h"
 #include "monitor.h"
 #include "proc_status.h"
-#include "sockstate.h"
-#include "state.h"
-#include "state_store.h"
-#include "state_store_packed.h"
-#include "state_transition.h"
-#include "sysstate_store.h"
+#include "net/sockstate.h"
+#include "state/state.h"
+#include "state/state_store.h"
+#include "state/state_store_packed.h"
+#include "state/state_transition.h"
+#include "state/sysstate_store.h"
 #include "utils.h"
 
 /* NCursesUI integration */
@@ -721,7 +722,7 @@ int exec_bfs()
         detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
                               time_used, states_searched_this_run / time_used);
         StateStore::instance().print_stats();
-        state_fetched->clear();
+        state_fetched.reset();
       }
 
       if (result.code != CKPT_DISCARD &&

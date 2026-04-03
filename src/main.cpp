@@ -1,7 +1,7 @@
 #include "core/config.h"
-#include "core/state_store.h"
-#include "core/sysstate_store.h"
-#include "core/state_transition.h"
+#include "core/state/state_store.h"
+#include "core/state/sysstate_store.h"
+#include "core/state/state_transition.h"
 #include "segv_handler.hpp"
 #include <cstdio>
 #include <cstring>

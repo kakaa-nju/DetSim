@@ -26,8 +26,6 @@ namespace fs = std::filesystem;
 #define CHUNK_SIZE 128 KiB
 #define BUFFER_SIZE 8 KiB
 
-hash_type crc32(FILE *fp);
-
 int is_dynamically_linked(const char *filename)
 {
   if (elf_version(EV_CURRENT) == EV_NONE)
