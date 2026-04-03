@@ -122,6 +122,15 @@ int load_exec_store()
 
   TransitionResult result = state_transition(s, index);
 
+  // Check if the current thread is blocked
+  if (result.code == CKPT_DISCARD)
+  {
+    int thread_idx = ptmc_state.current_thread_idx[index];
+    detsim::ui::ui_printf("Thread %d is blocked (waiting on futex). Cannot step.\n",
+                          thread_idx);
+    return -1;
+  }
+
   if (check_state() != 0)
     detsim::ui::ui_printf("Reach illegal state.\n");
 
