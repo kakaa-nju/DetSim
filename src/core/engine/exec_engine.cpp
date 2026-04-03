@@ -146,6 +146,18 @@ ExecResult ExecutionEngine::execute_step(const sys_state& state, syscall_info& i
     // Sync thread manager from saved state
     tm->sync_from_tracee_state(state.child[tracee_idx]);
 
+    // Update thread blocked status from ptmc_state.thread_blocked
+    // This is needed because futex wait marks threads as blocked
+    for (int i = 0; i < static_cast<int>(tm->thread_count()); i++) {
+        if (ptmc_state.thread_blocked[tracee_idx][i]) {
+            auto* tinfo = tm->get_thread_info(i);
+            if (tinfo && tinfo->state == ThreadState::RUNNING) {
+                tm->mark_blocked(i);
+                LOG_DEBUG("Thread %d marked as BLOCKED from ptmc_state", i);
+            }
+        }
+    }
+
     // Try each thread in round-robin
     int num_threads = tm->thread_count();
     if (num_threads == 0) {
