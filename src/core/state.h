@@ -158,9 +158,22 @@ struct raft_check_state
   }
 };
 
+/**
+ * @brief Per-process state for a single tracee (traced process)
+ *
+ * tracee_state captures all state associated with a single traced process:
+ * - Register context for all threads
+ * - Memory mappings and heap state
+ * - File system state (VFS)
+ * - Socket/network state
+ * - Thread management information
+ *
+ * This structure is serialized/deserialized for state save/load operations.
+ * The threads vector maintains stable virtual TIDs even after threads exit.
+ */
 typedef struct tracee_state
 {
-  /* about syscall_info: here the syscall indicates the last DONE syscall */
+  /* Last completed syscall information */
   syscall_info si;
 
   uintptr_t brk;
@@ -284,13 +297,23 @@ public:
  * System State (Global State for All Processes)
  * ====================================================================== */
 
+/**
+ * @brief Global system state for all tracees
+ *
+ * sys_state represents a complete snapshot of the entire system being traced,
+ * including all processes and their states. This is the primary unit of
+ * state saving/loading during state space exploration.
+ *
+ * The ss_hash uniquely identifies this global state, while ts_hash[]
+ * identifies the individual tracee states that compose it.
+ */
 typedef struct sys_state
 {
-  hash_type ss_hash;
-  hash_type ts_hash[NP];
-  tracee_state child[NP];
-  int status[NP];
-  int error_bound = 5;
+  hash_type ss_hash;        // Global state hash (XOR of all ts_hash)
+  hash_type ts_hash[NP];    // Per-process state hashes
+  tracee_state child[NP];   // Per-process detailed state
+  int status[NP];           // Per-process status (running/exited/etc)
+  int error_bound = 5;      // Allowed deviation for approximate states
 
   // Default constructor - value-initialize all members
   sys_state() : ss_hash(0), ts_hash{}, child{}, status{}, error_bound(4) {}
