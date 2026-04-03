@@ -99,6 +99,7 @@ public:
     void handle_clone_enter(pid_t pid, syscall_info& info);
     void handle_clone3_enter(pid_t pid, syscall_info& info);
     void handle_exit_group_enter(pid_t pid, syscall_info& info);
+    void handle_futex_enter(pid_t pid, syscall_info& info);
 
     /* ------------------------------------------------------------------
      * Specific Handlers (Exit)
