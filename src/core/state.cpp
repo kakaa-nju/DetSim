@@ -20,6 +20,7 @@
 #include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
+#include <fmt/format.h>
 #include <set>
 #include <stack>
 #include <stdint.h>
