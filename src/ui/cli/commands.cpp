@@ -240,6 +240,8 @@ int cmd_thread(char *args) {
     }
 
     ptmc_state.current_thread_idx[tracee_idx] = thread_idx;
+    // Also update the tracee_state so that execute_step syncs correctly
+    ptmc_state.running_state.child[tracee_idx].current_thread_idx = thread_idx;
     detsim::ui::ui_printf("Switched to thread %d (TID=%d) in process %d\n",
                           thread_idx, threads[thread_idx].tid, tracee_idx);
     return 0;
