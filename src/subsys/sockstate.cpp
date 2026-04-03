@@ -762,62 +762,6 @@ int SockState::do_close(int fd)
   return 0;
 }
 
-int SockState::do_getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen)
-{
-  const Socket *sock = get_socket(fd);
-  if (!sock)
-  {
-    return -EBADF;
-  }
-
-  if (!sock->bound)
-  {
-    return -EINVAL;
-  }
-
-  if (addr && addrlen)
-  {
-    /* Read input addrlen from guest */
-    socklen_t guest_addrlen = 0;
-    memcpy_guest2host(&guest_addrlen, addrlen, sizeof(socklen_t));
-
-    socklen_t len =
-        std::min(guest_addrlen, (socklen_t)sizeof(struct sockaddr_in));
-    memcpy_host2guest(addr, &sock->local_addr, len);
-    memcpy_host2guest(addrlen, &len, sizeof(socklen_t));
-  }
-
-  return 0;
-}
-
-int SockState::do_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen)
-{
-  const Socket *sock = get_socket(fd);
-  if (!sock)
-  {
-    return -EBADF;
-  }
-
-  if (!sock->connected)
-  {
-    return -ENOTCONN;
-  }
-
-  if (addr && addrlen)
-  {
-    /* Read input addrlen from guest */
-    socklen_t guest_addrlen = 0;
-    memcpy_guest2host(&guest_addrlen, addrlen, sizeof(socklen_t));
-
-    socklen_t len =
-        std::min(guest_addrlen, (socklen_t)sizeof(struct sockaddr_in));
-    memcpy_host2guest(addr, &sock->peer_addr, len);
-    memcpy_host2guest(addrlen, &len, sizeof(socklen_t));
-  }
-
-  return 0;
-}
-
 /* ==============================================================================
  * SockState Public API - Cross-Process Delivery
  * ==============================================================================

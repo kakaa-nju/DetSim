@@ -191,12 +191,6 @@ class SockState
   /* close(fd) -> 0 or -errno */
   int do_close(int fd);
 
-  /* getsockname(fd, addr, addrlen) -> 0 or -errno */
-  int do_getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen);
-
-  /* getpeername(fd, addr, addrlen) -> 0 or -errno */
-  int do_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen);
-
   /* --------------------------------------------------------------------------
    * Epoll Operations (for Redis)
    * --------------------------------------------------------------------------
