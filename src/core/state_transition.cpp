@@ -604,6 +604,9 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
   }
   return CKPT_YES;
 }
+/* Forward declaration: Handle thread exit for SYS_exit syscall */
+bool handle_thread_exit(pid_t pid, pid_t wait_result, int wstatus, syscall_info &si);
+
 /* Do one syscall, with its effects altered */
 int do_one_syscall(pid_t pid, syscall_info &si)
 {
@@ -669,36 +672,12 @@ int do_one_syscall(pid_t pid, syscall_info &si)
   /* Special handling for SYS_exit: the thread will actually exit, not stop with SIGTRAP */
   if (si.nr == SYS_exit) {
     pid_t wait_result = waitpid(pid, &wstatus, 0);
-    if (wait_result == pid && (WIFEXITED(wstatus) || WIFSIGNALED(wstatus))) {
-      /* Thread has exited - mark thread as exited but keep process running */
-      int tracee_idx = ptmc_state.cursor;
-      auto &child_state = ptmc_state.running_state.child[tracee_idx];
 
-      /* Find the exited thread index */
-      int exited_thread_idx = -1;
-      for (int i = 0; i < (int)child_state.threads.size(); i++) {
-        pid_t thread_tid = ptmc_state.get_thread_tid(tracee_idx, i);
-        if (thread_tid == pid) {
-          exited_thread_idx = i;
-          break;
-        }
-      }
-
-      if (exited_thread_idx >= 0) {
-        /* Mark thread as exited in ptmc_state */
-        ptmc_state.thread_exited[tracee_idx][exited_thread_idx] = true;
-        /* Also mark in child_state */
-        int virtual_tid = exited_thread_idx + 1;
-        child_state.remove_thread(virtual_tid);
-        LOG_INFO("Thread %d (PID %d) exited, marked as exited", virtual_tid, pid);
-      } else {
-        LOG_WARN("Exited thread PID %d not found in state", pid);
-      }
-
-      /* Return CKPT_NO to continue with other threads */
-      si.rval = 0;
+    if (handle_thread_exit(pid, wait_result, wstatus, si)) {
       return CKPT_NO;
-    } else if (wait_result == pid && WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == PTRACE_TRAP_SIG) {
+    }
+
+    if (wait_result == pid && WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == PTRACE_TRAP_SIG) {
       /* Thread didn't actually exit (maybe exit was prevented) - continue normally */
       ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(info), &info);
       if (info.op == PTRACE_SYSCALL_INFO_EXIT) {
@@ -719,6 +698,44 @@ int do_one_syscall(pid_t pid, syscall_info &si)
   assert(info.op == PTRACE_SYSCALL_INFO_EXIT);
   si.rval = info.exit.rval;
   return on_syscall_exit(pid, si);
+}
+
+/* Handle thread exit for SYS_exit syscall.
+ * Returns true if thread exited, false if it should continue normally. */
+bool handle_thread_exit(pid_t pid, pid_t wait_result, int wstatus, syscall_info &si)
+{
+  if (!(wait_result == pid && (WIFEXITED(wstatus) || WIFSIGNALED(wstatus)))) {
+    return false;  // Thread did not exit
+  }
+
+  /* Thread has exited - mark thread as exited but keep process running */
+  int tracee_idx = ptmc_state.cursor;
+  auto &child_state = ptmc_state.running_state.child[tracee_idx];
+
+  /* Find the exited thread index */
+  int exited_thread_idx = -1;
+  for (int i = 0; i < (int)child_state.threads.size(); i++) {
+    pid_t thread_tid = ptmc_state.get_thread_tid(tracee_idx, i);
+    if (thread_tid == pid) {
+      exited_thread_idx = i;
+      break;
+    }
+  }
+
+  if (exited_thread_idx >= 0) {
+    /* Mark thread as exited in ptmc_state */
+    ptmc_state.thread_exited[tracee_idx][exited_thread_idx] = true;
+    /* Also mark in child_state */
+    int virtual_tid = exited_thread_idx + 1;
+    child_state.remove_thread(virtual_tid);
+    LOG_INFO("Thread %d (PID %d) exited, marked as exited", virtual_tid, pid);
+  } else {
+    LOG_WARN("Exited thread PID %d not found in state", pid);
+  }
+
+  /* Return CKPT_NO to continue with other threads */
+  si.rval = 0;
+  return true;
 }
 
 /* loaded, exec 1 STEP, not stored. Save Last syscall into `info` *
