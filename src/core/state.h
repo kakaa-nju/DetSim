@@ -64,7 +64,17 @@ struct syscall_info
  * Thread State (Single Thread State for Multi-threading Support)
  * ====================================================================== */
 
-/* Per-thread state for multi-threading support */
+/**
+ * @brief Per-thread state for multi-threading support
+ *
+ * Each thread in a tracee process has a thread_state entry. The tid field
+ * is a virtual TID (stable index + 1) that remains constant across state
+ * saves/loads. The physical_tid is the actual kernel thread ID which may
+ * change when states are restored.
+ *
+ * A thread is considered "exited" when physical_tid == 0. This allows us
+ * to maintain stable TID mappings even after threads exit.
+ */
 struct thread_state
 {
   pid_t tid;                      // Virtual TID (stable thread index + 1)
@@ -111,7 +121,15 @@ struct thread_create_info
  * Tracee State (Single Process State)
  * ====================================================================== */
 
-/* Raft-specific state stored per tracee for safety checking */
+/**
+ * @brief Raft consensus checking state
+ *
+ * Stores Raft-specific state for safety checking during state space
+ * exploration. This allows detecting safety violations like:
+ * - Multiple leaders elected in the same term
+ * - Log inconsistencies
+ * - Commit index violations
+ */
 struct raft_check_state
 {
   // Equality comparison for incremental save optimization
