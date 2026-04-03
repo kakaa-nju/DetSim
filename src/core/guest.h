@@ -17,11 +17,7 @@ extern int running_process;
 void tracee_set_rax(int pid, uint64_t val);
 void tracee_set_orig_rax(int pid, uint64_t val);
 void tracee_set_rdi(int pid, uint64_t val);
-void tracee_set_ret(int pid, uint64_t val);
 uint64_t tracee_get_rdi(int pid);
-uint64_t tracee_get_rip(int pid);
-uint64_t tracee_get_rbp(int pid);
-uint64_t tracee_get_rsp(int pid);
 
 void print_call_stack();
 void tracee_reserve_temp_page(int pid);
@@ -62,7 +58,6 @@ Ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data)
 void tracee_do_munmap(int pid, uint64_t start, uint64_t end);
 void *tracee_do_mmap(int pid, uint64_t start, uint64_t end, int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
 void *tracee_do_mmap_in_place(int pid, uint64_t start, uint64_t end, int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
-void *tracee_do_mmap_back(int pid, uint64_t start, uint64_t end, int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
 int tracee_do_open(int pid, const char *filename, uint64_t flags);
 
 void tracee_backtrace(int pid);
