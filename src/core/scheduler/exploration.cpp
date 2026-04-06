@@ -12,6 +12,8 @@
 #include "utils/utils.h"
 #include "ui/log_wrapper.h"
 #include "engine/signal_handler.h"
+#include "engine/thread_manager.h"
+#include "engine/exec_engine.h"
 
 #include <algorithm>
 #include <atomic>
@@ -143,7 +145,62 @@ static int check_state_assertions()
 }
 
 /* ======================================================================
- * BFS Implementation
+ * Multi-Threaded State Transition
+ * ====================================================================== */
+
+// Structure to hold exploration choices for a state
+struct ExplorationChoice {
+    int process_idx;      // Which process to run
+    int thread_idx;       // Which thread to run (-1 for auto-select)
+};
+
+// Get runnable threads for a process after restoring a state
+static std::vector<int> get_runnable_threads_for_process(const sys_state& state, int process_idx)
+{
+    std::vector<int> runnable_threads;
+
+    // Sync the thread manager with the state
+    ThreadManager* tm = thread::get_manager(process_idx);
+    if (!tm) {
+        LOG_ERROR("No ThreadManager for process %d", process_idx);
+        // Fall back to single-threaded: return main thread (index 0)
+        runnable_threads.push_back(0);
+        return runnable_threads;
+    }
+
+    tm->sync_from_tracee_state(state.child[process_idx]);
+
+    // Get all runnable threads
+    runnable_threads = tm->get_runnable_threads();
+
+    // If no threads are runnable, return empty vector
+    // The caller should check for this and skip the process
+    LOG_DEBUG("Process %d: found %zu runnable threads", process_idx, runnable_threads.size());
+
+    return runnable_threads;
+}
+
+// Execute a state transition with a specific thread
+static TransitionResult state_transition_with_thread(const sys_state& source_state,
+                                                     int process_idx,
+                                                     int thread_idx)
+{
+    // Set the current thread in the thread manager
+    ThreadManager* tm = thread::get_manager(process_idx);
+    if (tm) {
+        tm->set_current_thread(thread_idx);
+        LOG_DEBUG("BFS: Set current thread to %d for process %d", thread_idx, process_idx);
+    }
+
+    // Also set in ptmc_state for consistency
+    ptmc_state.current_thread_idx[process_idx] = thread_idx;
+
+    // Call the normal state transition
+    return state_transition(source_state, process_idx);
+}
+
+/* ======================================================================
+ * BFS Implementation with Multi-Threaded Support
  * ====================================================================== */
 
 int scheduler_exec_bfs()
@@ -213,7 +270,6 @@ int scheduler_exec_bfs()
 
         for (auto &i : indexes)
         {
-        again:
             s = state_fetched.value();
 
             if (DISDEAD(s.status[i])) {
@@ -231,49 +287,83 @@ int scheduler_exec_bfs()
                     LOG_CRIT("Child state hash is 0 for tracee %d. This should not "
                              "happen if the state is properly saved.", j);
 
-            TransitionResult result = state_transition(s, i);
-            LOG_INFO("state_transition result: code=%d, new_state_hash=%016lx", result.code, result.new_state.ss_hash);
-            states_searched_this_run++;
-            g_states_searched = states_searched_this_run;
+            // Get all runnable threads for this process in this state
+            std::vector<int> runnable_threads = get_runnable_threads_for_process(s, i);
 
-            int check_result = check_state_assertions();
-            if (check_result != 0)
-            {
-                update_stats();
-                if (g_interrupted_cb)
-                    g_interrupted_cb(g_stats, "illegal state detected");
-                state_fetched = std::nullopt;
-                g_state_set.clear();
-                return 1;
+            LOG_INFO("Process %d has %zu runnable threads", i, runnable_threads.size());
+
+            // Skip if no runnable threads (all blocked or exited)
+            if (runnable_threads.empty()) {
+                LOG_INFO("Process %d has no runnable threads, skipping", i);
+                continue;
             }
 
-            if (result.code != CKPT_DISCARD)
-            {
-                bool is_new = !g_state_set.count(result.new_state.ss_hash);
-                if (is_new)
-                {
-                    if (check_result == 0)
-                        state_queue_append(result.new_state);
-                    g_state_set.emplace(result.new_state.ss_hash);
-                    states_new_this_run++;
-                    g_states_new = states_new_this_run;
+            // For multi-threaded BFS, we need to explore each runnable thread
+            // as a separate branch in the state space
+            for (size_t t = 0; t < runnable_threads.size(); t++) {
+                int thread_idx = runnable_threads[t];
+
+                // Restore the state for each thread exploration (except the first)
+                if (t > 0) {
+                    s.recover_running_state();
+                    ptmc_state.running_state = s;
+                    LOG_DEBUG("Restored state for thread %d exploration", thread_idx);
                 }
-            }
 
-            if (g_state_explored_cb)
-            {
-                update_stats();
-                g_state_explored_cb(result.new_state.ss_hash, g_stats);
-            }
+                // Execute with the specific thread
+                TransitionResult result = state_transition_with_thread(s, i, thread_idx);
+                LOG_INFO("BFS: Process %d, Thread %d: result code=%d, new_state_hash=%016lx",
+                         i, thread_idx, result.code, result.new_state.ss_hash);
+                states_searched_this_run++;
+                g_states_searched = states_searched_this_run;
 
-            if (ptmc_state.n_choose)
-            {
-                if (ptmc_state.mode == PTMC_STATE::MODE_BFS)
+                int check_result = check_state_assertions();
+                if (check_result != 0)
                 {
-                    ptmc_state.choose++;
-                    if (ptmc_state.choose < ptmc_state.n_choose)
-                        goto again;
-                    ptmc_state.choose = 0;
+                    update_stats();
+                    if (g_interrupted_cb)
+                        g_interrupted_cb(g_stats, "illegal state detected");
+                    state_fetched = std::nullopt;
+                    g_state_set.clear();
+                    return 1;
+                }
+
+                if (result.code != CKPT_DISCARD)
+                {
+                    bool is_new = !g_state_set.count(result.new_state.ss_hash);
+                    if (is_new)
+                    {
+                        if (check_result == 0)
+                            state_queue_append(result.new_state);
+                        g_state_set.emplace(result.new_state.ss_hash);
+                        states_new_this_run++;
+                        g_states_new = states_new_this_run;
+                    }
+                }
+
+                if (g_state_explored_cb)
+                {
+                    update_stats();
+                    g_state_explored_cb(result.new_state.ss_hash, g_stats);
+                }
+
+                // Handle multi-choice syscalls (like recvfrom with multiple messages)
+                if (ptmc_state.n_choose)
+                {
+                    if (ptmc_state.mode == PTMC_STATE::MODE_BFS)
+                    {
+                        // For now, handle choices within the same thread
+                        // This is a simplified approach - we explore all choices
+                        // sequentially for the same thread
+                        ptmc_state.choose++;
+                        if (ptmc_state.choose < ptmc_state.n_choose) {
+                            // We need to restore and try the next choice
+                            // This is handled by going back to the same thread
+                            t--;  // Stay on the same thread index
+                            continue;
+                        }
+                        ptmc_state.choose = 0;
+                    }
                 }
             }
         }

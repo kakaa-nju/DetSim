@@ -5,6 +5,7 @@
 #ifndef __STATE_H
 #define __STATE_H
 
+#include "../engine/thread_manager.h"  // For MAX_THREADS_PER_PROCESS
 #include "../fs/fsstate.h"
 #include "../net/sockstate.h"
 #include <sys/user.h>
@@ -174,7 +175,7 @@ struct raft_check_state
 typedef struct tracee_state
 {
   /* Last completed syscall information */
-  syscall_info si;
+  syscall_info si[MAX_THREADS_PER_PROCESS];  // Per-thread syscall info
 
   uintptr_t brk;
   struct timeval tv;
@@ -221,7 +222,7 @@ typedef struct tracee_state
    * --------------------------------------------------------- */
 
   /* From running process */
-  tracee_state(int which, const struct syscall_info &info);
+  tracee_state(int which, const struct syscall_info info[]);  // Per-thread syscall info
 
   /* From saved state (hash) */
   tracee_state(hash_type hash);
@@ -327,7 +328,7 @@ typedef struct sys_state
   sys_state &operator=(sys_state &&other) noexcept = default;
 
   /* From running processes - save */
-  sys_state(const struct syscall_info info[]);
+  sys_state(const struct syscall_info info[][MAX_THREADS_PER_PROCESS]);  // Per-thread syscall info
 
   /* From saved state (hash) */
   sys_state(hash_type hash);

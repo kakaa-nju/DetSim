@@ -267,6 +267,17 @@ int ThreadManager::find_next_runnable(int start_idx) const
     return -1;  // No runnable threads
 }
 
+std::vector<int> ThreadManager::get_runnable_threads() const
+{
+    std::vector<int> runnable;
+    for (size_t i = 0; i < threads_.size(); i++) {
+        if (threads_[i].state == ThreadState::RUNNING) {
+            runnable.push_back(static_cast<int>(i));
+        }
+    }
+    return runnable;
+}
+
 void ThreadManager::sync_from_tracee_state(const tracee_state& state)
 {
     threads_.clear();

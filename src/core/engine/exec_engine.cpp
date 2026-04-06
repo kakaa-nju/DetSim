@@ -132,6 +132,9 @@ int ExecutionEngine::execute_syscall(pid_t pid, syscall_info& info)
     return do_single_syscall(pid, info);
 }
 
+// Forward declare auto_mode from config
+extern int auto_mode;
+
 ExecResult ExecutionEngine::execute_step(const sys_state& state, syscall_info& info)
 {
     int tracee_idx = ptmc_state.cursor;
@@ -147,7 +150,6 @@ ExecResult ExecutionEngine::execute_step(const sys_state& state, syscall_info& i
     tm->sync_from_tracee_state(state.child[tracee_idx]);
 
     // Update thread blocked status from ptmc_state.thread_blocked
-    // This is needed because futex wait marks threads as blocked
     for (int i = 0; i < static_cast<int>(tm->thread_count()); i++) {
         if (ptmc_state.thread_blocked[tracee_idx][i]) {
             auto* tinfo = tm->get_thread_info(i);
@@ -158,21 +160,61 @@ ExecResult ExecutionEngine::execute_step(const sys_state& state, syscall_info& i
         }
     }
 
-    // Try each thread in round-robin
+    // In manual mode, only execute the currently selected thread
+    if (!auto_mode) {
+        int thread_idx = ptmc_state.current_thread_idx[tracee_idx];
+        
+        // Validate thread index
+        if (thread_idx < 0 || thread_idx >= static_cast<int>(tm->thread_count())) {
+            LOG_WARN("Invalid thread index %d, using thread 0", thread_idx);
+            thread_idx = 0;
+            ptmc_state.current_thread_idx[tracee_idx] = 0;
+        }
+
+        const ThreadSchedInfo* tinfo = tm->get_thread_info(thread_idx);
+        if (!tinfo || tinfo->state != ThreadState::RUNNING) {
+            LOG_INFO("Thread %d is not runnable (state=%d)", thread_idx, 
+                     tinfo ? static_cast<int>(tinfo->state) : -1);
+            return ExecResult(ExecStatus::DISCARD, CKPT_DISCARD, "Selected thread not runnable");
+        }
+
+        pid_t pid = tinfo->physical_tid;
+        if (pid <= 0) {
+            LOG_WARN("Invalid physical_tid %d for thread %d", pid, thread_idx);
+            return ExecResult(ExecStatus::ERROR, CKPT_STOP, "Invalid physical TID");
+        }
+
+        // Execute syscall on this specific thread
+        int result = do_single_syscall(pid, info);
+
+        switch (result) {
+            case CKPT_NO:
+                return ExecResult(ExecStatus::SUCCESS, CKPT_YES, "Syscall completed");
+            case CKPT_DISCARD:
+                return ExecResult(ExecStatus::DISCARD, CKPT_DISCARD, "Thread blocked");
+            case CKPT_EXIT:
+                return ExecResult(ExecStatus::EXIT, CKPT_EXIT, "Thread exited");
+            case CKPT_STOP:
+                return ExecResult(ExecStatus::CRASH, CKPT_STOP, "Process crashed");
+            case CKPT_YES:
+            default:
+                return ExecResult(ExecStatus::SUCCESS, CKPT_YES, "Checkpoint saved");
+        }
+    }
+
+    // Auto mode: try each thread in round-robin (original logic)
     int num_threads = tm->thread_count();
     if (num_threads == 0) {
-        num_threads = 1; // At least main thread
+        num_threads = 1;
     }
 
     for (int attempt = 0; attempt < num_threads; attempt++) {
         int thread_idx = tm->current_thread();
 
-        // Check if thread is runnable
         const ThreadSchedInfo* tinfo = tm->get_thread_info(thread_idx);
         if (!tinfo || tinfo->state != ThreadState::RUNNING) {
-            // Try next thread
             if (tm->next_runnable_thread() < 0) {
-                break; // No runnable threads
+                break;
             }
             continue;
         }
@@ -184,31 +226,24 @@ ExecResult ExecutionEngine::execute_step(const sys_state& state, syscall_info& i
             continue;
         }
 
-        // Execute syscall on this thread
         int result = do_single_syscall(pid, info);
 
         switch (result) {
             case CKPT_NO:
-                // Thread made progress, continue with same thread
                 attempt--;
                 continue;
-
             case CKPT_DISCARD:
                 return ExecResult(ExecStatus::DISCARD, CKPT_DISCARD, "Thread blocked");
-
             case CKPT_EXIT:
                 return ExecResult(ExecStatus::EXIT, CKPT_EXIT, "Process exited");
-
             case CKPT_STOP:
                 return ExecResult(ExecStatus::CRASH, CKPT_STOP, "Process crashed");
-
             case CKPT_YES:
             default:
                 return ExecResult(ExecStatus::SUCCESS, CKPT_YES, "Checkpoint saved");
         }
     }
 
-    // No runnable threads
     if (tm->all_threads_exited()) {
         ptmc_state.status[tracee_idx] = dstatus_exit(0);
         return ExecResult(ExecStatus::EXIT, CKPT_EXIT, "All threads exited");
@@ -217,7 +252,6 @@ ExecResult ExecutionEngine::execute_step(const sys_state& state, syscall_info& i
     LOG_WARN("All threads blocked, possible deadlock");
     return ExecResult(ExecStatus::SUCCESS, CKPT_YES, "Possible deadlock");
 }
-
 void ExecutionEngine::on_thread_created(pid_t parent_pid, pid_t new_tid,
                                         uint64_t clone_flags, uint64_t stack_addr)
 {

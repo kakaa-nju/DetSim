@@ -103,7 +103,9 @@ static int check_state()
 int load_exec_store()
 {
   int index = ptmc_state.cursor;
-  sys_state s = ptmc_state.running_state;
+  // Save original state before attempting transition
+  sys_state original_state = ptmc_state.running_state;
+  sys_state s = original_state;
 
   if (DISEXITED(s.status[index]))
   {
@@ -128,6 +130,14 @@ int load_exec_store()
     int thread_idx = ptmc_state.current_thread_idx[index];
     detsim::ui::ui_printf("Thread %d is blocked (waiting on futex). Cannot step.\n",
                           thread_idx);
+    // Restore to the original state before this si command
+    // The tracee is in an unstable state (syscall entry), so we must roll back
+    ptmc_state.running_state = original_state;
+    // BUT: Preserve the thread information from the attempted transition
+    // so user can see and switch to other threads
+    ptmc_state.running_state.child[index].threads = result.new_state.child[index].threads;
+    ptmc_state.running_state.child[index].current_thread_idx = result.new_state.child[index].current_thread_idx;
+    // The thread_blocked flag is already set in ptmc_state by the futex handler
     return -1;
   }
 
@@ -136,8 +146,6 @@ int load_exec_store()
 
   return 0;
 }
-
-extern LSS state_queue;
 extern SSS state_set;
 extern TSS state_tree;
 extern int sigint_received;

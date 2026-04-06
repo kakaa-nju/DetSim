@@ -670,7 +670,7 @@ void format_default(char *buf, const syscall_info &info)
 void format(char *buf, int pid, hash_type ts_hash)
 {
   tracee_state ts(ts_hash);
-  syscall_info info = ts.si;
+  syscall_info info = ts.si[ts.current_thread_idx];
 
   // Get current thread TID if multi-threaded
   pid_t tid = pid;

@@ -114,12 +114,13 @@ void show_syscall_history()
  * Only the active process is fully saved.
  * Other processes reuse old hashes if their state is unchanged.
  */
-sys_state::sys_state(const struct syscall_info info[])
+sys_state::sys_state(const struct syscall_info info[][MAX_THREADS_PER_PROCESS])
 {
   auto old_state = ptmc_state.running_state;
   auto active_idx = ptmc_state.cursor;
   hash_type ss_hash_tmp = 0;
   error_bound = ptmc_state.error_bound;
+  extern int auto_mode;  // For detecting manual mode
 
   if (old_state.ss_hash == 0)
   {
@@ -149,7 +150,7 @@ sys_state::sys_state(const struct syscall_info info[])
     else
     {
       /* Inactive process: check if state changed */
-      if (child[j].metadata_equal(old_state.child[j]))
+      if (auto_mode && child[j].metadata_equal(old_state.child[j]))  // Disable optimization in manual mode
       {
         /* State unchanged, reuse old hash */
         ts_hash[j] = old_state.ts_hash[j];
@@ -1189,11 +1190,11 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
  * ====================================================================== */
 
 /* Create tracee_state from running process (capture) */
-tracee_state::tracee_state(int which, const struct syscall_info &info)
+tracee_state::tracee_state(int which, const struct syscall_info info[])
   : threads(), thread_create_records(), main_tid(0), current_thread_idx(0), futex_state(nullptr)
 {
   /* Save syscall info */
-  si = info;
+  memcpy(si, info, sizeof(syscall_info) * MAX_THREADS_PER_PROCESS);
 
   /* Save subsystems */
   sock_state = ptmc_state.sock_states[which];

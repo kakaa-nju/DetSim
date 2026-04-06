@@ -164,12 +164,14 @@ TransitionResult state_transition(const sys_state &source_state,
   result.restore_time =
       std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
 
-  // do syscalls
-  syscall_info new_syscalls[NP];
+  // do syscalls - copy per-thread syscall info for each process
+  syscall_info new_syscalls[NP][MAX_THREADS_PER_PROCESS];
   for (int i = 0; i < NP; i++)
-    new_syscalls[i] = source_state.child[i].si;
+    memcpy(new_syscalls[i], source_state.child[i].si, sizeof(syscall_info) * MAX_THREADS_PER_PROCESS);
 
-  int ckpt = exec_once(source_state, new_syscalls[process_index]);
+  // Get current thread index for the active process
+  int thread_idx = ptmc_state.current_thread_idx[process_index];
+  int ckpt = exec_once(source_state, new_syscalls[process_index][thread_idx]);
 
   // save state with timing
   auto t3 = std::chrono::high_resolution_clock::now();
@@ -335,21 +337,45 @@ syscall_info extract_one_syscall(pid_t pid)
     }
 
     // Wait for the new thread to stop (SIGSTOP from CLONE_PTRACE)
+    // This is crucial: the new thread is created in a stopped state, and we
+    // need to wait for it and continue it so it can initialize and signal
+    // the parent thread (which may be waiting on a futex)
     int wstatus_new;
-    pid_t waited = waitpid(new_tid, &wstatus_new, WNOHANG);
-    if (waited == 0)
-    {
-      // Thread hasn't stopped yet, wait briefly
-      usleep(1000);
+    int wait_retries = 0;
+    pid_t waited = 0;
+
+    // Try non-blocking wait first, then blocking wait with timeout
+    while (wait_retries < 100 && waited == 0) {
+      waited = waitpid(new_tid, &wstatus_new, WNOHANG);
+      if (waited == 0) {
+        usleep(1000);  // 1ms delay between retries
+        wait_retries++;
+      }
+    }
+
+    // If still not ready, try blocking wait as last resort
+    if (waited == 0) {
       waited = waitpid(new_tid, &wstatus_new, WNOHANG);
     }
+
     if (waited == new_tid && WIFSTOPPED(wstatus_new))
     {
-      LOG_INFO("New thread %d stopped with signal %d", new_tid, WSTOPSIG(wstatus_new));
+      LOG_INFO("New thread %d stopped with signal %d after %d retries, continuing",
+               new_tid, WSTOPSIG(wstatus_new), wait_retries);
+
+      // Continue the new thread to its first syscall entry
+      // This is essential: the new thread must run to initialize itself
+      // and signal any waiting threads (via futex wake)
+      ptrace_right(PTRACE_SYSCALL, new_tid, NULL, NULL);
+
+      // Note: We don't wait here because the parent thread also needs to run.
+      // The new thread will hit a syscall entry and stop, then when the user
+      // switches to it with 'thread N', it will be ready to execute.
     }
     else
     {
-      LOG_WARN("New thread %d not in expected stopped state (waited=%d)", new_tid, waited);
+      LOG_WARN("New thread %d not in expected stopped state (waited=%d, retries=%d)",
+               new_tid, waited, wait_retries);
     }
   }
 
@@ -476,7 +502,7 @@ int state_initialization()
   }
 
   /* Record first sys_state. Notice that the syscall_info need no recording */
-  struct syscall_info syscall_info[NP];
+  struct syscall_info syscall_info[NP][MAX_THREADS_PER_PROCESS];
   memset(syscall_info, 0, sizeof(syscall_info));
   ptmc_state.cursor = -1;
 

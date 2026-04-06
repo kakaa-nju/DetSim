@@ -73,6 +73,7 @@ int handle_chdir(pid_t pid, syscall_info &info);
 int handle_pipe(pid_t pid, syscall_info &info);
 int handle_mmap(pid_t pid, syscall_info &info);
 int handle_munmap(pid_t pid, syscall_info &info);
+int handle_madvise(pid_t pid, syscall_info &info);
 int handle_fsync(pid_t pid, syscall_info &info);
 int handle_fdatasync(pid_t pid, syscall_info &info);
 int handle_fcntl(pid_t pid, syscall_info &info);

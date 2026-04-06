@@ -250,6 +250,39 @@ int FutexState::futex_requeue(uint64_t uaddr1, uint64_t uaddr2, int nr_wake, int
     return woken;
 }
 
+int FutexState::wake_waiters_in_range(uint64_t start, uint64_t end)
+{
+    int woken = 0;
+
+    // Iterate through all wait queues
+    for (auto it = waiters_.begin(); it != waiters_.end(); ) {
+        uint64_t addr = it->first;
+
+        // Check if this address falls within the range being discarded
+        if (addr >= start && addr < end) {
+            // Wake all waiters at this address
+            auto &queue = it->second;
+            for (const auto &waiter : queue) {
+                waiter_map_[waiter.tid] = 0;  // Mark as no longer waiting
+                woken++;
+                LOG_DEBUG("Futex: woke TID %d from addr %p (page discarded)",
+                          waiter.tid, (void*)addr);
+            }
+            // Remove this wait queue entirely
+            it = waiters_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    if (woken > 0) {
+        LOG_INFO("Futex: woke %d waiters due to memory range [%p, %p) being discarded",
+                 woken, (void*)start, (void*)end);
+    }
+
+    return woken;
+}
+
 void FutexState::dump_state() const
 {
     LOG_INFO("FutexState dump:");

@@ -90,6 +90,10 @@ public:
     // Requeue waiters from one address to another
     int futex_requeue(uint64_t uaddr1, uint64_t uaddr2, int nr_wake, int nr_requeue);
 
+    // Wake all waiters whose address falls within [start, end) range
+    // This is used when madvise(MADV_DONTNEED) discards memory pages
+    int wake_waiters_in_range(uint64_t start, uint64_t end);
+
     // Clear all state (used on recovery)
     void clear();
 

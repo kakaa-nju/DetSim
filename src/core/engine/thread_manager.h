@@ -149,6 +149,9 @@ public:
     // Find next runnable thread without changing current
     int peek_next_runnable_thread() const;
 
+    // Get list of all runnable thread indices (for multi-threaded BFS)
+    std::vector<int> get_runnable_threads() const;
+
     /* ------------------------------------------------------------------
      * Integration with tracee_state
      * ------------------------------------------------------------------ */

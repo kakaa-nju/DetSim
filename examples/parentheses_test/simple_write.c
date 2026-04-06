@@ -42,7 +42,6 @@ int main(void) {
     pthread_create(&a, NULL, thread_a, NULL);
     pthread_create(&b, NULL, thread_b, NULL);
 
-    sleep(1);
     should_stop = 1;
 
     pthread_join(a, NULL);
