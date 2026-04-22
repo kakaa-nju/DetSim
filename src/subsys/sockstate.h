@@ -16,6 +16,7 @@
 #include <sys/socket.h>
 #include <unordered_map>
 #include <vector>
+#include <sys/poll.h>
 
 /* Guest memory operations - defined in guest.cpp */
 extern void *memcpy_host2guest(void *dest, const void *src, size_t n);
@@ -136,6 +137,8 @@ public:
     
     /* getpeername(fd, addr, addrlen) -> 0 or -errno */
     int do_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen);
+
+    int do_poll(struct pollfd *fds, nfds_t nfds, int timeout);
     
     /* --------------------------------------------------------------------------
      * Cross-Process Message Delivery (for UDP)
@@ -225,6 +228,7 @@ ssize_t emu_sendto(int sockfd, const void *buf, size_t len, int flags,
 int emu_socket(int domain, int type, int protocol);
 int emu_listen(int sockfd, int backlog);
 int emu_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+int emu_poll(struct pollfd *fds, nfds_t nfds, int timeout);
 
 /* For compatibility with code that uses these types */
 typedef std::deque<UdpDatagram> udp_buffer;

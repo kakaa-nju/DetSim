@@ -3,11 +3,32 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <sys/poll.h>
 #include <sys/time.h>
 typedef struct choose_in
 {
-  struct timeval now;
-  choose_in(struct timeval tv) { now = tv; }
+  union
+  {
+    struct timeval gettimeofday_now;
+    struct
+    {
+      struct pollfd *fds;
+      nfds_t nfds;
+      int timeout;
+    } poll;
+  };
+
+  choose_in(struct timeval tv)
+      : gettimeofday_now(tv)
+  {
+  }
+
+  choose_in(struct pollfd *poll_fds, nfds_t poll_nfds, int poll_timeout)
+  {
+    poll.fds = poll_fds;
+    poll.nfds = poll_nfds;
+    poll.timeout = poll_timeout;
+  }
 } choose_in;
 
 typedef struct choose_out

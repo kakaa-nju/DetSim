@@ -21,7 +21,7 @@ extern "C"
     raft_server_private_t raft;
     tracee_read_mem(pid, (void *)praft, &raft, sizeof(raft));
 
-    struct timeval tv = in.now;
+    struct timeval tv = in.gettimeofday_now;
     struct timeval *tv_out = (struct timeval *)malloc(sizeof(*tv_out));
 
     if (raft.state == RAFT_STATE_LEADER)

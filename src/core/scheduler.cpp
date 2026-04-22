@@ -135,6 +135,7 @@ static void on_syscall_enter(pid_t pid, int nr)
     case SYS_gettimeofday:
     case SYS_sendto:
     case SYS_recvfrom:
+    case SYS_poll:
     case SYS_listen:
     case SYS_bind:
     case SYS_nanosleep:
@@ -213,6 +214,11 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
         return CKPT_NO;
       }
       break;
+    case SYS_poll:
+      ret = emu_poll((struct pollfd *)info->args[0], info->args[1], info->args[2]);
+      tracee_set_rax(pid, ret);
+      info->rval = ret;
+      return CKPT_YES;
     case SYS_sched_yield:
       break;
     case SYS_sendto:
@@ -322,7 +328,6 @@ static int on_syscall_exit(pid_t pid, struct syscall_info *info)
     case SYS_nanosleep:
     case SYS_brk:
       return CKPT_NO;
-
     default:
       return CKPT_NO;
   }
