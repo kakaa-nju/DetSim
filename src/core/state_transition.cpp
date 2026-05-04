@@ -449,7 +449,7 @@ int do_one_syscall(pid_t pid, syscall_info &si)
    * distinguish normal traps from those caused by a system call. */
   int wstatus = 0;
   struct ptrace_syscall_info info;
-  LOG_TRACE("Do one syscall");
+  LOG_TRACE("Do one syscall(%s)", syscalls[si.nr]);
   // tracee_show_regs(pid);
 
   /* entry */

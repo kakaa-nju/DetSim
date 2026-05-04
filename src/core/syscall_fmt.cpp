@@ -635,10 +635,32 @@ void format_bind(char *buf, int pid, hash_type ts_hash,
   format_ret(buf + pos, info.rval);
 }
 
-/* Format: listen/accept/connect */
+/* Format: listen/accept */
 void format_socket_fd(char *buf, const syscall_info &info)
 {
   int pos = sprintf(buf, "%s(%ld, ...) ", syscalls[info.nr], info.args[0]);
+  format_ret(buf + pos, info.rval);
+}
+
+/* Format: connect with sockaddr details */
+void format_connect(char *buf, int pid, hash_type ts_hash,
+                    const syscall_info &info)
+{
+  int pos = sprintf(buf, "connect(%ld, ", info.args[0]);
+
+  struct sockaddr_in *addr =
+      (struct sockaddr_in *)read_mem(pid, ts_hash, info.args[1], info.args[2]);
+  if (addr)
+  {
+    pos += format_sockaddr(buf + pos, addr);
+    free(addr);
+  }
+  else
+  {
+    pos += sprintf(buf + pos, "%p", (void *)info.args[1]);
+  }
+
+  pos += sprintf(buf + pos, ", %ld) ", info.args[2]);
   format_ret(buf + pos, info.rval);
 }
 
@@ -689,8 +711,10 @@ void format(char *buf, int pid, hash_type ts_hash)
     case SYS_listen:
     case SYS_accept:
     case SYS_accept4:
-    case SYS_connect:
       format_socket_fd(buf, info);
+      break;
+    case SYS_connect:
+      format_connect(buf, pid, ts_hash, info);
       break;
 
     case SYS_epoll_create:
