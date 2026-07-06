@@ -83,6 +83,7 @@ static void on_syscall_enter(pid_t pid, int nr)
     case SYS_connect:
     case SYS_accept:
     case SYS_accept4:
+    case SYS_poll:
     case SYS_epoll_create:
     case SYS_epoll_create1:
     case SYS_epoll_ctl:
@@ -378,6 +379,12 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
       info.rval = ret;
       return CKPT_NO;
     }
+
+    case SYS_poll:
+      ret = emu_poll((struct pollfd *)info.args[0], info.args[1], info.args[2]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
 
     case SYS_epoll_create:
       ret = emu_epoll_create(info.args[0]);

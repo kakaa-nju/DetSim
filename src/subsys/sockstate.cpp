@@ -684,6 +684,116 @@ int SockState::get_recvfrom_choices(int fd) const
   return 2; // Only 1 choice: receive the only message or lag
 }
 
+int SockState::do_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+    if (nfds == 0 || fds == nullptr) {
+        return 0;
+    }
+    
+    if (nfds > 1024) {
+        nfds = 1024;
+    }
+    
+    size_t fds_size = sizeof(struct pollfd) * nfds;
+    struct pollfd *host_fds = (struct pollfd *)malloc(fds_size);
+    if (host_fds == nullptr) {
+        return -ENOMEM;
+    }
+    
+    memcpy_guest2host(host_fds, fds, fds_size);
+    
+    int ready_count = 0;
+    
+    for (nfds_t i = 0; i < nfds; i++) {
+        host_fds[i].revents = 0;
+        
+        int fd = host_fds[i].fd;
+        if (fd < 0) {
+            continue;
+        }
+        
+        short events = host_fds[i].events;
+        short revents = 0;
+        
+        const Socket *sock = get_socket(fd);
+        if (!sock) {
+            revents = POLLNVAL;
+            host_fds[i].revents = revents;
+            ready_count++;
+            continue;
+        }
+        
+        if (events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLPRI)) {
+            bool can_read = false;
+            
+            if (sock->type == SOCK_DGRAM) {
+                auto it = udp_recv_buffers_.find(fd);
+                if (it != udp_recv_buffers_.end() && !it->second.empty()) {
+                    can_read = true;
+                }
+            } else if (sock->type == SOCK_STREAM) {
+                if (sock->listening) {
+                    if (!sock->pending_connections.empty()) {
+                        can_read = true;
+                    }
+                } else {
+                    auto conn_it = tcp_connections_.find(fd);
+                    if (conn_it != tcp_connections_.end()) {
+                        if (!conn_it->second.recv_buffer.empty()) {
+                            can_read = true;
+                        }
+                    }
+                }
+            }
+            
+            if (can_read) {
+                revents |= POLLIN;
+                if (events & POLLRDNORM) revents |= POLLRDNORM;
+            }
+        }
+        
+        if (events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
+            bool can_write = false;
+            
+            if (sock->type == SOCK_DGRAM) {
+                can_write = true;
+            } else if (sock->type == SOCK_STREAM) {
+                if (sock->connected) {
+                    can_write = true;
+                }
+            }
+            
+            if (can_write) {
+                revents |= POLLOUT;
+                if (events & POLLWRNORM) revents |= POLLWRNORM;
+            }
+        }
+        
+        if (events & (POLLERR | POLLHUP | POLLNVAL)) {
+            // 简化：假设无错误
+        }
+        
+        host_fds[i].revents = revents;
+        if (revents != 0) {
+            ready_count++;
+        }
+    }
+    
+    // 关键：将 revents 写回 Guest（只写 revents 字段）
+    for (nfds_t i = 0; i < nfds; i++) {
+        off_t offset = offsetof(struct pollfd, revents);
+        memcpy_host2guest(
+            (char *)fds + i * sizeof(struct pollfd) + offset,
+            &host_fds[i].revents,
+            sizeof(short)
+        );
+    }
+    
+    free(host_fds);
+    
+    LOG_TRACE("poll(nfds=%zu, timeout=%d) = %d", (size_t)nfds, timeout, ready_count);
+    return ready_count;
+}
+
 /* ==============================================================================
  * SockState Public API - Lifecycle
  * ==============================================================================
@@ -1057,6 +1167,11 @@ int emu_recvfrom_get_choices(int sockfd)
 {
   int cur = ptmc_state.cursor;
   return ptmc_state.sock_states[cur].get_recvfrom_choices(sockfd);
+}
+
+int emu_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
+    int cur = ptmc_state.cursor;
+    return ptmc_state.sock_states[cur].do_poll(fds, nfds, timeout);
 }
 
 /* Helper: Find which node owns an address */

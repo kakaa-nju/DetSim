@@ -347,6 +347,105 @@ void format_recvfrom(char *buf, int pid, hash_type ts_hash,
   format_ret(buf + pos, info.rval);
 }
 
+void format_poll(char *buf, const syscall_info &info)
+{
+    // 从 info 获取参数（Guest 指针）
+    void *guest_fds = (void *)info.args[0];
+    unsigned long nfds = info.args[1];
+    int timeout = (int)info.args[2];
+    int ret = (int)info.rval;
+    
+    int pos = 0;
+    
+    // 格式化基本信息
+    pos += sprintf(buf + pos, "poll(");
+    
+    if (guest_fds == NULL) {
+        pos += sprintf(buf + pos, "NULL");
+    } else {
+        pos += sprintf(buf + pos, "%p", guest_fds);
+    }
+    
+    pos += sprintf(buf + pos, ", %lu, ", nfds);
+    
+    // timeout 人类可读
+    if (timeout == -1) {
+        pos += sprintf(buf + pos, "INFTIM");
+    } else if (timeout == 0) {
+        pos += sprintf(buf + pos, "0");
+    } else {
+        pos += sprintf(buf + pos, "%d", timeout);
+    }
+    
+    pos += sprintf(buf + pos, ") = ");
+    
+    // 返回值
+    if (ret < 0) {
+        pos += sprintf(buf + pos, "%d (%s)", ret, strerror(-ret));
+    } else {
+        pos += sprintf(buf + pos, "%d", ret);
+    }
+    
+    // 关键：从 Guest 读取 pollfd 数组详情
+    if (nfds > 0 && nfds <= 1024 && guest_fds != NULL) {
+        size_t fds_size = sizeof(struct pollfd) * nfds;
+        struct pollfd *host_fds = (struct pollfd *)malloc(fds_size);
+        
+        if (host_fds != NULL) {
+            // 从 Guest 复制到 Host
+            memcpy_guest2host(host_fds, guest_fds, fds_size);
+            
+            pos += sprintf(buf + pos, " {");
+            
+            nfds_t display_count = (nfds > 4) ? 4 : nfds;
+            for (nfds_t i = 0; i < display_count; i++) {
+                if (i > 0) pos += sprintf(buf + pos, ", ");
+                
+                pos += sprintf(buf + pos, "[%zu]", (size_t)i);
+                
+                int fd = host_fds[i].fd;
+                short events = host_fds[i].events;
+                short revents = host_fds[i].revents;
+                
+                // fd
+                if (fd < 0) {
+                    pos += sprintf(buf + pos, "IGNORED");
+                } else {
+                    pos += sprintf(buf + pos, "fd=%d", fd);
+                }
+                
+                // events（请求的事件）
+                if (events != 0) {
+                    pos += sprintf(buf + pos, ",ev=");
+                    if (events & POLLIN) pos += sprintf(buf + pos, "IN");
+                    if (events & POLLOUT) pos += sprintf(buf + pos, "OUT");
+                    if (events & POLLERR) pos += sprintf(buf + pos, "ERR");
+                    if (events & POLLHUP) pos += sprintf(buf + pos, "HUP");
+                    if (events & POLLNVAL) pos += sprintf(buf + pos, "NVAL");
+                }
+                
+                // revents（实际发生的事件）
+                if (revents != 0) {
+                    pos += sprintf(buf + pos, ",re=");
+                    if (revents & POLLIN) pos += sprintf(buf + pos, "IN");
+                    if (revents & POLLOUT) pos += sprintf(buf + pos, "OUT");
+                    if (revents & POLLERR) pos += sprintf(buf + pos, "ERR");
+                    if (revents & POLLHUP) pos += sprintf(buf + pos, "HUP");
+                    if (revents & POLLNVAL) pos += sprintf(buf + pos, "NVAL");
+                }
+            }
+            
+            if (nfds > 4) {
+                pos += sprintf(buf + pos, ", ...(%lu more)", nfds - 4);
+            }
+            
+            pos += sprintf(buf + pos, "}");
+            
+            free(host_fds);
+        }
+    }
+}
+
 /* Format: void *addr (brk/mmap style) */
 void format_addr(char *buf, const syscall_info &info)
 {
@@ -701,6 +800,9 @@ void format(char *buf, int pid, hash_type ts_hash)
       break;
     case SYS_recvfrom:
       format_recvfrom(buf, pid, ts_hash, info);
+      break;
+    case SYS_poll:
+      format_poll(buf, info);
       break;
     case SYS_socket:
       format_socket(buf, info);
