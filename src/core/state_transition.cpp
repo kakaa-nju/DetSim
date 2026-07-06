@@ -98,6 +98,7 @@ static void on_syscall_enter(pid_t pid, int nr)
     case SYS_chdir:
     case SYS_read:
     case SYS_write:
+    case SYS_writev:
     case SYS_close:
     case SYS_lseek:
     case SYS_stat:
@@ -294,6 +295,11 @@ static int on_syscall_exit(pid_t pid, struct syscall_info &info)
     case SYS_write:
       ret =
           emu_vfs_write(info.args[0], (const void *)info.args[1], info.args[2]);
+      tracee_set_rax(pid, ret);
+      info.rval = ret;
+      return CKPT_YES;
+    case SYS_writev:
+      ret = emu_vfs_writev(info.args[0], (const struct iovec *)info.args[1], info.args[2]);
       tracee_set_rax(pid, ret);
       info.rval = ret;
       return CKPT_YES;

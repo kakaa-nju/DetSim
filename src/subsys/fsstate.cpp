@@ -580,6 +580,44 @@ long emu_vfs_write(int fd, const void *buf, size_t count)
                                                           count);
 }
 
+long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt)
+{
+
+  size_t total_len = 0;
+  std::vector<struct iovec> host_iov(iovcnt);
+
+  for (int i = 0; i < iovcnt; i++)
+  {
+    struct iovec tmp;
+    memcpy_guest2host(&tmp, (void *)&iov[i], sizeof(tmp));
+    host_iov[i] = tmp;
+    total_len += tmp.iov_len;
+  }
+
+  std::vector<char> buf(total_len);
+
+  size_t offset = 0;
+  for (int i = 0; i < iovcnt; i++)
+  {
+    if (host_iov[i].iov_len == 0) continue;
+
+    memcpy_guest2host(buf.data() + offset,
+                      host_iov[i].iov_base,
+                      host_iov[i].iov_len);
+    offset += host_iov[i].iov_len;
+  }
+
+  // Check if fd is a socket
+  SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
+  if (sock_state.is_valid_socket(fd))
+  {
+    return sock_state.do_send(fd, buf.data(), total_len, 0);
+  }
+
+  return ptmc_state.fs_states[ptmc_state.cursor]
+      .do_write(fd, buf.data(), total_len);
+}
+
 long emu_vfs_close(int fd)
 {
   auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
