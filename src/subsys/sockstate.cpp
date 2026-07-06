@@ -598,7 +598,10 @@ ssize_t SockState::do_recvfrom_with_choice(int fd, void *buf, size_t len,
   {
     return -EBADF;
   }
-
+  if (sock->type == SOCK_STREAM)
+  {
+    return do_recv(fd, buf, len, flags);
+  }
   if (sock->type != SOCK_DGRAM)
   {
     return -EOPNOTSUPP;
@@ -1094,6 +1097,12 @@ ssize_t emu_sendto(int sockfd, const void *buf, size_t len, int flags,
   if (!sock)
   {
     return -ENOTSOCK;
+  }
+
+  // For TCP streams, use do_send (ignores dest_addr/addrlen)
+  if (sock->type == SOCK_STREAM)
+  {
+    return ptmc_state.sock_states[cur].do_send(sockfd, buf, len, flags);
   }
 
   if (sock->type != SOCK_DGRAM)
