@@ -85,7 +85,7 @@ class StateStorePacked
     size_t index_flush_interval_seconds = 30;
 
     // Storage path
-    std::string storage_path = "memory_packed";
+    std::string storage_path = "memory";
   };
 
   /* Initialize/load existing index */

@@ -5,13 +5,17 @@
 #ifndef __STATE_H
 #define __STATE_H
 
-#include "fsstate.h"
-#include "sockstate.h"
+#include "../engine/thread_manager.h"  // For MAX_THREADS_PER_PROCESS
+#include "../fs/fsstate.h"
+#include "../net/sockstate.h"
 #include <sys/user.h>
 #include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <optional>
+
+// Forward declaration for FutexState
+class FutexState;
 
 /* ======================================================================
  * State Data Format (shared with StateStore)
@@ -58,10 +62,75 @@ struct syscall_info
 };
 
 /* ======================================================================
+ * Thread State (Single Thread State for Multi-threading Support)
+ * ====================================================================== */
+
+/**
+ * @brief Per-thread state for multi-threading support
+ *
+ * Each thread in a tracee process has a thread_state entry. The tid field
+ * is a virtual TID (stable index + 1) that remains constant across state
+ * saves/loads. The physical_tid is the actual kernel thread ID which may
+ * change when states are restored.
+ *
+ * A thread is considered "exited" when physical_tid == 0. This allows us
+ * to maintain stable TID mappings even after threads exit.
+ */
+struct thread_state
+{
+  pid_t tid;                      // Virtual TID (stable thread index + 1)
+  pid_t physical_tid;             // Physical TID (actual kernel thread ID)
+  struct user_regs_struct regs;   // Register context
+  uint64_t clone_flags;           // Clone flags used to create this thread
+  uint64_t stack_addr;            // Stack address (for clone)
+  pid_t ptid;                     // Parent thread TID
+  bool is_main;                   // Whether this is the main thread
+
+  thread_state() : tid(0), physical_tid(0), clone_flags(0), stack_addr(0), ptid(0), is_main(false)
+  {
+    // regs will be zero-initialized by the default member initializer
+  }
+
+  template <class Archive>
+  void serialize(Archive &ar)
+  {
+    ar(tid, physical_tid, regs.r15, regs.r14, regs.r13, regs.r12, regs.rbp, regs.rbx,
+       regs.r11, regs.r10, regs.r9, regs.r8, regs.rax, regs.rcx, regs.rdx,
+       regs.rsi, regs.rdi, regs.orig_rax, regs.rip, regs.cs, regs.eflags,
+       regs.rsp, regs.ss, regs.fs_base, regs.gs_base, regs.ds, regs.es,
+       regs.fs, regs.gs, clone_flags, stack_addr, ptid, is_main);
+  }
+};
+
+/* Thread creation record for tracking clone parameters */
+struct thread_create_info
+{
+  pid_t virtual_tid;     // Virtual TID (stable thread index + 1)
+  pid_t physical_tid;    // Physical TID (actual kernel thread ID)
+  uint64_t clone_flags;
+  uint64_t stack_addr;
+  pid_t ptid;
+
+  template <class Archive>
+  void serialize(Archive &ar)
+  {
+    ar(virtual_tid, physical_tid, clone_flags, stack_addr, ptid);
+  }
+};
+
+/* ======================================================================
  * Tracee State (Single Process State)
  * ====================================================================== */
 
-/* Raft-specific state stored per tracee for safety checking */
+/**
+ * @brief Raft consensus checking state
+ *
+ * Stores Raft-specific state for safety checking during state space
+ * exploration. This allows detecting safety violations like:
+ * - Multiple leaders elected in the same term
+ * - Log inconsistencies
+ * - Commit index violations
+ */
 struct raft_check_state
 {
   // Equality comparison for incremental save optimization
@@ -90,10 +159,23 @@ struct raft_check_state
   }
 };
 
+/**
+ * @brief Per-process state for a single tracee (traced process)
+ *
+ * tracee_state captures all state associated with a single traced process:
+ * - Register context for all threads
+ * - Memory mappings and heap state
+ * - File system state (VFS)
+ * - Socket/network state
+ * - Thread management information
+ *
+ * This structure is serialized/deserialized for state save/load operations.
+ * The threads vector maintains stable virtual TIDs even after threads exit.
+ */
 typedef struct tracee_state
 {
-  /* about syscall_info: here the syscall indicates the last DONE syscall */
-  syscall_info si;
+  /* Last completed syscall information */
+  syscall_info si[MAX_THREADS_PER_PROCESS];  // Per-thread syscall info
 
   uintptr_t brk;
   struct timeval tv;
@@ -106,12 +188,41 @@ typedef struct tracee_state
   /* FdManager state - saved to preserve fd allocation state */
   FdManager fd_manager_state;
 
+  /* Multi-threading support */
+  std::vector<thread_state> threads;        // All thread states
+  std::vector<thread_create_info> thread_create_records;  // Thread creation history
+  pid_t main_tid;                           // Main thread TID
+  int current_thread_idx;                   // Currently selected thread index
+
+  /* Futex state for thread synchronization */
+  struct FutexState *futex_state;           // Futex emulation state (pointer for lazy init)
+
+  /* ---------------------------------------------------------
+   * Thread Management Methods
+   * --------------------------------------------------------- */
+
+  // Add a new thread to this tracee's state
+  void add_thread(pid_t tid, uint64_t clone_flags, uint64_t stack, pid_t ptid, bool is_main = false);
+
+  // Remove a thread from this tracee's state
+  void remove_thread(pid_t tid);
+
+  // Find a thread by TID
+  thread_state* find_thread(pid_t tid);
+  const thread_state* find_thread(pid_t tid) const;
+
+  // Get the number of threads
+  size_t thread_count() const { return threads.size(); }
+
+  // Find thread index by TID
+  int find_thread_index(pid_t tid) const;
+
   /* ---------------------------------------------------------
    * Constructors
    * --------------------------------------------------------- */
 
   /* From running process */
-  tracee_state(int which, const struct syscall_info &info);
+  tracee_state(int which, const struct syscall_info info[]);  // Per-thread syscall info
 
   /* From saved state (hash) */
   tracee_state(hash_type hash);
@@ -119,7 +230,8 @@ typedef struct tracee_state
   // Default constructor - value-initialize all members
   tracee_state()
       : si{}, brk(0), tv{0, 0}, fs_state(), sock_state(),
-        raft_state()
+        raft_state(), threads(), thread_create_records(),
+        main_tid(0), current_thread_idx(0), futex_state(nullptr)
   {
   }
 
@@ -163,7 +275,15 @@ typedef struct tracee_state
   /* Recover memory and registers */
   void recover_mem_reg_snapshot(std::vector<maps_item> &maps, hash_type ts_hash, int pid) const;
 
+  /* ---------------------------------------------------------
+   * Thread Recovery Helpers
+   * --------------------------------------------------------- */
+private:
+  void terminate_extra_threads(pid_t main_pid, int threads_to_terminate) const;
+  void create_missing_threads(pid_t main_pid) const;
+  void restore_thread_registers(pid_t main_pid) const;
 
+public:
   /* ---------------------------------------------------------
    * Serialization
    * --------------------------------------------------------- */
@@ -178,13 +298,23 @@ typedef struct tracee_state
  * System State (Global State for All Processes)
  * ====================================================================== */
 
+/**
+ * @brief Global system state for all tracees
+ *
+ * sys_state represents a complete snapshot of the entire system being traced,
+ * including all processes and their states. This is the primary unit of
+ * state saving/loading during state space exploration.
+ *
+ * The ss_hash uniquely identifies this global state, while ts_hash[]
+ * identifies the individual tracee states that compose it.
+ */
 typedef struct sys_state
 {
-  hash_type ss_hash;
-  hash_type ts_hash[NP];
-  tracee_state child[NP];
-  int status[NP];
-  int error_bound = 5;
+  hash_type ss_hash;        // Global state hash (XOR of all ts_hash)
+  hash_type ts_hash[NP];    // Per-process state hashes
+  tracee_state child[NP];   // Per-process detailed state
+  int status[NP];           // Per-process status (running/exited/etc)
+  int error_bound = 5;      // Allowed deviation for approximate states
 
   // Default constructor - value-initialize all members
   sys_state() : ss_hash(0), ts_hash{}, child{}, status{}, error_bound(4) {}
@@ -198,7 +328,7 @@ typedef struct sys_state
   sys_state &operator=(sys_state &&other) noexcept = default;
 
   /* From running processes - save */
-  sys_state(const struct syscall_info info[]);
+  sys_state(const struct syscall_info info[][MAX_THREADS_PER_PROCESS]);  // Per-thread syscall info
 
   /* From saved state (hash) */
   sys_state(hash_type hash);
@@ -278,8 +408,6 @@ bool mapping_exists(maps_item &a, std::vector<maps_item> &array);
 /* ======================================================================
  * Statistics
  * ====================================================================== */
-
-void state_stats_print();
 
 /* ======================================================================
  * Global Cleanup

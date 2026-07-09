@@ -6,7 +6,7 @@
  */
 
 #include "guest.h"
-#include "state.h"
+#include "state/state.h"
 #include <arpa/inet.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -791,124 +791,140 @@ void format_default(char *buf, const syscall_info &info)
 void format(char *buf, int pid, hash_type ts_hash)
 {
   tracee_state ts(ts_hash);
-  syscall_info info = ts.si;
+  syscall_info info = ts.si[ts.current_thread_idx];
+
+  // Get current thread TID if multi-threaded
+  pid_t tid = pid;
+  if (ts.thread_count() > 1 && ts.current_thread_idx >= 0 &&
+      ts.current_thread_idx < (int)ts.thread_count()) {
+    tid = ts.threads[ts.current_thread_idx].tid;
+  }
+
+  // Format: [TID:xxxx] syscall_name(...)
+  int prefix_len = 0;
+  if (ts.thread_count() > 1) {
+    prefix_len = sprintf(buf, "[TID:%d] ", tid);
+  }
+
+  char *body_buf = buf + prefix_len;
+
   switch (info.nr)
   {
     /* Network */
     case SYS_sendto:
-      format_sendto(buf, pid, ts_hash, info);
+      format_sendto(body_buf, pid, ts_hash, info);
       break;
     case SYS_recvfrom:
-      format_recvfrom(buf, pid, ts_hash, info);
+      format_recvfrom(body_buf, pid, ts_hash, info);
       break;
     case SYS_poll:
       format_poll(buf, info);
       break;
     case SYS_socket:
-      format_socket(buf, info);
+      format_socket(body_buf, info);
       break;
     case SYS_bind:
-      format_bind(buf, pid, ts_hash, info);
+      format_bind(body_buf, pid, ts_hash, info);
       break;
     case SYS_listen:
     case SYS_accept:
     case SYS_accept4:
-      format_socket_fd(buf, info);
+      format_socket_fd(body_buf, info);
       break;
     case SYS_connect:
-      format_connect(buf, pid, ts_hash, info);
+      format_connect(body_buf, pid, ts_hash, info);
       break;
 
     case SYS_epoll_create:
-      snprintf(buf, 1024, "epoll_create(%ld)", info.args[0]);
+      snprintf(body_buf, 1024 - prefix_len, "epoll_create(%ld)", info.args[0]);
       break;
     case SYS_epoll_create1:
-      snprintf(buf, 1024, "epoll_create1(%ld)", info.args[0]);
+      snprintf(body_buf, 1024 - prefix_len, "epoll_create1(%ld)", info.args[0]);
       break;
     case SYS_epoll_ctl:
-      snprintf(buf, 1024, "epoll_ctl(epfd=%ld, op=%ld, fd=%ld, event=%p)",
+      snprintf(body_buf, 1024 - prefix_len, "epoll_ctl(epfd=%ld, op=%ld, fd=%ld, event=%p)",
                info.args[0], info.args[1], info.args[2], (void *)info.args[3]);
       break;
     case SYS_epoll_wait:
-      snprintf(buf, 1024,
+      snprintf(body_buf, 1024 - prefix_len,
                "epoll_wait(epfd=%ld, events=%p, maxevents=%ld, timeout=%ld)",
                info.args[0], (void *)info.args[1], info.args[2], info.args[3]);
       break;
 
     case SYS_setsockopt:
-      snprintf(buf, 1024, "setsockopt(fd=%ld, level=%ld, optname=%ld)",
+      snprintf(body_buf, 1024 - prefix_len, "setsockopt(fd=%ld, level=%ld, optname=%ld)",
                info.args[0], info.args[1], info.args[2]);
       break;
     case SYS_getsockopt:
-      snprintf(buf, 1024, "getsockopt(fd=%ld, level=%ld, optname=%ld)",
+      snprintf(body_buf, 1024 - prefix_len, "getsockopt(fd=%ld, level=%ld, optname=%ld)",
                info.args[0], info.args[1], info.args[2]);
       break;
 
     case SYS_fsync:
-      snprintf(buf, 1024, "fsync(%ld)", info.args[0]);
+      snprintf(body_buf, 1024 - prefix_len, "fsync(%ld)", info.args[0]);
       break;
     case SYS_fdatasync:
-      snprintf(buf, 1024, "fdatasync(%ld)", info.args[0]);
+      snprintf(body_buf, 1024 - prefix_len, "fdatasync(%ld)", info.args[0]);
       break;
 
     case SYS_fcntl:
-      snprintf(buf, 1024, "fcntl(fd=%ld, cmd=%ld, arg=%ld)", info.args[0],
+      snprintf(body_buf, 1024 - prefix_len, "fcntl(fd=%ld, cmd=%ld, arg=%ld)", info.args[0],
                info.args[1], info.args[2]);
       break;
 
     /* File I/O */
     case SYS_read:
-      format_read(buf, pid, ts_hash, info);
+      format_read(body_buf, pid, ts_hash, info);
       break;
     case SYS_write:
-      format_write(buf, pid, ts_hash, info);
+      format_write(body_buf, pid, ts_hash, info);
       break;
     case SYS_openat:
-      format_openat(buf, pid, ts_hash, info);
+      format_openat(body_buf, pid, ts_hash, info);
       break;
     case SYS_close:
-      format_fd_only(buf, info);
+      format_fd_only(body_buf, info);
       break;
     case SYS_chdir:
-      format_chdir(buf, pid, ts_hash, info);
+      format_chdir(body_buf, pid, ts_hash, info);
       break;
 
     /* Memory */
     case SYS_brk:
-      format_addr(buf, info);
+      format_addr(body_buf, info);
       break;
     case SYS_mmap:
-      format_mmap(buf, info);
+      format_mmap(body_buf, info);
       break;
 
     /* Time */
     case SYS_gettimeofday:
-      format_gettimeofday(buf, pid, ts_hash, info);
+      format_gettimeofday(body_buf, pid, ts_hash, info);
       break;
     case SYS_clock_nanosleep:
-      format_clock_nanosleep(buf, pid, ts_hash, info);
+      format_clock_nanosleep(body_buf, pid, ts_hash, info);
       break;
 
     /* Exception */
     case SYS_tgkill:
-      format_tgkill(buf, info);
+      format_tgkill(body_buf, info);
       break;
 
     /* Process */
     case SYS_exit:
     case SYS_exit_group:
-      format_exit(buf, info);
+      format_exit(body_buf, info);
       break;
 
     /* Simple fd-only */
     case SYS_sched_yield:
     case SYS_set_tid_address:
-      format_fd_only(buf, info);
+      format_fd_only(body_buf, info);
       break;
 
     /* Default */
     default:
-      format_default(buf, info);
+      format_default(body_buf, info);
       break;
   }
 }

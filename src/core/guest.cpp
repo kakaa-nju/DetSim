@@ -79,6 +79,7 @@ __attribute__((unused)) void print_call_stack()
   } 
 def_tracee_set(rax); 
 def_tracee_set(orig_rax);
+def_tracee_set(rdi);
 
 #define def_tracee_get(reg)                                                    \
   uint64_t tracee_get_##reg(int pid)                                           \
@@ -91,6 +92,7 @@ def_tracee_set(orig_rax);
 __attribute__((unused)) def_tracee_get(rip);
 def_tracee_get(rbp);
 def_tracee_get(rsp);
+def_tracee_get(rdi);
 
 /* ======================================================================
  * Section 3: VDSO Removal

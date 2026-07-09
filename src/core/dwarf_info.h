@@ -159,17 +159,10 @@ size_t dwarf_type_size(const char *type_name);
 /* Get member offset within struct */
 ptrdiff_t dwarf_member_offset(const char *struct_type, const char *member);
 
-/* Get member size and type name */
-bool dwarf_member_info(const char *struct_type, const char *member,
-                       ptrdiff_t *offset, size_t *size, std::string *type_name);
-
 /* Get element type after one level of array/pointer indexing
  * e.g., "rect * *" -> "rect *", "point[]" -> "point", "int*" -> "int"
  */
 std::string dwarf_get_element_type(const char *type_name);
-
-/* Dump type information for debugging */
-void dwarf_dump_type(const char *type_name);
 
 /* ======================================================================
  * Raw Access (for advanced use)

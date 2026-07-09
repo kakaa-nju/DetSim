@@ -5,9 +5,9 @@
 #ifndef __MONITOR_H
 #define __MONITOR_H
 
-#include "fd_manager.h"
-#include "sockstate.h"
-#include "state.h"
+#include "fs/fd_manager.h"
+#include "net/sockstate.h"
+#include "state/state.h"
 #include "types.h"
 #include <memory>
 #include <string>
@@ -48,6 +48,18 @@ struct PTMC_STATE
   FileSystemState fs_states[NP];
 
   int pids[NP] = {};
+
+  /* Multi-threading support */
+  int current_thread_idx[NP] = {};  /* Currently selected thread index per tracee */
+  bool thread_blocked[NP][64] = {}; /* Thread blocked status (waiting on futex) per tracee, max 64 threads */
+  bool thread_exited[NP][64] = {};  /* Thread exit status per tracee, max 64 threads */
+
+  /* Get current thread TID for a tracee */
+  pid_t get_current_tid(int tracee_idx) const;
+  void set_current_thread(int tracee_idx, int thread_idx);
+
+  /* Get physical TID for a specific thread index in a tracee */
+  pid_t get_thread_tid(int tracee_idx, int thread_idx) const;
 
   struct tracee_info
   {

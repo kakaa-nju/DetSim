@@ -1,17 +1,18 @@
 #include "scheduler.h"
+#include "scheduler/scheduler.h"
 #include "debug.h"
-#include "emu.h"
+#include "net/emu.h"
 #include "expr_eval.hpp"
-#include "fsstate.h"
+#include "fs/fsstate.h"
 #include "guest.h"
 #include "monitor.h"
 #include "proc_status.h"
-#include "sockstate.h"
-#include "state.h"
-#include "state_store.h"
-#include "state_store_packed.h"
-#include "state_transition.h"
-#include "sysstate_store.h"
+#include "net/sockstate.h"
+#include "state/state.h"
+#include "state/state_store.h"
+#include "state/state_store_packed.h"
+#include "state/state_transition.h"
+#include "state/sysstate_store.h"
 #include "utils.h"
 
 /* NCursesUI integration */
@@ -102,7 +103,9 @@ static int check_state()
 int load_exec_store()
 {
   int index = ptmc_state.cursor;
-  sys_state s = ptmc_state.running_state;
+  // Save original state before attempting transition
+  sys_state original_state = ptmc_state.running_state;
+  sys_state s = original_state;
 
   if (DISEXITED(s.status[index]))
   {
@@ -121,13 +124,28 @@ int load_exec_store()
 
   TransitionResult result = state_transition(s, index);
 
+  // Check if the current thread is blocked
+  if (result.code == CKPT_DISCARD)
+  {
+    int thread_idx = ptmc_state.current_thread_idx[index];
+    detsim::ui::ui_printf("Thread %d is blocked (waiting on futex). Cannot step.\n",
+                          thread_idx);
+    // Restore to the original state before this si command
+    // The tracee is in an unstable state (syscall entry), so we must roll back
+    ptmc_state.running_state = original_state;
+    // BUT: Preserve the thread information from the attempted transition
+    // so user can see and switch to other threads
+    ptmc_state.running_state.child[index].threads = result.new_state.child[index].threads;
+    ptmc_state.running_state.child[index].current_thread_idx = result.new_state.child[index].current_thread_idx;
+    // The thread_blocked flag is already set in ptmc_state by the futex handler
+    return -1;
+  }
+
   if (check_state() != 0)
     detsim::ui::ui_printf("Reach illegal state.\n");
 
   return 0;
 }
-
-extern LSS state_queue;
 extern SSS state_set;
 extern TSS state_tree;
 extern int sigint_received;
@@ -165,6 +183,25 @@ static std::mutex g_depth_data_mutex;
 static double g_fit_a = 0.0; // coefficient
 static double g_fit_b = 0.0; // exponent
 static std::mutex g_fit_mutex;
+
+/* Store statistics structure for status display */
+struct StoreStats
+{
+  size_t l1_usage = 0;
+  size_t l1_cap = 0;
+  size_t l2_usage = 0;
+  size_t l2_cap = 0;
+  size_t l1_entries = 0;
+  size_t l2_entries = 0;
+  size_t io_queue_size = 0;
+  size_t io_queue_cap = 0;
+  size_t prefetch_queue_size = 0;
+  double hit_rate = 0.0;
+  size_t prefetch_issued = 0;
+  size_t prefetch_hits = 0;
+  size_t evict_calls = 0;
+  size_t evict_bytes = 0;
+};
 
 /* Perform exponential fit: y = a * exp(b * x)
  * Returns true if fit succeeds, false otherwise */
@@ -298,211 +335,233 @@ static std::string format_bytes(size_t bytes)
 #define ANSI_MOVE_TO_ROW(r) "\033[" #r ";1H"
 
 /* Status monitor thread - updates display every second */
+/* Helper: Collect store statistics for status display */
+static void collect_store_stats(struct StoreStats &out)
+{
+  auto &store = StateStore::instance();
+  auto stats = store.get_stats();
+
+  out.l1_usage = store.get_l1_usage();
+  out.l1_cap = store.get_l1_capacity();
+  out.l2_usage = store.get_l2_usage();
+  out.l2_cap = store.get_l2_capacity();
+  out.l1_entries = store.get_l1_entry_count();
+  out.l2_entries = store.get_l2_entry_count();
+  out.io_queue_size = store.get_io_queue_size();
+  out.io_queue_cap = store.get_io_queue_capacity();
+  out.prefetch_queue_size = store.get_prefetch_queue_size();
+  out.hit_rate = stats.hit_rate();
+  out.prefetch_issued = stats.prefetch_issued;
+  out.prefetch_hits = stats.prefetch_hits;
+  out.evict_calls = stats.evict_calls;
+  out.evict_bytes = stats.evict_bytes;
+}
+
+/* Helper: Update depth statistics tracking */
+static void update_depth_statistics(size_t depth, size_t total_searched)
+{
+  size_t current_max_depth = g_max_depth_recorded.load();
+
+  if (depth > current_max_depth && total_searched > 0)
+  {
+    if (g_max_depth_recorded.compare_exchange_weak(current_max_depth, depth))
+    {
+      std::lock_guard<std::mutex> lock(g_depth_stat_mutex);
+      if (g_depth_stat_file)
+      {
+        fprintf(g_depth_stat_file, "%zu %zu\n", depth, total_searched);
+        fflush(g_depth_stat_file);
+      }
+      update_depth_fit(depth, total_searched);
+    }
+  }
+}
+
+/* Helper: Calculate subsystem memory usage */
+static void calculate_subsystem_stats(size_t &sock_state_total, size_t &fs_state_total)
+{
+  sock_state_total = 0;
+  fs_state_total = 0;
+  for (int i = 0; i < NP; i++)
+  {
+    sock_state_total += ptmc_state.sock_states[i].sockets().size();
+    sock_state_total += ptmc_state.sock_states[i].udp_recv_buffers().size();
+  }
+}
+
+/* Helper: Format time as HH:MM:SS */
+static void format_time(double elapsed, int &hours, int &minutes, int &seconds)
+{
+  hours = (int)(elapsed / 3600);
+  minutes = ((int)elapsed % 3600) / 60;
+  seconds = (int)elapsed % 60;
+}
+
+/* Helper: Update NCursesUI status display */
+static void update_ui_status(detsim::ui::NCursesUI *ui, const struct StoreStats &stats,
+                             double elapsed, size_t depth, size_t queue_size,
+                             size_t state_tree_size, size_t total_sysstates,
+                             size_t unique_states, size_t sock_state_total,
+                             size_t fs_state_total, size_t state_queue_internal)
+{
+  char buf[256];
+  int hours, minutes, seconds;
+  format_time(elapsed, hours, minutes, seconds);
+
+  double l1_pct = stats.l1_cap > 0 ? 100.0 * stats.l1_usage / stats.l1_cap : 0;
+  double l2_pct = stats.l2_cap > 0 ? 100.0 * stats.l2_usage / stats.l2_cap : 0;
+  double states_per_sec = elapsed > 0 ? g_states_searched.load() / elapsed : 0;
+
+  /* Line 1: Progress stats */
+  snprintf(buf, sizeof(buf),
+           "Searched: %zu | Unique: %zu | Depth: %zu | Queued: %zu | "
+           "%.1f/s | %02d:%02d:%02d",
+           g_states_searched.load(), unique_states, depth, queue_size,
+           states_per_sec, hours, minutes, seconds);
+  ui->set_status_line(1, buf);
+
+  /* Line 2: Worker queues & prefetch stats */
+  snprintf(
+      buf, sizeof(buf),
+      "IO: %zu/%zu | Prefetch: %zu Q(%lu/%lu H) | Tree: %zu | Sys: %zu",
+      stats.io_queue_size, stats.io_queue_cap, stats.prefetch_queue_size,
+      stats.prefetch_issued, stats.prefetch_hits, state_tree_size,
+      total_sysstates);
+  ui->set_status_line(2, buf);
+
+  /* Line 3: Cache L1 & L2 with hit rate */
+  snprintf(
+      buf, sizeof(buf),
+      "L1: %s/%s (%.0f%%) [%zu] | L2: %s/%s (%.0f%%) [%zu] | Hit: %.1f%%",
+      format_bytes(stats.l1_usage).c_str(), format_bytes(stats.l1_cap).c_str(), l1_pct,
+      stats.l1_entries, format_bytes(stats.l2_usage).c_str(),
+      format_bytes(stats.l2_cap).c_str(), l2_pct, stats.l2_entries, stats.hit_rate);
+  ui->set_status_line(3, buf);
+
+  /* Line 4: Eviction & subsystem stats */
+  snprintf(buf, sizeof(buf),
+           "Evict: %lu (%s) | Sock: %zu | FS: %zu | SQueue: %zu",
+           stats.evict_calls, format_bytes(stats.evict_bytes).c_str(),
+           sock_state_total, fs_state_total, state_queue_internal);
+  ui->set_status_line(4, buf);
+
+  /* Line 5: State stats */
+  snprintf(buf, sizeof(buf), "Error Bound: %d", ptmc_state.error_bound);
+  ui->set_status_line(5, buf);
+}
+
+/* Helper: Print text status to console */
+static void print_text_status(const struct StoreStats &stats, double elapsed,
+                              size_t depth, size_t queue_size, size_t total_sysstates,
+                              size_t unique_states)
+{
+  static time_t last_status_time = 0;
+  time_t current_time = time(NULL);
+
+  /* Only print every 10 seconds to avoid spamming logs */
+  if (current_time - last_status_time < 10)
+    return;
+
+  last_status_time = current_time;
+
+  int hours, minutes, seconds;
+  format_time(elapsed, hours, minutes, seconds);
+  double states_per_sec = elapsed > 0 ? g_states_searched.load() / elapsed : 0;
+  double l1_pct = stats.l1_cap > 0 ? 100.0 * stats.l1_usage / stats.l1_cap : 0;
+  double l2_pct = stats.l2_cap > 0 ? 100.0 * stats.l2_usage / stats.l2_cap : 0;
+
+  /* Line 1: Basic stats */
+  printf("[STATUS] States: %zu searched | %zu unique | %zu queued | "
+         "Depth: %zu | %.1f states/s\n",
+         g_states_searched.load(), unique_states, queue_size, depth,
+         states_per_sec);
+
+  /* Line 2: Worker queues */
+  printf("[STATUS] Queues: IO=[%zu/%zu] | Prefetch=[%zu]\n",
+         stats.io_queue_size, stats.io_queue_cap, stats.prefetch_queue_size);
+
+  /* Line 3: Cache L1 */
+  printf("[STATUS] L1 Hot: %s / %s (%.1f%%) | %zu entries\n",
+         format_bytes(stats.l1_usage).c_str(), format_bytes(stats.l1_cap).c_str(),
+         l1_pct, stats.l1_entries);
+
+  /* Line 4: Cache L2 */
+  printf("[STATUS] L2 Warm: %s / %s (%.1f%%) | %zu entries\n",
+         format_bytes(stats.l2_usage).c_str(), format_bytes(stats.l2_cap).c_str(),
+         l2_pct, stats.l2_entries);
+
+  /* Line 5: Time */
+  printf("[STATUS] Elapsed: %02d:%02d:%02d | Total SysStates: %zu\n",
+         hours, minutes, seconds, total_sysstates);
+
+  /* Line 6: Mode */
+  const char *mode_str = "DFS";
+  if (ptmc_state.mode == PTMC_STATE::MODE_RAND)
+    mode_str = "RAND";
+  else if (ptmc_state.mode == PTMC_STATE::MODE_DFS)
+    mode_str = "DFS";
+  else if (ptmc_state.mode == PTMC_STATE::MODE_BFS)
+    mode_str = "BFS";
+  printf("[STATUS] Mode: %s | Auto: %s | SIGINT: %s\n", mode_str,
+         is_auto_mode() ? "ON" : "OFF", sigint_received ? "YES" : "NO");
+
+  /* Line 7: Process status */
+  int running = 0, exited = 0;
+  for (int i = 0; i < NP; i++)
+  {
+    if (DISDEAD(ptmc_state.status[i]))
+      exited++;
+    else
+      running++;
+  }
+  printf("[STATUS] Processes: %d running | %d exited | Current: %d\n",
+         running, exited, ptmc_state.cursor);
+
+  /* Line 8: Current hash */
+  printf("[STATUS] Current: %016lx\n", ptmc_state.running_state.ss_hash);
+  fflush(stdout);
+}
+
 static void status_monitor_thread()
 {
-  /* Wait a bit for initial states to be processed */
   std::this_thread::sleep_for(std::chrono::milliseconds(500));
 
-  /* Get NCursesUI instance */
   detsim::ui::NCursesUI *ui = get_ncurses_ui();
-
   int rows, cols;
   get_terminal_size(rows, cols);
 
-  /* Hide cursor (only if not using UI) */
-  // Skip ANSI cursor hide in no-ui mode to avoid terminal issues
-  // if (!ui)
-  // {
-  //   detsim::ui::ui_printf(ANSI_HIDE_CURSOR);
-  //   fflush(stdout);
-  // }
-
   while (g_monitor_running.load())
   {
-    auto &store = StateStore::instance();
-    auto stats = store.get_stats();
+    struct StoreStats stats;
+    collect_store_stats(stats);
 
-    size_t l1_usage = store.get_l1_usage();
-    size_t l1_cap = store.get_l1_capacity();
-    size_t l2_usage = store.get_l2_usage();
-    size_t l2_cap = store.get_l2_capacity();
-    size_t l1_entries = store.get_l1_entry_count();
-    size_t l2_entries = store.get_l2_entry_count();
-    size_t io_queue_size = store.get_io_queue_size();
-    size_t io_queue_cap = store.get_io_queue_capacity();
-    size_t prefetch_queue_size = store.get_prefetch_queue_size();
-
-    double hit_rate = stats.hit_rate();
     double elapsed = gettime() - g_start_time.load();
-    double states_per_sec =
-        elapsed > 0 ? g_states_searched.load() / elapsed : 0;
-
     size_t total_sysstates = state_set.size();
     size_t unique_states = g_states_new.load();
     size_t queue_size = g_queue_size.load();
-    size_t traces_searched = g_traces_searched.load();
-    /* Calculate real depth from state tree */
     size_t depth = calculate_state_depth(ptmc_state.running_state.ss_hash);
 
-    /* NEW: Track depth vs states relationship - log when we see a new max depth
-     */
-    size_t current_max_depth = g_max_depth_recorded.load();
-    size_t total_searched = g_states_searched.load();
-    if (depth > current_max_depth && total_searched > 0)
-    {
-      // Update max depth (may fail if another thread updated, that's OK)
-      if (g_max_depth_recorded.compare_exchange_weak(current_max_depth, depth))
-      {
-        std::lock_guard<std::mutex> lock(g_depth_stat_mutex);
-        if (g_depth_stat_file)
-        {
-          fprintf(g_depth_stat_file, "%zu %zu\n", depth, total_searched);
-          fflush(g_depth_stat_file);
-        }
-        // Update exponential fit with new data point
-        update_depth_fit(depth, total_searched);
-      }
-    }
+    update_depth_statistics(depth, g_states_searched.load());
 
-    /* NEW: Track global container sizes (potential memory hogs) */
+    size_t sock_state_total, fs_state_total;
+    calculate_subsystem_stats(sock_state_total, fs_state_total);
+
     size_t state_tree_size = state_tree.size();
     size_t state_queue_internal = StateStore::instance().queue_size();
-    size_t sock_state_total = 0;
-    size_t fs_state_total = 0;
-    for (int i = 0; i < NP; i++)
-    {
-      sock_state_total += ptmc_state.sock_states[i].sockets().size();
-      sock_state_total += ptmc_state.sock_states[i].udp_recv_buffers().size();
-    }
 
-    /* Update status display */
     if (ui)
     {
-      /* Use NCursesUI status window - compact layout */
-      char buf[256];
-
-      double l1_pct = l1_cap > 0 ? 100.0 * l1_usage / l1_cap : 0;
-      double l2_pct = l2_cap > 0 ? 100.0 * l2_usage / l2_cap : 0;
-      int hours = (int)(elapsed / 3600);
-      int minutes = ((int)elapsed % 3600) / 60;
-      int seconds = (int)elapsed % 60;
-
-      /* Line 1: Progress stats */
-      snprintf(buf, sizeof(buf),
-               "Searched: %zu | Unique: %zu | Depth: %zu | Queued: %zu | "
-               "%.1f/s | %02d:%02d:%02d",
-               g_states_searched.load(), unique_states, depth, queue_size,
-               states_per_sec, hours, minutes, seconds);
-      ui->set_status_line(1, buf);
-
-      /* Line 2: Worker queues & prefetch stats */
-      snprintf(
-          buf, sizeof(buf),
-          "IO: %zu/%zu | Prefetch: %zu Q(%lu/%lu H) | Tree: %zu | Sys: %zu",
-          io_queue_size, io_queue_cap, prefetch_queue_size,
-          stats.prefetch_issued, stats.prefetch_hits, state_tree_size,
-          total_sysstates);
-      ui->set_status_line(2, buf);
-
-      /* Line 3: Cache L1 & L2 with hit rate */
-      snprintf(
-          buf, sizeof(buf),
-          "L1: %s/%s (%.0f%%) [%zu] | L2: %s/%s (%.0f%%) [%zu] | Hit: %.1f%%",
-          format_bytes(l1_usage).c_str(), format_bytes(l1_cap).c_str(), l1_pct,
-          l1_entries, format_bytes(l2_usage).c_str(),
-          format_bytes(l2_cap).c_str(), l2_pct, l2_entries, hit_rate);
-      ui->set_status_line(3, buf);
-
-      /* Line 4: Eviction & subsystem stats */
-      snprintf(buf, sizeof(buf),
-               "Evict: %lu (%s) | Sock: %zu | FS: %zu | SQueue: %zu",
-               stats.evict_calls, format_bytes(stats.evict_bytes).c_str(),
-               sock_state_total, fs_state_total, state_queue_internal);
-      ui->set_status_line(4, buf);
-
-      /* Line 5: State stats */
-      snprintf(buf, sizeof(buf), "Error Bound: %d", ptmc_state.error_bound);
-      ui->set_status_line(5, buf);
+      update_ui_status(ui, stats, elapsed, depth, queue_size,
+                       state_tree_size, total_sysstates, unique_states,
+                       sock_state_total, fs_state_total, state_queue_internal);
     }
     else
     {
-      /* No UI mode: use simple text output without ANSI codes */
-      /* Only print every 10 seconds to avoid spamming logs */
-      static time_t last_status_time = 0;
-      time_t current_time = time(NULL);
-      if (current_time - last_status_time >= 10)
-      {
-        last_status_time = current_time;
-
-        /* Line 1: Basic stats */
-        printf("[STATUS] States: %zu searched | %zu unique | %zu queued | "
-               "Depth: %zu | %.1f states/s\n",
-               g_states_searched.load(), unique_states, queue_size, depth,
-               states_per_sec);
-
-        /* Line 2: Worker queues */
-        printf("[STATUS] Queues: IO=[%zu/%zu] | Prefetch=[%zu]\n",
-               io_queue_size, io_queue_cap, prefetch_queue_size);
-
-        /* Line 3: Cache L1 */
-        double l1_pct = l1_cap > 0 ? 100.0 * l1_usage / l1_cap : 0;
-        printf("[STATUS] L1 Hot: %s / %s (%.1f%%) | %zu entries\n",
-               format_bytes(l1_usage).c_str(), format_bytes(l1_cap).c_str(),
-               l1_pct, l1_entries);
-
-        /* Line 4: Cache L2 */
-        double l2_pct = l2_cap > 0 ? 100.0 * l2_usage / l2_cap : 0;
-        printf("[STATUS] L2 Warm: %s / %s (%.1f%%) | %zu entries\n",
-               format_bytes(l2_usage).c_str(), format_bytes(l2_cap).c_str(),
-               l2_pct, l2_entries);
-
-        /* Line 5: Time */
-        int hours = (int)(elapsed / 3600);
-        int minutes = ((int)elapsed % 3600) / 60;
-        int seconds = (int)elapsed % 60;
-        printf("[STATUS] Elapsed: %02d:%02d:%02d | Total SysStates: %zu\n",
-               hours, minutes, seconds, total_sysstates);
-
-        /* Line 6: Mode */
-        const char *mode_str = "DFS";
-        if (ptmc_state.mode == PTMC_STATE::MODE_RAND)
-          mode_str = "RAND";
-        else if (ptmc_state.mode == PTMC_STATE::MODE_DFS)
-          mode_str = "DFS";
-        else if (ptmc_state.mode == PTMC_STATE::MODE_BFS)
-          mode_str = "BFS";
-        printf("[STATUS] Mode: %s | Auto: %s | SIGINT: %s\n", mode_str,
-               is_auto_mode() ? "ON" : "OFF", sigint_received ? "YES" : "NO");
-
-        /* Line 7: Process status */
-        int running = 0, exited = 0;
-        for (int i = 0; i < NP; i++)
-        {
-          if (DISDEAD(ptmc_state.status[i]))
-            exited++;
-          else
-            running++;
-        }
-        printf("[STATUS] Processes: %d running | %d exited | Current: %d\n",
-               running, exited, ptmc_state.cursor);
-
-        /* Line 8: Current hash */
-        printf("[STATUS] Current: %016lx\n", ptmc_state.running_state.ss_hash);
-        fflush(stdout);
-      }
+      print_text_status(stats, elapsed, depth, queue_size, total_sysstates, unique_states);
     }
 
-    /* Sleep 1 second */
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
-
-  /* Show cursor again (only if not using UI) */
-  // Skip ANSI cursor show in no-ui mode to avoid terminal issues
-  // if (!ui)
-  // {
-  //   detsim::ui::ui_printf(ANSI_SHOW_CURSOR);
-  //   fflush(stdout);
-  // }
 }
 
 static void start_status_monitor()
@@ -563,6 +622,22 @@ bool state_to_be_discarded(int index, syscall_info *infos)
 }
 
 /* auto mode: */
+/**
+ * @brief Execute Breadth-First Search (BFS) state space exploration
+ *
+ * This function implements BFS exploration:
+ * 1. Initialize statistics and reset StateStore
+ * 2. Add initial state to queue
+ * 3. While queue not empty:
+ *    - Pop state from queue
+ *    - For each alive process:
+ *      - Execute state transition
+ *      - If new state found, add to queue
+ *    - Check for illegal states
+ * 4. Report final statistics
+ *
+ * @return 0 on completion, 1 if stopped early
+ */
 int exec_bfs()
 {
   ptmc_state.mode = PTMC_STATE::MODE_BFS;
@@ -664,7 +739,7 @@ int exec_bfs()
         detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
                               time_used, states_searched_this_run / time_used);
         StateStore::instance().print_stats();
-        state_fetched->clear();
+        state_fetched.reset();
       }
 
       if (result.code != CKPT_DISCARD &&
@@ -764,6 +839,20 @@ struct DFSFrame
   }
 };
 
+/**
+ * @brief Recursive DFS state space exploration
+ *
+ * Recursively explores the state space depth-first:
+ * 1. Track visited states to avoid revisiting
+ * 2. Stop if max depth reached
+ * 3. For each alive process, try all choice combinations
+ * 4. Recursively explore each new state
+ * 5. Check for illegal states and SIGINT
+ *
+ * @param ss_hash Hash of current state to explore
+ * @param depth Remaining depth to explore
+ * @return 0 on completion, 1 if stopped early
+ */
 int do_dfs(hash_type ss_hash, int depth)
 {
   states_searched_this_run++;

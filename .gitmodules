@@ -10,3 +10,6 @@
 [submodule "examples/redis/redis"]
 	path = examples/redis/redis
 	url = https://github.com/Tilnel/redis
+[submodule "examples/paxos/paxos"]
+	path = examples/paxos/paxos
+	url = https://github.com/Tilnel/paxos

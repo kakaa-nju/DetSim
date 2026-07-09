@@ -5,12 +5,13 @@
 #include <functional>
 #include <chrono>
 
+// Checkpoint return codes - must match values in handlers.h and exec_engine.cpp
 enum TransitionResultCode {
-    CKPT_NO = 0,
-    CKPT_YES = 1,
-    CKPT_DISCARD = 2,
-    CKPT_EXIT = 3,
-    CKPT_STOP = 4
+    CKPT_NO = 0,        // No checkpoint needed
+    CKPT_YES = 1,       // Save this state
+    CKPT_EXIT = 2,      // Process exited
+    CKPT_STOP = 3,      // Stop exploration (crash/assertion failure)
+    CKPT_DISCARD = 4    // Discard this path (blocked thread, etc.)
 };
 
 #define PTRACE_TRAP_SIG (SIGTRAP | 0x80)

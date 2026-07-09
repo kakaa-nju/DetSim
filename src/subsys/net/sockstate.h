@@ -72,6 +72,7 @@ struct Socket
   int domain;   // AF_INET, AF_UNIX, etc.
   int type;     // SOCK_STREAM, SOCK_DGRAM
   int protocol; // Protocol number (usually 0)
+  int flags;    // SOCK_NONBLOCK, SOCK_CLOEXEC flags from socket creation
 
   // Binding state
   bool bound;
@@ -91,7 +92,7 @@ struct Socket
   std::map<uint64_t, TcpConnection> established_connections;
 
   Socket()
-      : fd(-1), domain(0), type(0), protocol(0), bound(false), connected(false),
+      : fd(-1), domain(0), type(0), protocol(0), flags(0), bound(false), connected(false),
         listening(false), backlog(0)
   {
   }
@@ -191,16 +192,11 @@ class SockState
   /* close(fd) -> 0 or -errno */
   int do_close(int fd);
 
-  /* getsockname(fd, addr, addrlen) -> 0 or -errno */
-  int do_getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen);
-
-  /* getpeername(fd, addr, addrlen) -> 0 or -errno */
-  int do_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen);
-
   /* --------------------------------------------------------------------------
    * Epoll Operations (for Redis)
    * --------------------------------------------------------------------------
    */
+  int do_poll(struct pollfd *fds, nfds_t nfds, int timeout);
 
   /* epoll_create(size) -> fd or -errno */
   int do_epoll_create(int size);
@@ -327,6 +323,11 @@ int emu_epoll_create1(int flags);
 int emu_epoll_ctl(int epfd, int op, int fd, struct epoll_event *event);
 int emu_epoll_wait(int epfd, struct epoll_event *events, int maxevents,
                    int timeout);
+int emu_epoll_pwait(int epfd, struct epoll_event *events, int maxevents,
+                    int timeout, const sigset_t *sigmask, size_t sigsetsize);
+int emu_epoll_pwait2(int epfd, struct epoll_event *events, int maxevents,
+                     const struct timespec *timeout, const sigset_t *sigmask,
+                     size_t sigsetsize);
 
 ssize_t emu_send(int sockfd, const void *buf, size_t len, int flags);
 ssize_t emu_recv(int sockfd, void *buf, size_t len, int flags);
