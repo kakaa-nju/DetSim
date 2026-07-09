@@ -16,6 +16,7 @@
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <vector>
+#include <sys/poll.h>
 
 /* Guest memory operations - defined in guest.cpp */
 extern void *memcpy_host2guest(void *dest, const void *src, size_t n);
@@ -195,6 +196,7 @@ class SockState
    * Epoll Operations (for Redis)
    * --------------------------------------------------------------------------
    */
+  int do_poll(struct pollfd *fds, nfds_t nfds, int timeout);
 
   /* epoll_create(size) -> fd or -errno */
   int do_epoll_create(int size);
@@ -314,6 +316,7 @@ ssize_t emu_sendto(int sockfd, const void *buf, size_t len, int flags,
 int emu_socket(int domain, int type, int protocol);
 int emu_listen(int sockfd, int backlog);
 int emu_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
+int emu_poll(struct pollfd *fds, nfds_t nfds, int timeout);
 
 int emu_epoll_create(int size);
 int emu_epoll_create1(int flags);

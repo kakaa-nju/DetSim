@@ -58,6 +58,7 @@ SyscallRoute SyscallDispatcher::get_route(int syscall_nr) const
                                SyscallAction::EMULATE,
                                "Network syscall - emulated");
 
+        case SYS_poll:
         // Epoll syscalls - emulated
         case SYS_epoll_create:
         case SYS_epoll_create1:
@@ -82,6 +83,7 @@ SyscallRoute SyscallDispatcher::get_route(int syscall_nr) const
         case SYS_openat:
         case SYS_read:
         case SYS_write:
+        case SYS_writev:
         case SYS_close:
         case SYS_lseek:
         case SYS_stat:
@@ -223,6 +225,7 @@ int SyscallDispatcher::on_exit(pid_t pid, syscall_info& info)
         case SYS_accept4:
         case SYS_setsockopt:
         case SYS_getsockopt:
+        case SYS_poll:
         case SYS_epoll_create:
         case SYS_epoll_create1:
         case SYS_epoll_ctl:
@@ -236,6 +239,7 @@ int SyscallDispatcher::on_exit(pid_t pid, syscall_info& info)
         case SYS_openat:
         case SYS_read:
         case SYS_write:
+        case SYS_writev:
         case SYS_close:
         case SYS_lseek:
         case SYS_stat:

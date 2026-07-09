@@ -21,6 +21,7 @@ void *memcpy_guest2host(void *dest, const void *src, size_t n);
 long emu_vfs_openat(int dirfd, const char *path, int flags, mode_t mode);
 long emu_vfs_read(int fd, void *buf, size_t count);
 long emu_vfs_write(int fd, const void *buf, size_t count);
+long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt);
 long emu_vfs_close(int fd);
 long emu_vfs_lseek(int fd, off_t offset, int whence);
 long emu_vfs_stat(const char *path, struct stat *statbuf);

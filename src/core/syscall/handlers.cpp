@@ -27,23 +27,24 @@ namespace network {
 
 int handle(pid_t pid, syscall_info &info) {
     switch (info.nr) {
-        case SYS_sendto:      return handle_sendto(pid, info);
-        case SYS_recvfrom:    return handle_recvfrom(pid, info);
-        case SYS_socket:      return handle_socket(pid, info);
-        case SYS_connect:     return handle_connect(pid, info);
-        case SYS_bind:        return handle_bind(pid, info);
-        case SYS_listen:      return handle_listen(pid, info);
+        case SYS_sendto:        return handle_sendto(pid, info);
+        case SYS_recvfrom:      return handle_recvfrom(pid, info);
+        case SYS_socket:        return handle_socket(pid, info);
+        case SYS_connect:       return handle_connect(pid, info);
+        case SYS_bind:          return handle_bind(pid, info);
+        case SYS_listen:        return handle_listen(pid, info);
         case SYS_accept:
-        case SYS_accept4:     return handle_accept(pid, info);
-        case SYS_setsockopt:  return handle_setsockopt(pid, info);
-        case SYS_getsockopt:  return handle_getsockopt(pid, info);
-        case SYS_epoll_create: return handle_epoll_create(pid, info);
+        case SYS_accept4:       return handle_accept(pid, info);
+        case SYS_setsockopt:    return handle_setsockopt(pid, info);
+        case SYS_getsockopt:    return handle_getsockopt(pid, info);
+        case SYS_poll:          return handle_poll(pid, info);
+        case SYS_epoll_create:  return handle_epoll_create(pid, info);
         case SYS_epoll_create1: return handle_epoll_create1(pid, info);
-        case SYS_epoll_ctl:   return handle_epoll_ctl(pid, info);
-        case SYS_epoll_wait:  return handle_epoll_wait(pid, info);
-        case SYS_epoll_pwait: return handle_epoll_pwait(pid, info);
-        case SYS_epoll_pwait2: return handle_epoll_pwait2(pid, info);
-        default:              return CKPT_NO;
+        case SYS_epoll_ctl:     return handle_epoll_ctl(pid, info);
+        case SYS_epoll_wait:    return handle_epoll_wait(pid, info);
+        case SYS_epoll_pwait:   return handle_epoll_pwait(pid, info);
+        case SYS_epoll_pwait2:  return handle_epoll_pwait2(pid, info);
+        default:                return CKPT_NO;
     }
 }
 
@@ -122,6 +123,13 @@ int handle_getsockopt(pid_t pid, syscall_info &info) {
     return CKPT_YES;
 }
 
+int handle_poll(pid_t pid, syscall_info &info) {
+    long ret = emu_poll((struct pollfd *)info.args[0], info.args[1], info.args[2]);
+    tracee_set_rax(pid, ret);
+    info.rval = ret;
+    return CKPT_YES;
+}
+
 int handle_epoll_create(pid_t pid, syscall_info &info) {
     long ret = emu_epoll_create(info.args[0]);
     tracee_set_rax(pid, ret);
@@ -186,6 +194,7 @@ int handle(pid_t pid, syscall_info &info) {
         case SYS_openat:    return handle_openat(pid, info);
         case SYS_read:      return handle_read(pid, info);
         case SYS_write:     return handle_write(pid, info);
+        case SYS_writev:    return handle_writev(pid, info);
         case SYS_close:     return handle_close(pid, info);
         case SYS_lseek:     return handle_lseek(pid, info);
         case SYS_stat:      return handle_stat(pid, info);
@@ -226,6 +235,13 @@ int handle_read(pid_t pid, syscall_info &info) {
 
 int handle_write(pid_t pid, syscall_info &info) {
     long ret = emu_vfs_write(info.args[0], (const void *)info.args[1], info.args[2]);
+    tracee_set_rax(pid, ret);
+    info.rval = ret;
+    return CKPT_YES;
+}
+
+int handle_writev(pid_t pid, syscall_info &info) {
+    long ret = emu_vfs_writev(info.args[0], (const struct iovec *)info.args[1], info.args[2]);
     tracee_set_rax(pid, ret);
     info.rval = ret;
     return CKPT_YES;
