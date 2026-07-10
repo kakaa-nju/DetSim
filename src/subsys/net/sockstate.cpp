@@ -119,7 +119,8 @@ int SockState::do_socket(int domain, int type, int protocol)
 
   if (base_type != SOCK_STREAM && base_type != SOCK_DGRAM)
   {
-    LOG_ERROR("socket: unsupported type %d (base_type=%d, flags=%d)", type, base_type, type_flags);
+    LOG_ERROR("socket: unsupported type %d (base_type=%d, flags=%d)", type,
+              base_type, type_flags);
     return -EPROTONOSUPPORT;
   }
 
@@ -141,7 +142,8 @@ int SockState::do_socket(int domain, int type, int protocol)
 
   sockets_[fd] = sock;
 
-  LOG_TRACE("socket(%d, %d, %d) -> fd=%d (base_type=%d, flags=%d)", domain, type, protocol, fd, base_type, type_flags);
+  LOG_TRACE("socket(%d, %d, %d) -> fd=%d (base_type=%d, flags=%d)", domain,
+            type, protocol, fd, base_type, type_flags);
   return fd;
 }
 
@@ -309,30 +311,30 @@ int SockState::do_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
   // Find the client socket to get its address
   const Socket *client_sock = nullptr;
   int client_pid = -1;
+  uint64_t client_key;
+  std::map<uint64_t, TcpConnection>::iterator established_it;
   for (int pid = 0; pid < NP; pid++)
   {
     client_sock = ptmc_state.sock_states[pid].get_socket(client_fd);
     if (client_sock)
     {
-      client_pid = pid;
-      break;
+      // Compute client address key
+      client_key = ((uint64_t)client_sock->local_addr.sin_addr.s_addr << 32) |
+                   client_sock->local_addr.sin_port;
+
+      // Look up existing established connection (created by connect())
+      established_it = listener->established_connections.find(client_key);
+      if (established_it != listener->established_connections.end())
+      {
+        client_pid = pid;
+        break;
+      }
     }
   }
-  if (!client_sock)
+  if (!client_pid)
   {
-    return -ECONNRESET; // Client closed connection
-  }
-
-  // Compute client address key
-  uint64_t client_key =
-      ((uint64_t)client_sock->local_addr.sin_addr.s_addr << 32) |
-      client_sock->local_addr.sin_port;
-
-  // Look up existing established connection (created by connect())
-  auto established_it = listener->established_connections.find(client_key);
-  if (established_it == listener->established_connections.end())
-  {
-    return -ECONNRESET; // No established connection found
+    return -ECONNRESET; // Client closed connection or No established connection
+                        // found
   }
 
   // Allocate new fd for accepted socket
@@ -689,114 +691,142 @@ int SockState::get_recvfrom_choices(int fd) const
   return 2; // Only 1 choice: receive the only message or lag
 }
 
-int SockState::do_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
-    if (nfds == 0 || fds == nullptr) {
-        return 0;
+int SockState::do_poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+  if (nfds == 0 || fds == nullptr)
+  {
+    return 0;
+  }
+
+  if (nfds > 1024)
+  {
+    nfds = 1024;
+  }
+
+  size_t fds_size = sizeof(struct pollfd) * nfds;
+  struct pollfd *host_fds = (struct pollfd *)malloc(fds_size);
+  if (host_fds == nullptr)
+  {
+    return -ENOMEM;
+  }
+
+  memcpy_guest2host(host_fds, fds, fds_size);
+
+  int ready_count = 0;
+
+  for (nfds_t i = 0; i < nfds; i++)
+  {
+    host_fds[i].revents = 0;
+
+    int fd = host_fds[i].fd;
+    if (fd < 0)
+    {
+      continue;
     }
-    
-    if (nfds > 1024) {
-        nfds = 1024;
+
+    short events = host_fds[i].events;
+    short revents = 0;
+
+    const Socket *sock = get_socket(fd);
+    if (!sock)
+    {
+      revents = POLLNVAL;
+      host_fds[i].revents = revents;
+      ready_count++;
+      continue;
     }
-    
-    size_t fds_size = sizeof(struct pollfd) * nfds;
-    struct pollfd *host_fds = (struct pollfd *)malloc(fds_size);
-    if (host_fds == nullptr) {
-        return -ENOMEM;
-    }
-    
-    memcpy_guest2host(host_fds, fds, fds_size);
-    
-    int ready_count = 0;
-    
-    for (nfds_t i = 0; i < nfds; i++) {
-        host_fds[i].revents = 0;
-        
-        int fd = host_fds[i].fd;
-        if (fd < 0) {
-            continue;
+
+    if (events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLPRI))
+    {
+      bool can_read = false;
+
+      if (sock->type == SOCK_DGRAM)
+      {
+        auto it = udp_recv_buffers_.find(fd);
+        if (it != udp_recv_buffers_.end() && !it->second.empty())
+        {
+          can_read = true;
         }
-        
-        short events = host_fds[i].events;
-        short revents = 0;
-        
-        const Socket *sock = get_socket(fd);
-        if (!sock) {
-            revents = POLLNVAL;
-            host_fds[i].revents = revents;
-            ready_count++;
-            continue;
+      }
+      else if (sock->type == SOCK_STREAM)
+      {
+        if (sock->listening)
+        {
+          if (!sock->pending_connections.empty())
+          {
+            can_read = true;
+          }
         }
-        
-        if (events & (POLLIN | POLLRDNORM | POLLRDBAND | POLLPRI)) {
-            bool can_read = false;
-            
-            if (sock->type == SOCK_DGRAM) {
-                auto it = udp_recv_buffers_.find(fd);
-                if (it != udp_recv_buffers_.end() && !it->second.empty()) {
-                    can_read = true;
-                }
-            } else if (sock->type == SOCK_STREAM) {
-                if (sock->listening) {
-                    if (!sock->pending_connections.empty()) {
-                        can_read = true;
-                    }
-                } else {
-                    auto conn_it = tcp_connections_.find(fd);
-                    if (conn_it != tcp_connections_.end()) {
-                        if (!conn_it->second.recv_buffer.empty()) {
-                            can_read = true;
-                        }
-                    }
-                }
+        else
+        {
+          auto conn_it = tcp_connections_.find(fd);
+          if (conn_it != tcp_connections_.end())
+          {
+            if (!conn_it->second.recv_buffer.empty())
+            {
+              can_read = true;
             }
-            
-            if (can_read) {
-                revents |= POLLIN;
-                if (events & POLLRDNORM) revents |= POLLRDNORM;
-            }
+          }
         }
-        
-        if (events & (POLLOUT | POLLWRNORM | POLLWRBAND)) {
-            bool can_write = false;
-            
-            if (sock->type == SOCK_DGRAM) {
-                can_write = true;
-            } else if (sock->type == SOCK_STREAM) {
-                if (sock->connected) {
-                    can_write = true;
-                }
-            }
-            
-            if (can_write) {
-                revents |= POLLOUT;
-                if (events & POLLWRNORM) revents |= POLLWRNORM;
-            }
-        }
-        
-        if (events & (POLLERR | POLLHUP | POLLNVAL)) {
-            // 简化：假设无错误
-        }
-        
-        host_fds[i].revents = revents;
-        if (revents != 0) {
-            ready_count++;
-        }
+      }
+
+      if (can_read)
+      {
+        revents |= POLLIN;
+        if (events & POLLRDNORM)
+          revents |= POLLRDNORM;
+      }
     }
-    
-    // 关键：将 revents 写回 Guest（只写 revents 字段）
-    for (nfds_t i = 0; i < nfds; i++) {
-        off_t offset = offsetof(struct pollfd, revents);
-        memcpy_host2guest(
-            (char *)fds + i * sizeof(struct pollfd) + offset,
-            &host_fds[i].revents,
-            sizeof(short)
-        );
+
+    if (events & (POLLOUT | POLLWRNORM | POLLWRBAND))
+    {
+      bool can_write = false;
+
+      if (sock->type == SOCK_DGRAM)
+      {
+        can_write = true;
+      }
+      else if (sock->type == SOCK_STREAM)
+      {
+        if (sock->connected)
+        {
+          can_write = true;
+        }
+      }
+
+      if (can_write)
+      {
+        revents |= POLLOUT;
+        if (events & POLLWRNORM)
+          revents |= POLLWRNORM;
+      }
     }
-    
-    free(host_fds);
-    
-    LOG_TRACE("poll(nfds=%zu, timeout=%d) = %d", (size_t)nfds, timeout, ready_count);
-    return ready_count;
+
+    if (events & (POLLERR | POLLHUP | POLLNVAL))
+    {
+      // 简化：假设无错误
+    }
+
+    host_fds[i].revents = revents;
+    if (revents != 0)
+    {
+      ready_count++;
+    }
+  }
+
+  // 关键：将 revents 写回 Guest（只写 revents 字段）
+  for (nfds_t i = 0; i < nfds; i++)
+  {
+    off_t offset = offsetof(struct pollfd, revents);
+    memcpy_host2guest((char *)fds + i * sizeof(struct pollfd) + offset,
+                      &host_fds[i].revents, sizeof(short));
+  }
+
+  free(host_fds);
+
+  LOG_TRACE("poll(nfds=%zu, timeout=%d) = %d", (size_t)nfds, timeout,
+            ready_count);
+  return ready_count;
 }
 
 /* ==============================================================================
@@ -1118,9 +1148,10 @@ int emu_recvfrom_get_choices(int sockfd)
   return ptmc_state.sock_states[cur].get_recvfrom_choices(sockfd);
 }
 
-int emu_poll(struct pollfd *fds, nfds_t nfds, int timeout) {
-    int cur = ptmc_state.cursor;
-    return ptmc_state.sock_states[cur].do_poll(fds, nfds, timeout);
+int emu_poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+  int cur = ptmc_state.cursor;
+  return ptmc_state.sock_states[cur].do_poll(fds, nfds, timeout);
 }
 
 /* Helper: Find which node owns an address */
@@ -1468,8 +1499,9 @@ int emu_epoll_pwait2(int epfd, struct epoll_event *events, int maxevents,
                      size_t sigsetsize)
 {
   // Convert timespec to milliseconds and delegate
-  int timeout_ms = -1;  // Default to infinite
-  if (timeout) {
+  int timeout_ms = -1; // Default to infinite
+  if (timeout)
+  {
     timeout_ms = timeout->tv_sec * 1000 + timeout->tv_nsec / 1000000;
   }
   (void)sigmask;
