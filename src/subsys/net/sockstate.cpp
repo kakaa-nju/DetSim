@@ -331,7 +331,7 @@ int SockState::do_accept(int fd, struct sockaddr *addr, socklen_t *addrlen)
       }
     }
   }
-  if (!client_pid)
+  if (client_pid == -1)
   {
     return -ECONNRESET; // Client closed connection or No established connection
                         // found
