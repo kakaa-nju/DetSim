@@ -9,6 +9,7 @@
 #include "monitor.h"
 #include "sockstate.h"
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
@@ -47,10 +48,16 @@ void OpenFileDescription::serialize(Archive &ar)
 }
 
 template <class Archive>
+void DeviceSpec::serialize(Archive &ar)
+{
+  ar(CEREAL_NVP(path), CEREAL_NVP(type));
+}
+
+template <class Archive>
 void FileSystemState::serialize(Archive &ar)
 {
   /* Note: fd_manager_ is shared and not serialized per instance */
-  ar(filesystem, open_files, cwd, mappings);
+  ar(filesystem, open_files, cwd, mappings, devices);
 }
 
 /* --- FileSystemState Method Implementations --- */
@@ -96,6 +103,79 @@ static std::string join_paths(const std::string &base, const std::string &rel)
     out += '/';
   out += rel;
   return out;
+}
+
+static std::string normalize_device_path(const std::string &path)
+{
+  if (path.empty() || path[0] == '/')
+    return path;
+  return std::string("/") + path;
+}
+
+static std::string normalize_device_type(const std::string &type)
+{
+  std::string normalized = type;
+  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+                 [](unsigned char ch) {
+                   return static_cast<char>(std::tolower(ch));
+                 });
+  return normalized;
+}
+
+static bool is_zero_read_device(const DeviceSpec *device)
+{
+  return device != nullptr && normalize_device_type(device->type) == "urandom";
+}
+
+static void init_device_node(const DeviceSpec *device, VFSNode &node)
+{
+  node.content.clear();
+#ifdef FSSTATE_DETAILED_METADATA
+  memset(&node.metadata, 0, sizeof(struct stat));
+  node.metadata.st_nlink = 1;
+#endif
+  node.metadata.st_mode = S_IFCHR | (is_zero_read_device(device) ? 0444 : 0644);
+  node.metadata.st_size = 0;
+}
+
+static const DeviceSpec *find_device(const std::vector<DeviceSpec> &devices,
+                                     const std::string &path)
+{
+  auto it = std::find_if(devices.begin(), devices.end(),
+                         [&path](const DeviceSpec &device) {
+                           return device.path == path;
+                         });
+  return it == devices.end() ? nullptr : &(*it);
+}
+
+void FileSystemState::register_device(const std::string &path,
+                                      const std::string &type)
+{
+  std::string normalized_path = normalize_device_path(path);
+  std::string normalized_type = normalize_device_type(type);
+
+  if (normalized_type != "urandom")
+  {
+    LOG_ERROR("Unsupported device type: %s", type.c_str());
+    return;
+  }
+
+  auto it = std::find_if(devices.begin(), devices.end(),
+                         [&normalized_path](const DeviceSpec &device) {
+                           return device.path == normalized_path;
+                         });
+  if (it != devices.end())
+  {
+    it->type = normalized_type;
+    return;
+  }
+
+  devices.push_back({normalized_path, normalized_type});
+}
+
+bool FileSystemState::is_device_path(const std::string &path) const
+{
+  return find_device(devices, path) != nullptr;
 }
 
 void FileSystemState::ensure_dir_exists(const std::string &path)
@@ -291,8 +371,17 @@ std::string FileSystemState::resolve_path(int dirfd, const std::string &path)
 int FileSystemState::do_open(const std::string &path, int flags, mode_t mode)
 {
   // Simplified path handling for now. Assumes absolute paths.
+  const DeviceSpec *device = find_device(devices, path);
   auto it = filesystem.find(path);
   bool exists = (it != filesystem.end());
+
+  if (device != nullptr && !exists)
+  {
+    VFSNode newNode;
+    init_device_node(device, newNode);
+    filesystem[path] = std::move(newNode);
+    exists = true;
+  }
 
   if (exists)
   {
@@ -350,10 +439,18 @@ ssize_t FileSystemState::do_read(int fd, void *buf, size_t count)
 
   OpenFileDescription &ofd = it->second;
   VFSNode &node = filesystem.at(ofd.path);
+  const DeviceSpec *device = find_device(devices, ofd.path);
 
   if ((ofd.flags & O_ACCMODE) == O_WRONLY)
   {
     return -EBADF;
+  }
+
+  if (is_zero_read_device(device))
+  {
+    memset(buf, 0, count);
+    ofd.offset += count;
+    return static_cast<ssize_t>(count);
   }
 
   ssize_t readable_bytes = node.content.size() - ofd.offset;
@@ -379,6 +476,12 @@ ssize_t FileSystemState::do_write(int fd, const void *buf, size_t count)
 
   OpenFileDescription &ofd = it->second;
   VFSNode &node = filesystem.at(ofd.path);
+  const DeviceSpec *device = find_device(devices, ofd.path);
+
+  if (device != nullptr)
+  {
+    return -EBADF;
+  }
 
   if ((ofd.flags & O_ACCMODE) == O_RDONLY)
   {
@@ -426,6 +529,12 @@ off_t FileSystemState::do_lseek(int fd, off_t offset, int whence)
 
   OpenFileDescription &ofd = it->second;
   VFSNode &node = filesystem.at(ofd.path);
+  const DeviceSpec *device = find_device(devices, ofd.path);
+
+  if (device != nullptr)
+  {
+    return -ESPIPE;
+  }
   off_t new_offset;
 
   switch (whence)
@@ -457,7 +566,23 @@ int FileSystemState::do_stat(const std::string &path, struct stat *statbuf)
   auto it = filesystem.find(path);
   if (it == filesystem.end())
   {
-    return -ENOENT;
+    const DeviceSpec *device = find_device(devices, path);
+    if (device == nullptr)
+    {
+      return -ENOENT;
+    }
+
+    VFSNode device_node;
+    init_device_node(device, device_node);
+#ifdef FSSTATE_DETAILED_METADATA
+    memcpy(statbuf, &device_node.metadata, sizeof(struct stat));
+#else
+    // Minimal mode: only fill size and mode, zero out the rest
+    memset(statbuf, 0, sizeof(struct stat));
+    statbuf->st_size = device_node.metadata.st_size;
+    statbuf->st_mode = device_node.metadata.st_mode;
+#endif
+    return 0;
   }
 
 #ifdef FSSTATE_DETAILED_METADATA

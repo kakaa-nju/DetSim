@@ -163,6 +163,28 @@ static void parse_fsmap(const json &cfg, const fs::path &cfg_dir)
   }
 }
 
+/* Parse device configuration */
+static void parse_devices(const json &cfg)
+{
+  auto devices = cfg.value("Device", json::array());
+  LOG_DEBUG("Loading %zu devices", devices.size());
+
+  for (const auto &device : devices)
+  {
+    Assert(device.contains("Path") && device.contains("Type"),
+           "Device entries must contain Path and Type");
+
+    std::string path = device["Path"].get<std::string>();
+    std::string type = device["Type"].get<std::string>();
+    LOG_DEBUG("  Device: path=%s type=%s", path.c_str(), type.c_str());
+
+    for (int i = 0; i < NP; i++)
+    {
+      ptmc_state.fs_states[i].register_device(path, type);
+    }
+  }
+}
+
 /* Parse assertions */
 static void parse_assertions(const json &cfg)
 {
@@ -376,6 +398,7 @@ void read_config(const char *cfg_file)
   // Parse all sections
   parse_tracees(cfg, cfg_dir);
   parse_addrs(cfg);
+  parse_devices(cfg);
   parse_fsmap(cfg, cfg_dir);
   parse_assertions(cfg);
   parse_user_check(cfg, cfg_dir);

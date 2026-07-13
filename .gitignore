@@ -99,6 +99,7 @@ examples/**/*.pyc
 /examples/bt/bt
 /examples/cast_test/cast_test
 /examples/complex/complex
+/examples/devices/devices
 /examples/expr_test/expr_test
 /examples/fs/fs
 /examples/loop/loop

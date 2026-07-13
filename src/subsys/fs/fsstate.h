@@ -74,6 +74,19 @@ struct OpenFileDescription
   void serialize(Archive &ar);
 };
 
+// Represents a configurable device entry.
+struct DeviceSpec
+{
+  // The absolute VFS path of the device, for example /dev/urandom.
+  std::string path;
+
+  // Device type name from config, kept as a string for forward compatibility.
+  std::string type;
+
+  template <class Archive>
+  void serialize(Archive &ar);
+};
+
 // Manages the complete file system state for a single tracee.
 class FileSystemState
 {
@@ -91,6 +104,9 @@ class FileSystemState
   // Mappings from host directories into the VFS. Each pair is (host_base,
   // target_base)
   std::vector<std::pair<std::string, std::string>> mappings;
+
+  // Configured devices.
+  std::vector<DeviceSpec> devices;
 
   // Mmap regions for VFS files: address -> (fd, offset, length, prot)
   struct MmapRegion
@@ -153,6 +169,10 @@ class FileSystemState
 
   // Helper to ensure a directory exists in the VFS
   void ensure_dir_exists(const std::string &path);
+
+  // Device support.
+  void register_device(const std::string &path, const std::string &type);
+  bool is_device_path(const std::string &path) const;
 
   // Pipe support
   struct Pipe

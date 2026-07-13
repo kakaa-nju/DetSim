@@ -1,0 +1,11 @@
+{
+  "Loglevel": 2,
+  "Nodes": 1,
+  "Tracee": [["./devices", "0"]],
+  "Device": [
+    {
+      "Path": "/dev/urandom",
+      "Type": "urandom"
+    }
+  ]
+}
