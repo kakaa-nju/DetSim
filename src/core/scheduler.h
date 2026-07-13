@@ -1,6 +1,6 @@
 /*
  * scheduler.h - Simulation scheduler and execution engine
- * 
+ *
  * This module is responsible for:
  * - Process initialization and execution control
  * - System call interception and dispatch

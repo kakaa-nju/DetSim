@@ -18,10 +18,7 @@ typedef struct choose_in
     } poll;
   };
 
-  choose_in(struct timeval tv)
-      : gettimeofday_now(tv)
-  {
-  }
+  choose_in(struct timeval tv) : gettimeofday_now(tv) {}
 
   choose_in(struct pollfd *poll_fds, nfds_t poll_nfds, int poll_timeout)
   {

@@ -75,7 +75,8 @@ static struct
     {"q", "Exit ptraceMC", cmd_q},
     {"si", "Step from current state, on focused process", cmd_si},
     {"sw", "Switch control focus on the n-th process", cmd_sw},
-    {"thread", "Switch to thread N in current process (thread to list)", cmd_thread},
+    {"thread", "Switch to thread N in current process (thread to list)",
+     cmd_thread},
     {"load", "Load state of given StateHash", cmd_load},
     {"info", "Display current state history", cmd_info},
     {"batch", "Read command list from file", cmd_batch},
@@ -299,15 +300,18 @@ void ui_mainloop()
 
 pid_t PTMC_STATE::get_current_tid(int tracee_idx) const
 {
-  if (tracee_idx < 0 || tracee_idx >= NP) return -1;
+  if (tracee_idx < 0 || tracee_idx >= NP)
+    return -1;
 
-  const auto& threads = running_state.child[tracee_idx].threads;
+  const auto &threads = running_state.child[tracee_idx].threads;
   int tidx = current_thread_idx[tracee_idx];
 
-  if (tidx >= 0 && tidx < (int)threads.size()) {
+  if (tidx >= 0 && tidx < (int)threads.size())
+  {
     // Use the stored physical_tid from thread_state
     pid_t physical_tid = threads[tidx].physical_tid;
-    if (physical_tid > 0) {
+    if (physical_tid > 0)
+    {
       return physical_tid;
     }
   }
@@ -318,21 +322,25 @@ pid_t PTMC_STATE::get_current_tid(int tracee_idx) const
 
 pid_t PTMC_STATE::get_thread_tid(int tracee_idx, int thread_idx) const
 {
-  if (tracee_idx < 0 || tracee_idx >= NP) return -1;
+  if (tracee_idx < 0 || tracee_idx >= NP)
+    return -1;
 
-  const auto& threads = running_state.child[tracee_idx].threads;
-  if (thread_idx < 0 || thread_idx >= (int)threads.size()) {
+  const auto &threads = running_state.child[tracee_idx].threads;
+  if (thread_idx < 0 || thread_idx >= (int)threads.size())
+  {
     return -1;
   }
 
   // Use the stored physical_tid from thread_state
   pid_t physical_tid = threads[thread_idx].physical_tid;
-  if (physical_tid > 0) {
+  if (physical_tid > 0)
+  {
     return physical_tid;
   }
 
   // Fallback: if thread index is 0, return main pid
-  if (thread_idx == 0) {
+  if (thread_idx == 0)
+  {
     return pids[tracee_idx];
   }
 
@@ -341,10 +349,12 @@ pid_t PTMC_STATE::get_thread_tid(int tracee_idx, int thread_idx) const
 
 void PTMC_STATE::set_current_thread(int tracee_idx, int thread_idx)
 {
-  if (tracee_idx < 0 || tracee_idx >= NP) return;
+  if (tracee_idx < 0 || tracee_idx >= NP)
+    return;
 
-  const auto& threads = running_state.child[tracee_idx].threads;
-  if (thread_idx >= 0 && thread_idx < (int)threads.size()) {
+  const auto &threads = running_state.child[tracee_idx].threads;
+  if (thread_idx >= 0 && thread_idx < (int)threads.size())
+  {
     current_thread_idx[tracee_idx] = thread_idx;
   }
 }

@@ -1,11 +1,11 @@
 #include "utils.h"
 #include "common.h"
 #include "log_wrapper.h"
+#include <algorithm>
 #include <cstdio>
 #include <dirent.h>
 #include <fcntl.h>
 #include <filesystem>
-#include <fmt/printf.h>
 #include <fmt/printf.h>
 #include <fstream>
 #include <gelf.h>
@@ -19,7 +19,6 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
-#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -193,16 +192,15 @@ std::unique_ptr<FILE, file_closer> open_state_file(hash_type hash,
 void ensure_directory_for_file(const std::string &path)
 {
   size_t last_slash = path.find_last_of('/');
-  if (last_slash != std::string::npos) {
+  if (last_slash != std::string::npos)
+  {
     std::string dir = path.substr(0, last_slash);
-    if (!fs::exists(dir)) {
+    if (!fs::exists(dir))
+    {
       fs::create_directories(dir);
     }
   }
 }
-
-
-
 
 } // namespace fileutils
 
@@ -214,14 +212,16 @@ int is_go_program(const char *filename)
   LOG_INFO("is_go_program: checking %s", filename);
   elf_version(EV_CURRENT);
   int fd = open(filename, O_RDONLY);
-  if (fd < 0) {
+  if (fd < 0)
+  {
     LOG_INFO("is_go_program: open failed: %s", strerror(errno));
     return 0;
   }
   LOG_INFO("is_go_program: opened fd=%d", fd);
 
   Elf *e = elf_begin(fd, ELF_C_READ, NULL);
-  if (!e) {
+  if (!e)
+  {
     LOG_INFO("is_go_program: elf_begin failed");
     close(fd);
     return 0;
@@ -231,13 +231,17 @@ int is_go_program(const char *filename)
   Elf_Scn *scn = NULL;
   size_t shstrndx;
   int is_go = 0;
-  while ((scn = elf_nextscn(e, scn)) != NULL) {
+  while ((scn = elf_nextscn(e, scn)) != NULL)
+  {
     GElf_Shdr shdr;
-    if (gelf_getshdr(scn, &shdr) != NULL) {
-      const char *name = elf_strptr(e, elf_getshdrstrndx(e, &shstrndx), shdr.sh_name);
-      if (name && (strcmp(name, ".go.buildinfo") == 0 ||
-                     strcmp(name, ".gopclntab") == 0 ||
-                     strncmp(name, ".go.", 4) == 0)) {
+    if (gelf_getshdr(scn, &shdr) != NULL)
+    {
+      const char *name =
+          elf_strptr(e, elf_getshdrstrndx(e, &shstrndx), shdr.sh_name);
+      if (name &&
+          (strcmp(name, ".go.buildinfo") == 0 ||
+           strcmp(name, ".gopclntab") == 0 || strncmp(name, ".go.", 4) == 0))
+      {
         is_go = 1;
         break;
       }
@@ -253,8 +257,8 @@ int is_go_program(const char *filename)
  * Multi-threading support functions
  * ====================================================================== */
 
-#include <dirent.h>
 #include <algorithm>
+#include <dirent.h>
 
 // Get list of all thread TIDs in a process
 std::vector<pid_t> get_thread_list(pid_t pid)
@@ -263,18 +267,21 @@ std::vector<pid_t> get_thread_list(pid_t pid)
   std::string task_dir = fmt::format("/proc/{}/task", pid);
 
   DIR *dir = opendir(task_dir.c_str());
-  if (!dir) {
+  if (!dir)
+  {
     LOG_ERROR("Failed to open %s: %s", task_dir.c_str(), strerror(errno));
     return threads;
   }
 
   struct dirent *entry;
-  while ((entry = readdir(dir)) != NULL) {
+  while ((entry = readdir(dir)) != NULL)
+  {
     if (entry->d_name[0] == '.')
       continue;
 
     pid_t tid = atoi(entry->d_name);
-    if (tid > 0) {
+    if (tid > 0)
+    {
       threads.push_back(tid);
     }
   }

@@ -1,11 +1,11 @@
 #include "core/config.h"
 #include "core/state/state_store.h"
-#include "core/state/sysstate_store.h"
 #include "core/state/state_transition.h"
+#include "core/state/sysstate_store.h"
 #include <cstdio>
 #include <cstring>
-#include <signal.h>
 #include <execinfo.h>
+#include <signal.h>
 
 // NCursesUI 集成
 #include "ui/log_wrapper.h"

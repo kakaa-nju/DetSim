@@ -1,4 +1,4 @@
-.PHONY: all debug release wc clean clear benchmark pgo-generate pgo-use pgo-clean
+.PHONY: all debug release wc clean clear benchmark format pgo-generate pgo-use pgo-clean
 
 CC = ccache gcc
 CXX = ccache g++
@@ -92,6 +92,9 @@ wc:
 clear:
 	-/bin/rm -rf memory sstate
 	-mkdir memory sstate
+
+format:
+	@find src -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \) -print0 | xargs -0 clang-format -i
 
 clean:
 	-/bin/rm -rf $(BUILD_DIR) tracer *.so

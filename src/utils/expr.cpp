@@ -213,11 +213,13 @@ static void print_value_recursive(int pid, const char *expr, uint64_t addr,
     const char *type_str = (type_name == "func") ? "func" : "void*";
     if (is_member)
     {
-      detsim::ui::ui_printf("%s = (%s) 0x%lx,\n", expr, type_str, (unsigned long)addr);
+      detsim::ui::ui_printf("%s = (%s) 0x%lx,\n", expr, type_str,
+                            (unsigned long)addr);
     }
     else
     {
-      detsim::ui::ui_printf("%s = (%s) 0x%lx\n", expr, type_str, (unsigned long)addr);
+      detsim::ui::ui_printf("%s = (%s) 0x%lx\n", expr, type_str,
+                            (unsigned long)addr);
     }
     return;
   }

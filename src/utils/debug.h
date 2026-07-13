@@ -23,7 +23,7 @@
     {                                                                          \
       fprintf(stderr, "\33[1;31m");                                            \
       fprintf(stderr, __VA_ARGS__);                                            \
-      fprintf(stderr, "\33[0m\n");                                              \
+      fprintf(stderr, "\33[0m\n");                                             \
       assert(cond);                                                            \
     }                                                                          \
   } while (0)
@@ -40,10 +40,10 @@
 #ifndef LOG_TRACE
 #define LOG_TRACE(...) UI_LOG_TRACE(__VA_ARGS__)
 #define LOG_DEBUG(...) UI_LOG_DEBUG(__VA_ARGS__)
-#define LOG_INFO(...)  UI_LOG_INFO(__VA_ARGS__)
-#define LOG_WARN(...)  UI_LOG_WARN(__VA_ARGS__)
+#define LOG_INFO(...) UI_LOG_INFO(__VA_ARGS__)
+#define LOG_WARN(...) UI_LOG_WARN(__VA_ARGS__)
 #define LOG_ERROR(...) UI_LOG_ERROR(__VA_ARGS__)
-#define LOG_CRIT(...)  UI_LOG_CRIT(__VA_ARGS__)
+#define LOG_CRIT(...) UI_LOG_CRIT(__VA_ARGS__)
 #endif
 
 #endif /* __DEBUG_H */

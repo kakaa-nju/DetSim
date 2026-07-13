@@ -11,9 +11,10 @@
  */
 
 #include "guest.h"
-#include "monitor.h"
 #include "dwarf_info.h"
+#include "monitor.h"
 #include <cstdint>
+#include <elf.h>
 #include <fcntl.h>
 #include <fmt/format.h>
 #include <libunwind-ptrace.h>
@@ -28,7 +29,6 @@
 #include <sys/syscall.h>
 #include <sys/user.h>
 #include <sys/wait.h>
-#include <elf.h>
 #include <unistd.h>
 #include <vector>
 
@@ -61,7 +61,8 @@ __attribute__((unused)) void print_call_stack()
     if (unw_get_proc_name(&cursor, sym, sizeof(sym), &offset) == 0)
       detsim::ui::ui_printf(" (%s+0x%lx)\n", sym, offset);
     else
-      detsim::ui::ui_printf(" -- error: unable to obtain symbol name for this frame\n");
+      detsim::ui::ui_printf(
+          " -- error: unable to obtain symbol name for this frame\n");
   }
 }
 
@@ -71,22 +72,22 @@ __attribute__((unused)) void print_call_stack()
 
 #define def_tracee_set(reg)                                                    \
   void tracee_set_##reg(int pid, uint64_t val)                                 \
-  { \
-    struct user_regs_struct uregs; \
-    ptrace_right(PTRACE_GETREGS, pid, NULL, &uregs); \
-    uregs.reg = val; \
-    ptrace_right(PTRACE_SETREGS, pid, NULL, &uregs); \
-  } 
-def_tracee_set(rax); 
+  {                                                                            \
+    struct user_regs_struct uregs;                                             \
+    ptrace_right(PTRACE_GETREGS, pid, NULL, &uregs);                           \
+    uregs.reg = val;                                                           \
+    ptrace_right(PTRACE_SETREGS, pid, NULL, &uregs);                           \
+  }
+def_tracee_set(rax);
 def_tracee_set(orig_rax);
 def_tracee_set(rdi);
 
 #define def_tracee_get(reg)                                                    \
   uint64_t tracee_get_##reg(int pid)                                           \
-  { \
-    struct user_regs_struct uregs; \
-    ptrace_right(PTRACE_GETREGS, pid, NULL, &uregs); \
-    return uregs.reg; \
+  {                                                                            \
+    struct user_regs_struct uregs;                                             \
+    ptrace_right(PTRACE_GETREGS, pid, NULL, &uregs);                           \
+    return uregs.reg;                                                          \
   }
 
 __attribute__((unused)) def_tracee_get(rip);
@@ -112,9 +113,10 @@ void remove_vdso(int pid)
 
   errno = 0;
   pos = (size_t)ptrace(PTRACE_PEEKUSER, pid, sizeof(long) * RSP, NULL);
-  if (errno != 0) {
-    LOG_ERROR("remove_vdso: PTRACE_PEEKUSER failed for pid %d: %s", 
-              pid, strerror(errno));
+  if (errno != 0)
+  {
+    LOG_ERROR("remove_vdso: PTRACE_PEEKUSER failed for pid %d: %s", pid,
+              strerror(errno));
     return;
   }
 
@@ -124,9 +126,10 @@ void remove_vdso(int pid)
   {
     errno = 0;
     val = ptrace(PTRACE_PEEKDATA, pid, pos += 8, NULL);
-    if (errno != 0) {
-      LOG_ERROR("remove_vdso: PTRACE_PEEKDATA failed at %p: %s",
-                (void*)pos, strerror(errno));
+    if (errno != 0)
+    {
+      LOG_ERROR("remove_vdso: PTRACE_PEEKDATA failed at %p: %s", (void *)pos,
+                strerror(errno));
       return;
     }
     if (val == 0)
@@ -136,12 +139,13 @@ void remove_vdso(int pid)
   /* search the auxiliary vector for AT_SYSINFO_EHDR... */
   errno = 0;
   val = ptrace(PTRACE_PEEKDATA, pid, pos += 8, NULL);
-  if (errno != 0) {
-    LOG_ERROR("remove_vdso: PTRACE_PEEKDATA failed at %p: %s",
-              (void*)pos, strerror(errno));
+  if (errno != 0)
+  {
+    LOG_ERROR("remove_vdso: PTRACE_PEEKDATA failed at %p: %s", (void *)pos,
+              strerror(errno));
     return;
   }
-  
+
   while (1)
   {
     if (val == AT_NULL)
@@ -151,123 +155,135 @@ void remove_vdso(int pid)
       /* ... and overwrite it */
       errno = 0;
       ptrace(PTRACE_POKEDATA, pid, pos, AT_IGNORE);
-      if (errno != 0) {
-        LOG_ERROR("remove_vdso: PTRACE_POKEDATA failed at %p: %s",
-                  (void*)pos, strerror(errno));
+      if (errno != 0)
+      {
+        LOG_ERROR("remove_vdso: PTRACE_POKEDATA failed at %p: %s", (void *)pos,
+                  strerror(errno));
       }
       break;
     }
     pos += 16;
     errno = 0;
     val = ptrace(PTRACE_PEEKDATA, pid, pos, NULL);
-    if (errno != 0) {
-      LOG_ERROR("remove_vdso: PTRACE_PEEKDATA failed at %p: %s",
-                (void*)pos, strerror(errno));
+    if (errno != 0)
+    {
+      LOG_ERROR("remove_vdso: PTRACE_PEEKDATA failed at %p: %s", (void *)pos,
+                strerror(errno));
       return;
     }
   }
 }
 
-/* 
+/*
  * 定位栈上的 AT_RANDOM
- * 
+ *
  * execve 后的栈布局（从高地址到低地址）：
  *   argv[n] = NULL
  *   argv[n-1] ... argv[0]
  *   envp[...] ... envp[0] = NULL
  *   auxv[...] (AT_NULL terminated)
- *   
+ *
  * auxv 格式：{a_type, a_val} 的数组
  * AT_RANDOM (25) 的 a_val 指向 16 字节随机数据
  */
-int patch_at_random(pid_t pid) {
-    struct user_regs_struct regs;
-    
-    if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0) {
-        perror("PTRACE_GETREGS");
-        return -1;
+int patch_at_random(pid_t pid)
+{
+  struct user_regs_struct regs;
+
+  if (ptrace(PTRACE_GETREGS, pid, NULL, &regs) < 0)
+  {
+    perror("PTRACE_GETREGS");
+    return -1;
+  }
+
+  /* x86_64: rsp 指向 argc（如果直接 execve）或返回地址（如果通过 libc） */
+  unsigned long stack_top = regs.rsp;
+  LOG_INFO("[*] Stack top (RSP): 0x%lx", stack_top);
+
+  /*
+   * 扫描栈找到 auxv 向量
+   * 策略：从 stack_top 向下扫描，寻找 AT_RANDOM (25) 的 a_type
+   * 或者通过 /proc/pid/auxv 直接读取（更简单可靠）
+   */
+
+  char auxv_path[64];
+  snprintf(auxv_path, sizeof(auxv_path), "/proc/%d/auxv", pid);
+
+  FILE *f = fopen(auxv_path, "rb");
+  if (!f)
+  {
+    perror("fopen auxv");
+    return -1;
+  }
+
+  Elf64_auxv_t auxv;
+  unsigned long random_addr = 0;
+
+  LOG_INFO("[*] Reading auxv from %s", auxv_path);
+  while (fread(&auxv, sizeof(auxv), 1, f) == 1)
+  {
+    if (auxv.a_type == AT_RANDOM)
+    {
+      random_addr = auxv.a_un.a_val;
+      LOG_INFO("[+] Found AT_RANDOM: addr = 0x%lx", random_addr);
+      break;
     }
-    
-    /* x86_64: rsp 指向 argc（如果直接 execve）或返回地址（如果通过 libc） */
-    unsigned long stack_top = regs.rsp;
-    LOG_INFO("[*] Stack top (RSP): 0x%lx", stack_top);
-    
-    /* 
-     * 扫描栈找到 auxv 向量
-     * 策略：从 stack_top 向下扫描，寻找 AT_RANDOM (25) 的 a_type
-     * 或者通过 /proc/pid/auxv 直接读取（更简单可靠）
-     */
-    
-    char auxv_path[64];
-    snprintf(auxv_path, sizeof(auxv_path), "/proc/%d/auxv", pid);
-    
-    FILE *f = fopen(auxv_path, "rb");
-    if (!f) {
-        perror("fopen auxv");
-        return -1;
-    }
-    
-    Elf64_auxv_t auxv;
-    unsigned long random_addr = 0;
-    
-    LOG_INFO("[*] Reading auxv from %s", auxv_path);
-    while (fread(&auxv, sizeof(auxv), 1, f) == 1) {
-        if (auxv.a_type == AT_RANDOM) {
-            random_addr = auxv.a_un.a_val;
-            LOG_INFO("[+] Found AT_RANDOM: addr = 0x%lx", random_addr);
-            break;
-        }
-        if (auxv.a_type == AT_NULL) break;
-    }
-    fclose(f);
-    
-    if (!random_addr) {
-        LOG_ERROR("[-] AT_RANDOM not found in auxv");
-        return -1;
-    }
-    
-    /* 读取原始随机值 */
-    unsigned long orig[2];
-    tracee_read_mem(pid, (void *)random_addr, orig, 16);
-    LOG_INFO("[*] Original AT_RANDOM: 0x%016lx%016lx", orig[0], orig[1]);
-    
-    /* 写入确定性随机值 */
-    unsigned long newval[2] = { DETERMINISTIC_RANDOM_0, DETERMINISTIC_RANDOM_1 };
-    
-    tracee_write_mem(pid, (void *)random_addr, newval, 16);
-    
-    return 0;
+    if (auxv.a_type == AT_NULL)
+      break;
+  }
+  fclose(f);
+
+  if (!random_addr)
+  {
+    LOG_ERROR("[-] AT_RANDOM not found in auxv");
+    return -1;
+  }
+
+  /* 读取原始随机值 */
+  unsigned long orig[2];
+  tracee_read_mem(pid, (void *)random_addr, orig, 16);
+  LOG_INFO("[*] Original AT_RANDOM: 0x%016lx%016lx", orig[0], orig[1]);
+
+  /* 写入确定性随机值 */
+  unsigned long newval[2] = {DETERMINISTIC_RANDOM_0, DETERMINISTIC_RANDOM_1};
+
+  tracee_write_mem(pid, (void *)random_addr, newval, 16);
+
+  return 0;
 }
 
-void patch_cpu_features_elf(pid_t pid) {
-    unsigned long addr = dwarf_get_global_addr("_dl_x86_cpu_features");
-    if (!addr) {
-      LOG_ERROR("[-] Symbol not found");
-      return;
-    }
-    
-    LOG_INFO("[+] _dl_x86_cpu_features at 0x%lx", addr);
-    
-    unsigned long target = addr + 24;
-    unsigned long current = ptrace(PTRACE_PEEKDATA, pid, target, NULL);
-    
-    unsigned long fixed = (current & ~0x00000000FF000000UL) | 0x0000000000000000UL;
-    
-    ptrace(PTRACE_POKEDATA, pid, target, fixed);
-    
-    LOG_INFO("[+] Patched 0x%lx: 0x%lx -> 0x%lx", target, current, fixed);
+void patch_cpu_features_elf(pid_t pid)
+{
+  unsigned long addr = dwarf_get_global_addr("_dl_x86_cpu_features");
+  if (!addr)
+  {
+    LOG_ERROR("[-] Symbol not found");
+    return;
+  }
+
+  LOG_INFO("[+] _dl_x86_cpu_features at 0x%lx", addr);
+
+  unsigned long target = addr + 24;
+  unsigned long current = ptrace(PTRACE_PEEKDATA, pid, target, NULL);
+
+  unsigned long fixed =
+      (current & ~0x00000000FF000000UL) | 0x0000000000000000UL;
+
+  ptrace(PTRACE_POKEDATA, pid, target, fixed);
+
+  LOG_INFO("[+] Patched 0x%lx: 0x%lx -> 0x%lx", target, current, fixed);
 }
 
 /* ======================================================================
  * Section 4: Memory Access (via process_vm_readv/process_vm_writev)
  * ====================================================================== */
 
-#include <sys/uio.h>
 #include <sys/syscall.h>
+#include <sys/uio.h>
 
 static inline struct iovec make_iovec(void *base, size_t len)
 {
-  struct iovec iov = { base, len };
+  struct iovec iov = {base, len};
   return iov;
 }
 
@@ -279,7 +295,8 @@ void tracee_write_mem(int pid, void *addr, const void *data, int len)
   ssize_t n = syscall(SYS_process_vm_writev, pid, &local, 1, &remote, 1, 0);
   if (n != len)
   {
-    LOG_CRIT("process_vm_writev failed for pid %d at %p: %s", pid, addr, strerror(errno));
+    LOG_CRIT("process_vm_writev failed for pid %d at %p: %s", pid, addr,
+             strerror(errno));
   }
 }
 
@@ -291,7 +308,8 @@ void tracee_read_mem(int pid, const void *addr, void *data, int len)
   ssize_t n = syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0);
   if (n != len)
   {
-    LOG_ERROR("process_vm_readv failed for pid %d at %p: %s", pid, addr, strerror(errno));
+    LOG_ERROR("process_vm_readv failed for pid %d at %p: %s", pid, addr,
+              strerror(errno));
     memset(data, 0, len);
   }
 }
@@ -349,11 +367,12 @@ void log_regs(struct user_regs_struct *regs)
 
 void show_regs(struct user_regs_struct *regs)
 {
-  detsim::ui::ui_printf("rax = %016llx rbx = %016llx rcx = %016llx rdx = %016llx\n"
-         "rsp = %016llx rbp = %016llx rdi = %016llx rsi = %016llx\n"
-         "r8  = %016llx r9  = %016llx r10 = %016llx rip = %016llx\n",
-         regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsp, regs->rbp,
-         regs->rdi, regs->rsi, regs->r8, regs->r9, regs->r10, regs->rip);
+  detsim::ui::ui_printf(
+      "rax = %016llx rbx = %016llx rcx = %016llx rdx = %016llx\n"
+      "rsp = %016llx rbp = %016llx rdi = %016llx rsi = %016llx\n"
+      "r8  = %016llx r9  = %016llx r10 = %016llx rip = %016llx\n",
+      regs->rax, regs->rbx, regs->rcx, regs->rdx, regs->rsp, regs->rbp,
+      regs->rdi, regs->rsi, regs->r8, regs->r9, regs->r10, regs->rip);
   detsim::ui::ui_printf("orig_rax = %016llx\n", regs->orig_rax);
 }
 
@@ -362,8 +381,9 @@ void show_regs(struct user_regs_struct *regs)
  * ====================================================================== */
 
 #define PTRACE_TRAP_SIG (SIGTRAP | 0x80)
-uint64_t tracee_do_syscall_in_place(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
-                           uint64_t rdx, uint64_t r10, uint64_t r8, uint64_t r9)
+uint64_t tracee_do_syscall_in_place(int pid, int SYS_which, uint64_t rdi,
+                                    uint64_t rsi, uint64_t rdx, uint64_t r10,
+                                    uint64_t r8, uint64_t r9)
 {
   /* after last syscall exits */
   /* I don't care */
@@ -494,24 +514,26 @@ void tracee_do_munmap(int pid, uint64_t start, uint64_t end)
 
 void *tracee_do_mmap(int pid, uint64_t start, uint64_t end, int prot)
 {
-  void *ret = (void *)tracee_do_syscall(pid, SYS_mmap, start, end - start,
-                                        prot,
-                                        MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
-  if (ret == MAP_FAILED) {
-    LOG_ERROR("mmap failed for %p-%p (prot=%x): %s", 
-              (void*)start, (void*)end, prot, strerror(errno));
+  void *ret =
+      (void *)tracee_do_syscall(pid, SYS_mmap, start, end - start, prot,
+                                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+  if (ret == MAP_FAILED)
+  {
+    LOG_ERROR("mmap failed for %p-%p (prot=%x): %s", (void *)start, (void *)end,
+              prot, strerror(errno));
   }
   return ret;
 }
 
 void *tracee_do_mmap_in_place(int pid, uint64_t start, uint64_t end, int prot)
 {
-  void *ret = (void *)tracee_do_syscall_in_place(pid, SYS_mmap, start, end - start,
-                                        prot,
-                                        MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
-  if (ret == MAP_FAILED) {
-    LOG_ERROR("mmap failed for %p-%p (prot=%x): %s", 
-              (void*)start, (void*)end, prot, strerror(errno));
+  void *ret = (void *)tracee_do_syscall_in_place(
+      pid, SYS_mmap, start, end - start, prot,
+      MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
+  if (ret == MAP_FAILED)
+  {
+    LOG_ERROR("mmap failed for %p-%p (prot=%x): %s", (void *)start, (void *)end,
+              prot, strerror(errno));
   }
   return ret;
 }
@@ -604,10 +626,9 @@ int tracee_do_open(int pid, const char *filename, uint64_t flags)
   /* mappings has been restored */
   /* LOG_TRACE("open filename, flags = %s, %o", filename, flags); */
   assert(scratch_page);
-  tracee_write_mem(pid, (void *)scratch_page, filename,
-                   strlen(filename) + 1);
-  return tracee_do_syscall(pid, SYS_open, (uint64_t)scratch_page, flags, 0,
-                           0, 0, 0);
+  tracee_write_mem(pid, (void *)scratch_page, filename, strlen(filename) + 1);
+  return tracee_do_syscall(pid, SYS_open, (uint64_t)scratch_page, flags, 0, 0,
+                           0, 0);
 }
 
 /* ======================================================================
@@ -630,7 +651,8 @@ std::string get_var_type(const char *varname)
 void *memcpy_guest2host(void *dest, const void *src, size_t n)
 {
   int cursor = ptmc_state.cursor;
-  if (cursor < 0 || cursor >= NP) cursor = 0;
+  if (cursor < 0 || cursor >= NP)
+    cursor = 0;
   int pid = ptmc_state.pids[cursor];
   tracee_read_mem(pid, src, dest, n);
   return dest;

@@ -50,9 +50,12 @@ struct PTMC_STATE
   int pids[NP] = {};
 
   /* Multi-threading support */
-  int current_thread_idx[NP] = {};  /* Currently selected thread index per tracee */
-  bool thread_blocked[NP][64] = {}; /* Thread blocked status (waiting on futex) per tracee, max 64 threads */
-  bool thread_exited[NP][64] = {};  /* Thread exit status per tracee, max 64 threads */
+  int current_thread_idx[NP] =
+      {}; /* Currently selected thread index per tracee */
+  bool thread_blocked[NP][64] = {}; /* Thread blocked status (waiting on futex)
+                                       per tracee, max 64 threads */
+  bool thread_exited[NP][64] =
+      {}; /* Thread exit status per tracee, max 64 threads */
 
   /* Get current thread TID for a tracee */
   pid_t get_current_tid(int tracee_idx) const;

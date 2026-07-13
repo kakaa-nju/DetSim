@@ -1,4 +1,8 @@
 #include "state_transition.h"
+#include "../engine/exec_engine.h"
+#include "../engine/signal_handler.h"
+#include "../engine/thread_manager.h"
+#include "../syscall/dispatcher.h"
 #include "common.h"
 #include "emu.h"
 #include "fsstate.h"
@@ -9,10 +13,6 @@
 #include "proc_status.h"
 #include "state_store.h"
 #include "utils.h"
-#include "../engine/exec_engine.h"
-#include "../engine/thread_manager.h"
-#include "../engine/signal_handler.h"
-#include "../syscall/dispatcher.h"
 #include <fcntl.h>
 #include <readline/readline.h>
 #include <stddef.h>
@@ -93,8 +93,7 @@ void handle_user_choice()
     UI_LOG_INFO("Here comes with %d choices.", ptmc_state.n_choose);
     line_read = readline("You choose? [0, N): ");
     while (sscanf(line_read, "%d", &ptmc_state.choose) != 1 ||
-           ptmc_state.choose < 0 ||
-           ptmc_state.choose >= ptmc_state.n_choose)
+           ptmc_state.choose < 0 || ptmc_state.choose >= ptmc_state.n_choose)
     {
       free(line_read);
       line_read = readline("Please make legal choice: ");
@@ -126,15 +125,17 @@ void handle_auto_choice()
 
 int exec_once(const sys_state &s, syscall_info &info)
 {
-  ExecutionEngine* engine = exec::get_engine();
-  if (!engine) {
+  ExecutionEngine *engine = exec::get_engine();
+  if (!engine)
+  {
     LOG_ERROR("ExecutionEngine not initialized");
     return CKPT_STOP;
   }
 
   ExecResult result = engine->execute_step(s, info);
 
-  switch (result.status) {
+  switch (result.status)
+  {
     case ExecStatus::EXIT:
       LOG_INFO("Tracee %d exited", ptmc_state.cursor);
       break;
@@ -167,7 +168,8 @@ TransitionResult state_transition(const sys_state &source_state,
   // do syscalls - copy per-thread syscall info for each process
   syscall_info new_syscalls[NP][MAX_THREADS_PER_PROCESS];
   for (int i = 0; i < NP; i++)
-    memcpy(new_syscalls[i], source_state.child[i].si, sizeof(syscall_info) * MAX_THREADS_PER_PROCESS);
+    memcpy(new_syscalls[i], source_state.child[i].si,
+           sizeof(syscall_info) * MAX_THREADS_PER_PROCESS);
 
   // Get current thread index for the active process
   int thread_idx = ptmc_state.current_thread_idx[process_index];
@@ -221,7 +223,8 @@ syscall_info extract_one_syscall(pid_t pid)
   ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
   waitpid(pid, &wstatus, 0);
   /* Handle SIGURG from Go runtime (preemption signal) */
-  while (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGURG) {
+  while (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGURG)
+  {
     ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
     waitpid(pid, &wstatus, 0);
   }
@@ -235,22 +238,26 @@ syscall_info extract_one_syscall(pid_t pid)
     ret.args[i] = info.entry.args[i];
 
   /* Handle clone: add CLONE_PTRACE flag to auto-trace child threads */
-  if (ret.nr == SYS_clone) {
+  if (ret.nr == SYS_clone)
+  {
     uint64_t new_flags = ret.args[0] | 0x00002000; /* CLONE_PTRACE */
     tracee_set_rdi(pid, new_flags);
     LOG_INFO("Modified clone flags to add CLONE_PTRACE");
   }
 
   /* Handle clone3: modify clone_args.flags to add CLONE_PTRACE */
-  if (ret.nr == SYS_clone3) {
+  if (ret.nr == SYS_clone3)
+  {
     uint64_t args_ptr = ret.args[0];
-    if (args_ptr != 0) {
+    if (args_ptr != 0)
+    {
       // Read flags from clone_args (first field)
       uint64_t flags = ptrace(PTRACE_PEEKDATA, pid, args_ptr, NULL);
       // Add CLONE_PTRACE flag
       flags |= 0x00002000; /* CLONE_PTRACE */
       ptrace(PTRACE_POKEDATA, pid, args_ptr, flags);
-      LOG_INFO("Modified clone3 args at %p, flags=0x%lx", (void*)args_ptr, flags);
+      LOG_INFO("Modified clone3 args at %p, flags=0x%lx", (void *)args_ptr,
+               flags);
     }
   }
 
@@ -258,7 +265,8 @@ syscall_info extract_one_syscall(pid_t pid)
   ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
   waitpid(pid, &wstatus, 0);
   /* Handle SIGURG from Go runtime (preemption signal) */
-  while (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGURG) {
+  while (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGURG)
+  {
     ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
     waitpid(pid, &wstatus, 0);
   }
@@ -324,7 +332,8 @@ syscall_info extract_one_syscall(pid_t pid)
         if (args_ptr != 0)
         {
           clone_flags = ptrace(PTRACE_PEEKDATA, pid, args_ptr, NULL);
-          // stack is at offset 5*8 = 40 bytes in clone_args (after flags, pidfd, child_tid, parent_tid, exit_signal)
+          // stack is at offset 5*8 = 40 bytes in clone_args (after flags,
+          // pidfd, child_tid, parent_tid, exit_signal)
           stack_addr = ptrace(PTRACE_PEEKDATA, pid, args_ptr + 40, NULL);
         }
       }
@@ -332,8 +341,8 @@ syscall_info extract_one_syscall(pid_t pid)
       // Add thread to state
       child_state.add_thread(new_tid, clone_flags, stack_addr, pid, false);
 
-      LOG_INFO("Recorded thread %d in tracee %d state (flags=0x%lx)",
-               new_tid, tracee_idx, clone_flags);
+      LOG_INFO("Recorded thread %d in tracee %d state (flags=0x%lx)", new_tid,
+               tracee_idx, clone_flags);
     }
 
     // Wait for the new thread to stop (SIGSTOP from CLONE_PTRACE)
@@ -345,23 +354,27 @@ syscall_info extract_one_syscall(pid_t pid)
     pid_t waited = 0;
 
     // Try non-blocking wait first, then blocking wait with timeout
-    while (wait_retries < 100 && waited == 0) {
+    while (wait_retries < 100 && waited == 0)
+    {
       waited = waitpid(new_tid, &wstatus_new, WNOHANG);
-      if (waited == 0) {
-        usleep(1000);  // 1ms delay between retries
+      if (waited == 0)
+      {
+        usleep(1000); // 1ms delay between retries
         wait_retries++;
       }
     }
 
     // If still not ready, try blocking wait as last resort
-    if (waited == 0) {
+    if (waited == 0)
+    {
       waited = waitpid(new_tid, &wstatus_new, WNOHANG);
     }
 
     if (waited == new_tid && WIFSTOPPED(wstatus_new))
     {
-      LOG_INFO("New thread %d stopped with signal %d after %d retries, continuing",
-               new_tid, WSTOPSIG(wstatus_new), wait_retries);
+      LOG_INFO(
+          "New thread %d stopped with signal %d after %d retries, continuing",
+          new_tid, WSTOPSIG(wstatus_new), wait_retries);
 
       // Continue the new thread to its first syscall entry
       // This is essential: the new thread must run to initialize itself
@@ -374,8 +387,9 @@ syscall_info extract_one_syscall(pid_t pid)
     }
     else
     {
-      LOG_WARN("New thread %d not in expected stopped state (waited=%d, retries=%d)",
-               new_tid, waited, wait_retries);
+      LOG_WARN(
+          "New thread %d not in expected stopped state (waited=%d, retries=%d)",
+          new_tid, waited, wait_retries);
     }
   }
 
@@ -390,21 +404,29 @@ static void init_tracee_state(int index)
   // Convert to absolute path for Go detection
   char abs_path[PATH_MAX];
   realpath(ptmc_state.tracee[index].executable, abs_path);
-  LOG_INFO("Checking if %s (abs: %s) is a Go program", ptmc_state.tracee[index].executable, abs_path);
+  LOG_INFO("Checking if %s (abs: %s) is a Go program",
+           ptmc_state.tracee[index].executable, abs_path);
   int go_check = is_go_program(abs_path);
   LOG_INFO("is_go_program result: %d", go_check);
   // Hardcoded detection for Go programs (workaround for is_go_program issues)
-  if (!go_check && strstr(ptmc_state.tracee[index].executable, "test") || strstr(ptmc_state.tracee[index].executable, "detsim") != NULL) {
+  if (!go_check && strstr(ptmc_state.tracee[index].executable, "test") ||
+      strstr(ptmc_state.tracee[index].executable, "detsim") != NULL)
+  {
     LOG_INFO("Hardcoded: treating as Go program due to 'test' in name");
     go_check = 1;
   }
-  if (go_check) {
+  if (go_check)
+  {
     // Go programs: stop at first mmap after initialization
     LOG_INFO("Detected Go program, using SYS_mmap as stop_nr");
     stop_nr = SYS_mmap;
-  } else if (is_dynamically_linked(ptmc_state.tracee[index].executable)) {
+  }
+  else if (is_dynamically_linked(ptmc_state.tracee[index].executable))
+  {
     stop_nr = SYS_munmap;
-  } else {
+  }
+  else
+  {
     stop_nr = SYS_mprotect;
   }
   Assert(waitpid(pid, &wstatus, 0) == pid, "%s", strerror(errno));
@@ -489,8 +511,8 @@ int state_initialization()
     ptmc_state.fs_states[i].set_fd_manager(ptmc_state.fd_managers[i]);
     ptmc_state.sock_states[i].set_fd_manager(ptmc_state.fd_managers[i]);
 
-  /* Initialize execution engine */
-  exec::init_all();
+    /* Initialize execution engine */
+    exec::init_all();
   }
 
   /* here goes to first state */

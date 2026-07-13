@@ -54,10 +54,13 @@ Ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data)
   return result;
 }
 
-#define ptrace_right(a, b, c, d) Ptrace_right((enum __ptrace_request)a, (pid_t)b, (void *)(c), (void *)(d))
+#define ptrace_right(a, b, c, d)                                               \
+  Ptrace_right((enum __ptrace_request)a, (pid_t)b, (void *)(c), (void *)(d))
 void tracee_do_munmap(int pid, uint64_t start, uint64_t end);
-void *tracee_do_mmap(int pid, uint64_t start, uint64_t end, int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
-void *tracee_do_mmap_in_place(int pid, uint64_t start, uint64_t end, int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
+void *tracee_do_mmap(int pid, uint64_t start, uint64_t end,
+                     int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
+void *tracee_do_mmap_in_place(int pid, uint64_t start, uint64_t end,
+                              int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
 int tracee_do_open(int pid, const char *filename, uint64_t flags);
 
 void tracee_backtrace(int pid);

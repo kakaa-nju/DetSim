@@ -1,8 +1,8 @@
 #ifndef __UTILS_H
 #define __UTILS_H
 
-#include <cstdint>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <optional>

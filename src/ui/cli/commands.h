@@ -15,18 +15,19 @@
  * Command Table
  * ====================================================================== */
 
-struct CommandEntry {
-    const char *name;
-    const char *description;
-    int (*handler)(char *args);
+struct CommandEntry
+{
+  const char *name;
+  const char *description;
+  int (*handler)(char *args);
 };
 
 /* Get the command table and its size */
-const CommandEntry* get_command_table();
+const CommandEntry *get_command_table();
 size_t get_command_count();
 
 /* Find a command by name */
-const CommandEntry* find_command(const char *name);
+const CommandEntry *find_command(const char *name);
 
 /* Execute a command line (parses and dispatches) */
 int execute_command_line(char *cmd_line);
@@ -67,6 +68,6 @@ void show_welcome();
 void cleanup_readline();
 
 /* Read a line from the user (using readline) */
-char* read_line(const char *prompt);
+char *read_line(const char *prompt);
 
 #endif /* __CLI_COMMANDS_H */

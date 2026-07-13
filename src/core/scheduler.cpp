@@ -1,13 +1,13 @@
 #include "scheduler.h"
-#include "scheduler/scheduler.h"
 #include "debug.h"
-#include "net/emu.h"
 #include "expr_eval.hpp"
 #include "fs/fsstate.h"
 #include "guest.h"
 #include "monitor.h"
-#include "proc_status.h"
+#include "net/emu.h"
 #include "net/sockstate.h"
+#include "proc_status.h"
+#include "scheduler/scheduler.h"
 #include "state/state.h"
 #include "state/state_store.h"
 #include "state/state_store_packed.h"
@@ -128,15 +128,17 @@ int load_exec_store()
   if (result.code == CKPT_DISCARD)
   {
     int thread_idx = ptmc_state.current_thread_idx[index];
-    detsim::ui::ui_printf("Thread %d is blocked (waiting on futex). Cannot step.\n",
-                          thread_idx);
+    detsim::ui::ui_printf(
+        "Thread %d is blocked (waiting on futex). Cannot step.\n", thread_idx);
     // Restore to the original state before this si command
     // The tracee is in an unstable state (syscall entry), so we must roll back
     ptmc_state.running_state = original_state;
     // BUT: Preserve the thread information from the attempted transition
     // so user can see and switch to other threads
-    ptmc_state.running_state.child[index].threads = result.new_state.child[index].threads;
-    ptmc_state.running_state.child[index].current_thread_idx = result.new_state.child[index].current_thread_idx;
+    ptmc_state.running_state.child[index].threads =
+        result.new_state.child[index].threads;
+    ptmc_state.running_state.child[index].current_thread_idx =
+        result.new_state.child[index].current_thread_idx;
     // The thread_blocked flag is already set in ptmc_state by the futex handler
     return -1;
   }
@@ -378,7 +380,8 @@ static void update_depth_statistics(size_t depth, size_t total_searched)
 }
 
 /* Helper: Calculate subsystem memory usage */
-static void calculate_subsystem_stats(size_t &sock_state_total, size_t &fs_state_total)
+static void calculate_subsystem_stats(size_t &sock_state_total,
+                                      size_t &fs_state_total)
 {
   sock_state_total = 0;
   fs_state_total = 0;
@@ -398,8 +401,9 @@ static void format_time(double elapsed, int &hours, int &minutes, int &seconds)
 }
 
 /* Helper: Update NCursesUI status display */
-static void update_ui_status(detsim::ui::NCursesUI *ui, const struct StoreStats &stats,
-                             double elapsed, size_t depth, size_t queue_size,
+static void update_ui_status(detsim::ui::NCursesUI *ui,
+                             const struct StoreStats &stats, double elapsed,
+                             size_t depth, size_t queue_size,
                              size_t state_tree_size, size_t total_sysstates,
                              size_t unique_states, size_t sock_state_total,
                              size_t fs_state_total, size_t state_queue_internal)
@@ -421,21 +425,21 @@ static void update_ui_status(detsim::ui::NCursesUI *ui, const struct StoreStats 
   ui->set_status_line(1, buf);
 
   /* Line 2: Worker queues & prefetch stats */
-  snprintf(
-      buf, sizeof(buf),
-      "IO: %zu/%zu | Prefetch: %zu Q(%lu/%lu H) | Tree: %zu | Sys: %zu",
-      stats.io_queue_size, stats.io_queue_cap, stats.prefetch_queue_size,
-      stats.prefetch_issued, stats.prefetch_hits, state_tree_size,
-      total_sysstates);
+  snprintf(buf, sizeof(buf),
+           "IO: %zu/%zu | Prefetch: %zu Q(%lu/%lu H) | Tree: %zu | Sys: %zu",
+           stats.io_queue_size, stats.io_queue_cap, stats.prefetch_queue_size,
+           stats.prefetch_issued, stats.prefetch_hits, state_tree_size,
+           total_sysstates);
   ui->set_status_line(2, buf);
 
   /* Line 3: Cache L1 & L2 with hit rate */
-  snprintf(
-      buf, sizeof(buf),
-      "L1: %s/%s (%.0f%%) [%zu] | L2: %s/%s (%.0f%%) [%zu] | Hit: %.1f%%",
-      format_bytes(stats.l1_usage).c_str(), format_bytes(stats.l1_cap).c_str(), l1_pct,
-      stats.l1_entries, format_bytes(stats.l2_usage).c_str(),
-      format_bytes(stats.l2_cap).c_str(), l2_pct, stats.l2_entries, stats.hit_rate);
+  snprintf(buf, sizeof(buf),
+           "L1: %s/%s (%.0f%%) [%zu] | L2: %s/%s (%.0f%%) [%zu] | Hit: %.1f%%",
+           format_bytes(stats.l1_usage).c_str(),
+           format_bytes(stats.l1_cap).c_str(), l1_pct, stats.l1_entries,
+           format_bytes(stats.l2_usage).c_str(),
+           format_bytes(stats.l2_cap).c_str(), l2_pct, stats.l2_entries,
+           stats.hit_rate);
   ui->set_status_line(3, buf);
 
   /* Line 4: Eviction & subsystem stats */
@@ -452,8 +456,8 @@ static void update_ui_status(detsim::ui::NCursesUI *ui, const struct StoreStats 
 
 /* Helper: Print text status to console */
 static void print_text_status(const struct StoreStats &stats, double elapsed,
-                              size_t depth, size_t queue_size, size_t total_sysstates,
-                              size_t unique_states)
+                              size_t depth, size_t queue_size,
+                              size_t total_sysstates, size_t unique_states)
 {
   static time_t last_status_time = 0;
   time_t current_time = time(NULL);
@@ -482,17 +486,17 @@ static void print_text_status(const struct StoreStats &stats, double elapsed,
 
   /* Line 3: Cache L1 */
   printf("[STATUS] L1 Hot: %s / %s (%.1f%%) | %zu entries\n",
-         format_bytes(stats.l1_usage).c_str(), format_bytes(stats.l1_cap).c_str(),
-         l1_pct, stats.l1_entries);
+         format_bytes(stats.l1_usage).c_str(),
+         format_bytes(stats.l1_cap).c_str(), l1_pct, stats.l1_entries);
 
   /* Line 4: Cache L2 */
   printf("[STATUS] L2 Warm: %s / %s (%.1f%%) | %zu entries\n",
-         format_bytes(stats.l2_usage).c_str(), format_bytes(stats.l2_cap).c_str(),
-         l2_pct, stats.l2_entries);
+         format_bytes(stats.l2_usage).c_str(),
+         format_bytes(stats.l2_cap).c_str(), l2_pct, stats.l2_entries);
 
   /* Line 5: Time */
-  printf("[STATUS] Elapsed: %02d:%02d:%02d | Total SysStates: %zu\n",
-         hours, minutes, seconds, total_sysstates);
+  printf("[STATUS] Elapsed: %02d:%02d:%02d | Total SysStates: %zu\n", hours,
+         minutes, seconds, total_sysstates);
 
   /* Line 6: Mode */
   const char *mode_str = "DFS";
@@ -514,8 +518,8 @@ static void print_text_status(const struct StoreStats &stats, double elapsed,
     else
       running++;
   }
-  printf("[STATUS] Processes: %d running | %d exited | Current: %d\n",
-         running, exited, ptmc_state.cursor);
+  printf("[STATUS] Processes: %d running | %d exited | Current: %d\n", running,
+         exited, ptmc_state.cursor);
 
   /* Line 8: Current hash */
   printf("[STATUS] Current: %016lx\n", ptmc_state.running_state.ss_hash);
@@ -551,13 +555,14 @@ static void status_monitor_thread()
 
     if (ui)
     {
-      update_ui_status(ui, stats, elapsed, depth, queue_size,
-                       state_tree_size, total_sysstates, unique_states,
-                       sock_state_total, fs_state_total, state_queue_internal);
+      update_ui_status(ui, stats, elapsed, depth, queue_size, state_tree_size,
+                       total_sysstates, unique_states, sock_state_total,
+                       fs_state_total, state_queue_internal);
     }
     else
     {
-      print_text_status(stats, elapsed, depth, queue_size, total_sysstates, unique_states);
+      print_text_status(stats, elapsed, depth, queue_size, total_sysstates,
+                        unique_states);
     }
 
     std::this_thread::sleep_for(std::chrono::seconds(1));

@@ -14,9 +14,9 @@
 #include <sstream>
 #include <string>
 #include <sys/epoll.h>
+#include <sys/poll.h>
 #include <sys/socket.h>
 #include <vector>
-#include <sys/poll.h>
 
 /* Guest memory operations - defined in guest.cpp */
 extern void *memcpy_host2guest(void *dest, const void *src, size_t n);
@@ -92,8 +92,8 @@ struct Socket
   std::map<uint64_t, TcpConnection> established_connections;
 
   Socket()
-      : fd(-1), domain(0), type(0), protocol(0), flags(0), bound(false), connected(false),
-        listening(false), backlog(0)
+      : fd(-1), domain(0), type(0), protocol(0), flags(0), bound(false),
+        connected(false), listening(false), backlog(0)
   {
   }
 

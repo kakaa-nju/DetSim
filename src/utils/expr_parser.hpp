@@ -36,10 +36,10 @@
    private implementation details that can be changed or removed.  */
 
 #ifndef YY_YY_SRC_UTILS_EXPR_PARSER_HPP_INCLUDED
-# define YY_YY_SRC_UTILS_EXPR_PARSER_HPP_INCLUDED
+#define YY_YY_SRC_UTILS_EXPR_PARSER_HPP_INCLUDED
 /* Debug traces.  */
 #ifndef YYDEBUG
-# define YYDEBUG 0
+#define YYDEBUG 0
 #endif
 #if YYDEBUG
 extern int yydebug;
@@ -47,73 +47,69 @@ extern int yydebug;
 
 /* Token kinds.  */
 #ifndef YYTOKENTYPE
-# define YYTOKENTYPE
-  enum yytokentype
-  {
-    YYEMPTY = -2,
-    YYEOF = 0,                     /* "end of file"  */
-    YYerror = 256,                 /* error  */
-    YYUNDEF = 257,                 /* "invalid token"  */
-    NUMBER = 258,                  /* NUMBER  */
-    CHAR_LITERAL = 259,            /* CHAR_LITERAL  */
-    IDENTIFIER = 260,              /* IDENTIFIER  */
-    TRACEE_N = 261,                /* TRACEE_N  */
-    KW_SIZEOF = 262,               /* KW_SIZEOF  */
-    KW_OFFSETOF = 263,             /* KW_OFFSETOF  */
-    KW_TYPEOF = 264,               /* KW_TYPEOF  */
-    KW_STRUCT = 265,               /* KW_STRUCT  */
-    KW_UNION = 266,                /* KW_UNION  */
-    KW_ENUM = 267,                 /* KW_ENUM  */
-    KW_INT = 268,                  /* KW_INT  */
-    KW_CHAR = 269,                 /* KW_CHAR  */
-    KW_SHORT = 270,                /* KW_SHORT  */
-    KW_LONG = 271,                 /* KW_LONG  */
-    KW_FLOAT = 272,                /* KW_FLOAT  */
-    KW_DOUBLE = 273,               /* KW_DOUBLE  */
-    KW_VOID = 274,                 /* KW_VOID  */
-    KW_UNSIGNED = 275,             /* KW_UNSIGNED  */
-    KW_SIGNED = 276,               /* KW_SIGNED  */
-    KW_CONST = 277,                /* KW_CONST  */
-    KW_STATIC = 278,               /* KW_STATIC  */
-    ARROW = 279,                   /* ARROW  */
-    EQ = 280,                      /* EQ  */
-    NE = 281,                      /* NE  */
-    LE = 282,                      /* LE  */
-    GE = 283,                      /* GE  */
-    AND = 284,                     /* AND  */
-    OR = 285,                      /* OR  */
-    SHL = 286,                     /* SHL  */
-    SHR = 287,                     /* SHR  */
-    INC = 288,                     /* INC  */
-    DEC = 289,                     /* DEC  */
-    INVALID = 290                  /* INVALID  */
-  };
-  typedef enum yytokentype yytoken_kind_t;
+#define YYTOKENTYPE
+enum yytokentype
+{
+  YYEMPTY = -2,
+  YYEOF = 0,          /* "end of file"  */
+  YYerror = 256,      /* error  */
+  YYUNDEF = 257,      /* "invalid token"  */
+  NUMBER = 258,       /* NUMBER  */
+  CHAR_LITERAL = 259, /* CHAR_LITERAL  */
+  IDENTIFIER = 260,   /* IDENTIFIER  */
+  TRACEE_N = 261,     /* TRACEE_N  */
+  KW_SIZEOF = 262,    /* KW_SIZEOF  */
+  KW_OFFSETOF = 263,  /* KW_OFFSETOF  */
+  KW_TYPEOF = 264,    /* KW_TYPEOF  */
+  KW_STRUCT = 265,    /* KW_STRUCT  */
+  KW_UNION = 266,     /* KW_UNION  */
+  KW_ENUM = 267,      /* KW_ENUM  */
+  KW_INT = 268,       /* KW_INT  */
+  KW_CHAR = 269,      /* KW_CHAR  */
+  KW_SHORT = 270,     /* KW_SHORT  */
+  KW_LONG = 271,      /* KW_LONG  */
+  KW_FLOAT = 272,     /* KW_FLOAT  */
+  KW_DOUBLE = 273,    /* KW_DOUBLE  */
+  KW_VOID = 274,      /* KW_VOID  */
+  KW_UNSIGNED = 275,  /* KW_UNSIGNED  */
+  KW_SIGNED = 276,    /* KW_SIGNED  */
+  KW_CONST = 277,     /* KW_CONST  */
+  KW_STATIC = 278,    /* KW_STATIC  */
+  ARROW = 279,        /* ARROW  */
+  EQ = 280,           /* EQ  */
+  NE = 281,           /* NE  */
+  LE = 282,           /* LE  */
+  GE = 283,           /* GE  */
+  AND = 284,          /* AND  */
+  OR = 285,           /* OR  */
+  SHL = 286,          /* SHL  */
+  SHR = 287,          /* SHR  */
+  INC = 288,          /* INC  */
+  DEC = 289,          /* DEC  */
+  INVALID = 290       /* INVALID  */
+};
+typedef enum yytokentype yytoken_kind_t;
 #endif
 
 /* Value type.  */
-#if ! defined YYSTYPE && ! defined YYSTYPE_IS_DECLARED
+#if !defined YYSTYPE && !defined YYSTYPE_IS_DECLARED
 union YYSTYPE
 {
 #line 18 "src/utils/expr_parser.y"
 
-    long int_val;
-    char* str_val;
-    ExprNode* node_val;
+  long int_val;
+  char *str_val;
+  ExprNode *node_val;
 
 #line 105 "src/utils/expr_parser.hpp"
-
 };
 typedef union YYSTYPE YYSTYPE;
-# define YYSTYPE_IS_TRIVIAL 1
-# define YYSTYPE_IS_DECLARED 1
+#define YYSTYPE_IS_TRIVIAL 1
+#define YYSTYPE_IS_DECLARED 1
 #endif
-
 
 extern YYSTYPE yylval;
 
-
-int yyparse (void);
-
+int yyparse(void);
 
 #endif /* !YY_YY_SRC_UTILS_EXPR_PARSER_HPP_INCLUDED  */

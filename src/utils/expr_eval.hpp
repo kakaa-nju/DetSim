@@ -7,8 +7,8 @@
 #ifndef EXPR_EVAL_HPP
 #define EXPR_EVAL_HPP
 
-#include <string>
 #include <cstdint>
+#include <string>
 
 /*
  * eval<T> - Evaluate expression and return typed result
@@ -25,13 +25,14 @@
  * @param success: optional bool to indicate success/failure
  * @return: evaluated value cast to type T
  */
-template<typename T>
-T eval(const std::string& expr, int proc_idx = 0, bool* success = nullptr);
+template <typename T>
+T eval(const std::string &expr, int proc_idx = 0, bool *success = nullptr);
 
 /* Convenience overload for const char* */
-template<typename T>
-T eval(const char* expr, int proc_idx = 0, bool* success = nullptr) {
-    return eval<T>(std::string(expr), proc_idx, success);
+template <typename T>
+T eval(const char *expr, int proc_idx = 0, bool *success = nullptr)
+{
+  return eval<T>(std::string(expr), proc_idx, success);
 }
 
 #endif /* EXPR_EVAL_HPP */

@@ -599,10 +599,10 @@ long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt)
   size_t offset = 0;
   for (int i = 0; i < iovcnt; i++)
   {
-    if (host_iov[i].iov_len == 0) continue;
+    if (host_iov[i].iov_len == 0)
+      continue;
 
-    memcpy_guest2host(buf.data() + offset,
-                      host_iov[i].iov_base,
+    memcpy_guest2host(buf.data() + offset, host_iov[i].iov_base,
                       host_iov[i].iov_len);
     offset += host_iov[i].iov_len;
   }
@@ -614,8 +614,8 @@ long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt)
     return sock_state.do_send(fd, buf.data(), total_len, 0);
   }
 
-  return ptmc_state.fs_states[ptmc_state.cursor]
-      .do_write(fd, buf.data(), total_len);
+  return ptmc_state.fs_states[ptmc_state.cursor].do_write(fd, buf.data(),
+                                                          total_len);
 }
 
 long emu_vfs_close(int fd)

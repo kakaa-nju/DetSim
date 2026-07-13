@@ -21,22 +21,24 @@
  * Exploration Statistics
  * ====================================================================== */
 
-struct ExplorationStats {
-    size_t states_searched = 0;
-    size_t states_unique = 0;
-    size_t states_queued = 0;
-    size_t depth = 0;
-    double elapsed_time = 0.0;
-    double states_per_sec = 0.0;
+struct ExplorationStats
+{
+  size_t states_searched = 0;
+  size_t states_unique = 0;
+  size_t states_queued = 0;
+  size_t depth = 0;
+  double elapsed_time = 0.0;
+  double states_per_sec = 0.0;
 
-    void reset() {
-        states_searched = 0;
-        states_unique = 0;
-        states_queued = 0;
-        depth = 0;
-        elapsed_time = 0.0;
-        states_per_sec = 0.0;
-    }
+  void reset()
+  {
+    states_searched = 0;
+    states_unique = 0;
+    states_queued = 0;
+    depth = 0;
+    elapsed_time = 0.0;
+    states_per_sec = 0.0;
+  }
 };
 
 /* ======================================================================
@@ -44,13 +46,16 @@ struct ExplorationStats {
  * ====================================================================== */
 
 // Called when a state is explored
-using StateExploredCallback = std::function<void(hash_type state_hash, const ExplorationStats& stats)>;
+using StateExploredCallback =
+    std::function<void(hash_type state_hash, const ExplorationStats &stats)>;
 
 // Called when exploration is interrupted
-using ExplorationInterruptedCallback = std::function<void(const ExplorationStats& stats, const char* reason)>;
+using ExplorationInterruptedCallback =
+    std::function<void(const ExplorationStats &stats, const char *reason)>;
 
 // Called when exploration completes
-using ExplorationCompleteCallback = std::function<void(const ExplorationStats& stats)>;
+using ExplorationCompleteCallback =
+    std::function<void(const ExplorationStats &stats)>;
 
 /* ======================================================================
  * Exploration Functions
@@ -95,7 +100,7 @@ int scheduler_exec_rand(int depth);
  * ====================================================================== */
 
 /* Get current exploration statistics */
-const ExplorationStats& get_exploration_stats();
+const ExplorationStats &get_exploration_stats();
 
 /* Reset statistics */
 void reset_exploration_stats();

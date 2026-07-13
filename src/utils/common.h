@@ -1,6 +1,6 @@
 /*
  * common.h - Project-wide common definitions
- * 
+ *
  * Note: Basic types have been moved to src/core/types.h
  * This header now primarily serves as a compatibility wrapper
  * and defines project-specific macros.

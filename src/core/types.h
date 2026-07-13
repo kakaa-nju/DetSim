@@ -1,12 +1,12 @@
 /*
  * types.h - Core type definitions used across the project
- * 
+ *
  * This header contains:
  * - Basic integer type aliases (__s8, __u8, etc.)
  * - ptrace_syscall_info struct (from kernel headers)
  * - Global constants (HASH_LEN, KiB/MiB)
  * - Common typedefs (bytes, hash_type)
- * 
+ *
  * This is a minimal header designed to be included by almost all other headers
  * without causing circular dependencies.
  */
@@ -76,7 +76,7 @@ struct ptrace_syscall_info
  * ======================================================================== */
 
 #ifndef NP
-  #define NP 0
+#define NP 0
 #endif
 static_assert(NP > 0);
 
