@@ -156,6 +156,60 @@ void format_fd_only(char *buf, const syscall_info &info)
   format_ret(buf + pos, info.rval);
 }
 
+/* Format: pipe/pipe2 - output fd pair */
+static void format_pipe_common(char *buf, int pid, hash_type ts_hash,
+                               const syscall_info &info, bool has_flags)
+{
+  int pos = 0;
+  pos += sprintf(buf + pos, "%s(%p", syscalls[info.nr],
+                 (void *)info.args[0]);
+
+  if (has_flags)
+  {
+    pos += sprintf(buf + pos, ", %ld", info.args[1]);
+  }
+
+  if (info.rval >= 0)
+  {
+    int *pipefd =
+        (int *)read_mem(pid, ts_hash, info.args[0], 2 * sizeof(int));
+    if (pipefd)
+    {
+      pos += sprintf(buf + pos, " -> [%d, %d]", pipefd[0], pipefd[1]);
+      free(pipefd);
+    }
+    else
+    {
+      pos += sprintf(buf + pos, " -> <invalid pipefd>");
+    }
+  }
+
+  pos += sprintf(buf + pos, ") ");
+  format_ret(buf + pos, info.rval);
+}
+
+/* Format: select/pselect6 - fd_set pointers and timeout */
+static void format_select_common(char *buf, const syscall_info &info,
+                                 bool has_sigmask)
+{
+  int pos = 0;
+  if (has_sigmask)
+  {
+    pos += sprintf(buf + pos,
+                   "pselect6(%ld, %p, %p, %p, %p, %p) ", info.args[0],
+                   (void *)info.args[1], (void *)info.args[2],
+                   (void *)info.args[3], (void *)info.args[4],
+                   (void *)info.args[5]);
+  }
+  else
+  {
+    pos += sprintf(buf + pos, "select(%ld, %p, %p, %p, %p) ", info.args[0],
+                   (void *)info.args[1], (void *)info.args[2],
+                   (void *)info.args[3], (void *)info.args[4]);
+  }
+  format_ret(buf + pos, info.rval);
+}
+
 /* Format: sendto - input buffer, print by requested size */
 void format_sendto(char *buf, int pid, hash_type ts_hash,
                    const syscall_info &info)
@@ -856,6 +910,10 @@ void format(char *buf, int pid, hash_type ts_hash)
     case SYS_socket:
       format_socket(body_buf, info);
       break;
+    case SYS_select:
+    case SYS_pselect6:
+      format_select_common(body_buf, info, true);
+      break;
     case SYS_bind:
       format_bind(body_buf, pid, ts_hash, info);
       break;
@@ -906,6 +964,10 @@ void format(char *buf, int pid, hash_type ts_hash)
     case SYS_fcntl:
       snprintf(body_buf, 1024 - prefix_len, "fcntl(fd=%ld, cmd=%ld, arg=%ld)",
                info.args[0], info.args[1], info.args[2]);
+      break;
+    case SYS_pipe:
+    case SYS_pipe2:
+      format_pipe_common(body_buf, pid, ts_hash, info, true);
       break;
 
     /* File I/O */
