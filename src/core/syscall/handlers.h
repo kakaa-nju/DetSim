@@ -71,6 +71,8 @@ int handle_openat(pid_t pid, syscall_info &info);
 int handle_read(pid_t pid, syscall_info &info);
 int handle_write(pid_t pid, syscall_info &info);
 int handle_writev(pid_t pid, syscall_info &info);
+int handle_select(pid_t pid, syscall_info &info);
+int handle_pselect6(pid_t pid, syscall_info &info);
 int handle_close(pid_t pid, syscall_info &info);
 int handle_lseek(pid_t pid, syscall_info &info);
 int handle_stat(pid_t pid, syscall_info &info);

@@ -86,6 +86,8 @@ SyscallRoute SyscallDispatcher::get_route(int syscall_nr) const
     case SYS_chdir:
     case SYS_pipe:
     case SYS_pipe2:
+    case SYS_select:
+    case SYS_pselect6:
       return SyscallRoute(SyscallCategory::EMULATED, SyscallAction::EMULATE,
                           "VFS syscall - emulated");
 
@@ -139,6 +141,8 @@ bool SyscallDispatcher::needs_checkpoint(int syscall_nr) const
     case SYS_openat:
     case SYS_clone:
     case SYS_clone3:
+    case SYS_select:
+    case SYS_pselect6:
     case SYS_futex:
     case SYS_epoll_wait:
     case SYS_epoll_pwait:
@@ -243,6 +247,8 @@ int SyscallDispatcher::on_exit(pid_t pid, syscall_info &info)
     case SYS_read:
     case SYS_write:
     case SYS_writev:
+    case SYS_select:
+    case SYS_pselect6:
     case SYS_close:
     case SYS_lseek:
     case SYS_stat:

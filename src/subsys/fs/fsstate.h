@@ -26,6 +26,11 @@ long emu_vfs_close(int fd);
 long emu_vfs_lseek(int fd, off_t offset, int whence);
 long emu_vfs_stat(const char *path, struct stat *statbuf);
 long emu_vfs_fstat(int fd, struct stat *statbuf);
+long emu_select(int nfds, fd_set *readfds, fd_set *writefds,
+                fd_set *exceptfds, struct timeval *timeout);
+long emu_pselect6(int nfds, fd_set *readfds, fd_set *writefds,
+                  fd_set *exceptfds, const struct timespec *timeout,
+                  const sigset_t *sigmask, size_t sigsetsize);
 long emu_chdir(const char *path);
 long emu_mmap(void *addr, size_t length, int prot, int flags, int fd,
               off_t offset);
@@ -150,6 +155,8 @@ class FileSystemState
   int do_open(const std::string &path, int flags, mode_t mode);
   ssize_t do_read(int fd, void *buf, size_t count);
   ssize_t do_write(int fd, const void *buf, size_t count);
+  int do_select(int nfds, fd_set *readfds, fd_set *writefds,
+                fd_set *exceptfds, struct timeval *timeout);
   int do_close(int fd);
   off_t do_lseek(int fd, off_t offset, int whence);
   int do_stat(const std::string &path, struct stat *statbuf);

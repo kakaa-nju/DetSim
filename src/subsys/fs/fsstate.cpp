@@ -19,6 +19,7 @@
 #include <libgen.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/select.h>
 #include <sys/types.h>
 #include <time.h>
 
@@ -510,6 +511,163 @@ ssize_t FileSystemState::do_write(int fd, const void *buf, size_t count)
   return count;
 }
 
+int FileSystemState::do_select(int nfds, fd_set *readfds, fd_set *writefds,
+                               fd_set *exceptfds, struct timeval *timeout)
+{
+  (void)timeout;
+
+  if (nfds < 0)
+  {
+    return -EINVAL;
+  }
+
+  if (nfds > FD_SETSIZE)
+  {
+    nfds = FD_SETSIZE;
+  }
+
+  auto &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
+  int ready_count = 0;
+
+  fd_set read_out;
+  fd_set write_out;
+  fd_set except_out;
+  if (readfds)
+    FD_ZERO(&read_out);
+  if (writefds)
+    FD_ZERO(&write_out);
+  if (exceptfds)
+    FD_ZERO(&except_out);
+
+  for (int fd = 0; fd < nfds; fd++)
+  {
+    bool want_read = readfds && FD_ISSET(fd, readfds);
+    bool want_write = writefds && FD_ISSET(fd, writefds);
+    bool want_except = exceptfds && FD_ISSET(fd, exceptfds);
+
+    if (!want_read && !want_write && !want_except)
+      continue;
+
+    bool valid = false;
+    bool can_read = false;
+    bool can_write = false;
+
+    if (sock_state.is_valid_socket(fd))
+    {
+      const Socket *sock = sock_state.get_socket(fd);
+      if (!sock)
+      {
+        return -EBADF;
+      }
+
+      valid = true;
+      if (sock->type == SOCK_DGRAM)
+      {
+        can_write = true;
+        auto it = sock_state.udp_recv_buffers().find(fd);
+        if (it != sock_state.udp_recv_buffers().end() && !it->second.empty())
+        {
+          can_read = true;
+        }
+      }
+      else if (sock->type == SOCK_STREAM)
+      {
+        if (sock->connected)
+        {
+          can_write = true;
+          auto conn_it = sock_state.tcp_connections().find(fd);
+          if (conn_it != sock_state.tcp_connections().end() &&
+              !conn_it->second.recv_buffer.empty())
+          {
+            can_read = true;
+          }
+        }
+        if (sock->listening)
+        {
+          can_write = true;
+          if (!sock->pending_connections.empty())
+          {
+            can_read = true;
+          }
+        }
+      }
+    }
+    else if (is_pipe(fd))
+    {
+      valid = true;
+      int pipe_id = pipe_fds_.at(fd);
+      bool is_read_end = pipe_id > 0;
+      if (!is_read_end)
+        pipe_id = -pipe_id;
+
+      auto pipe_it = pipes_.find(pipe_id);
+      if (pipe_it == pipes_.end())
+      {
+        return -EBADF;
+      }
+
+      const Pipe &pipe = pipe_it->second;
+      if (is_read_end)
+      {
+        if (!pipe.buffer.empty() || pipe.write_closed)
+          can_read = true;
+      }
+      else
+      {
+        if (!pipe.read_closed)
+          can_write = true;
+      }
+    }
+    else if (open_files.find(fd) != open_files.end())
+    {
+      valid = true;
+      can_read = true;
+      can_write = true;
+    }
+
+    if (!valid)
+    {
+      return -EBADF;
+    }
+
+    bool fd_ready = false;
+    if (want_read && can_read)
+    {
+      FD_SET(fd, &read_out);
+      fd_ready = true;
+    }
+    if (want_write && can_write)
+    {
+      FD_SET(fd, &write_out);
+      fd_ready = true;
+    }
+    if (want_except)
+    {
+      // Exceptional conditions are not modeled yet.
+    }
+
+    if (fd_ready)
+    {
+      ready_count++;
+    }
+  }
+
+  if (readfds)
+  {
+    memcpy(readfds, &read_out, sizeof(fd_set));
+  }
+  if (writefds)
+  {
+    memcpy(writefds, &write_out, sizeof(fd_set));
+  }
+  if (exceptfds)
+  {
+    memset(exceptfds, 0, sizeof(fd_set));
+  }
+
+  return ready_count;
+}
+
 int FileSystemState::do_close(int fd)
 {
   if (open_files.erase(fd) == 0)
@@ -669,6 +827,14 @@ long emu_vfs_openat(int dirfd, const char *path_ptr, int flags, mode_t mode)
 
 long emu_vfs_read(int fd, void *buf, size_t count)
 {
+  // Check if fd is a pipe
+  auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
+  if (fs.is_pipe(fd))
+  {
+    ssize_t ret = fs.do_pipe_read(fd, buf, count);
+    return ret;
+  }
+
   // Check if fd is a socket
   SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
   if (sock_state.is_valid_socket(fd))
@@ -678,8 +844,7 @@ long emu_vfs_read(int fd, void *buf, size_t count)
   }
 
   std::vector<char> host_buf(count);
-  long bytes_read = ptmc_state.fs_states[ptmc_state.cursor].do_read(
-      fd, host_buf.data(), count);
+  long bytes_read = fs.do_read(fd, host_buf.data(), count);
 
   if (bytes_read > 0)
   {
@@ -690,6 +855,14 @@ long emu_vfs_read(int fd, void *buf, size_t count)
 
 long emu_vfs_write(int fd, const void *buf, size_t count)
 {
+  // Check if fd is a pipe
+  auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
+  if (fs.is_pipe(fd))
+  {
+    ssize_t ret = fs.do_pipe_write(fd, buf, count);
+    return ret;
+  }
+
   // Check if fd is a socket
   SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
   if (sock_state.is_valid_socket(fd))
@@ -732,6 +905,13 @@ long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt)
     offset += host_iov[i].iov_len;
   }
 
+  // Check if fd is a pipe
+  auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
+  if (fs.is_pipe(fd))
+  {
+    return fs.do_pipe_write(fd,buf.data(),total_len);
+  }
+
   // Check if fd is a socket
   SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
   if (sock_state.is_valid_socket(fd))
@@ -739,8 +919,35 @@ long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt)
     return sock_state.do_send(fd, buf.data(), total_len, 0);
   }
 
-  return ptmc_state.fs_states[ptmc_state.cursor].do_write(fd, buf.data(),
-                                                          total_len);
+  return fs.do_write(fd, buf.data(), total_len);
+}
+
+long emu_select(int nfds, fd_set *readfds, fd_set *writefds,
+                fd_set *exceptfds, struct timeval *timeout)
+{
+  (void)timeout;
+  return ptmc_state.fs_states[ptmc_state.cursor].do_select(nfds, readfds,
+                                                           writefds, exceptfds,
+                                                           timeout);
+}
+
+long emu_pselect6(int nfds, fd_set *readfds, fd_set *writefds,
+                  fd_set *exceptfds, const struct timespec *timeout,
+                  const sigset_t *sigmask, size_t sigsetsize)
+{
+  (void)sigmask;
+  (void)sigsetsize;
+  struct timeval tv;
+  struct timeval *tv_ptr = nullptr;
+  if (timeout)
+  {
+    tv.tv_sec = timeout->tv_sec;
+    tv.tv_usec = timeout->tv_nsec / 1000;
+    tv_ptr = &tv;
+  }
+  return ptmc_state.fs_states[ptmc_state.cursor].do_select(nfds, readfds,
+                                                           writefds, exceptfds,
+                                                           tv_ptr);
 }
 
 long emu_vfs_close(int fd)
