@@ -1,7 +1,7 @@
 # Examples Makefile
 # Build all example programs
 
-EXAMPLES = bakery brk bt cast_test complex devices expr_test fs loop loop_inf malloc member pipe simple_complex write
+EXAMPLES = bakery brk bt cast_test complex devices expr_test fs interrupt loop loop_inf malloc member pipe simple_complex write
 
 .PHONY: all clean $(EXAMPLES)
 
