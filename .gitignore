@@ -107,6 +107,7 @@ examples/**/*.pyc
 /examples/loop_inf/loop_inf
 /examples/malloc/malloc
 /examples/member/member
+/examples/pipe/pipe
 /examples/poll/poll
 /examples/simple_complex/simple_complex
 /examples/write/write

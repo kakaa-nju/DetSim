@@ -1,0 +1,5 @@
+{
+  "Loglevel": 0,
+  "Nodes": 1,
+  "Tracee": [["./pipe", "0"]]
+}
