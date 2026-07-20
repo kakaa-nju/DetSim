@@ -77,6 +77,12 @@ int ExecutionEngine::do_single_syscall(pid_t pid, syscall_info &info)
     return CKPT_STOP;
   }
 
+  info.nr = psi.entry.nr;
+  for (int i = 0; i < 6; i++)
+  {
+    info.args[i] = psi.entry.args[i];
+  }
+
   // Dispatch syscall enter
   syscall_dispatch::enter(pid, psi.entry.nr, info);
 
