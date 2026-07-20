@@ -1096,7 +1096,7 @@ int FileSystemState::do_munmap(void *addr, size_t length)
   {
     mmap_regions.erase(it);
   }
-  return munmap(addr, length);
+  return 0;
 }
 
 long emu_mmap(void *addr, size_t length, int prot, int flags, int fd,

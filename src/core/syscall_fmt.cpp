@@ -46,8 +46,14 @@ static int format_mem_content(char *dest, const char *src, size_t len)
 }
 
 /* Helper: Format return value with errno if negative */
-static int format_ret(char *dest, long rval)
+
+#define ADDR_FLAG 1
+#define INT_FLAG 2
+static int format_ret(char *dest, long rval, int flag)
 {
+  if(flag == ADDR_FLAG){
+    return sprintf(dest, "= 0x%lx", rval);
+  }
   if (rval < 0)
     return sprintf(dest, "= %ld (%s)", rval, strerror(-rval));
   else
@@ -102,7 +108,7 @@ void format_write(char *buf, int pid, hash_type ts_hash,
   }
 
   pos += sprintf(buf + pos, ", %ld) ", info.args[2]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: read - output buffer, print by return value */
@@ -146,14 +152,14 @@ void format_read(char *buf, int pid, hash_type ts_hash,
   }
 
   pos += sprintf(buf + pos, ", %ld) ", info.args[2]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: int fd only (close style) */
 void format_fd_only(char *buf, const syscall_info &info)
 {
   int pos = sprintf(buf, "%s(%ld) ", syscalls[info.nr], info.args[0]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: pipe/pipe2 - output fd pair */
@@ -185,7 +191,7 @@ static void format_pipe_common(char *buf, int pid, hash_type ts_hash,
   }
 
   pos += sprintf(buf + pos, ") ");
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: select/pselect6 - fd_set pointers and timeout */
@@ -207,7 +213,7 @@ static void format_select_common(char *buf, const syscall_info &info,
                    (void *)info.args[1], (void *)info.args[2],
                    (void *)info.args[3], (void *)info.args[4]);
   }
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: sendto - input buffer, print by requested size */
@@ -277,7 +283,7 @@ void format_sendto(char *buf, int pid, hash_type ts_hash,
   }
 
   pos += sprintf(buf + pos, ", %ld) ", info.args[5]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: recvfrom - output buffer, print by return value */
@@ -398,7 +404,7 @@ void format_recvfrom(char *buf, int pid, hash_type ts_hash,
   }
 
   pos += sprintf(buf + pos, ") ");
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 void format_poll(char *buf, const syscall_info &info)
@@ -535,7 +541,7 @@ void format_poll(char *buf, const syscall_info &info)
 void format_addr(char *buf, const syscall_info &info)
 {
   int pos = sprintf(buf, "%s(0x%lx) ", syscalls[info.nr], info.args[0]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: mmap - detailed like strace */
@@ -677,7 +683,17 @@ void format_mmap(char *buf, const syscall_info &info)
   /* offset */
   pos += sprintf(buf + pos, "%lu) ", info.args[5]);
 
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, ADDR_FLAG);
+}
+
+void format_munmap(char *buf, const syscall_info &info)
+{
+  int pos = sprintf(buf, "munmap(");
+
+  pos += sprintf(buf + pos, "0x%lx, ", info.args[0]);
+  pos += sprintf(buf + pos, "%lu(0x%lx)) ", info.args[1], info.args[1]);
+
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 void format_tgkill(char *buf, const syscall_info &info)
@@ -726,7 +742,7 @@ void format_openat(char *buf, int pid, hash_type ts_hash,
                    info.args[3]);
   }
 
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: gettimeofday */
@@ -751,7 +767,7 @@ void format_gettimeofday(char *buf, int pid, hash_type ts_hash,
   }
 
   pos += sprintf(buf + pos, ", %p) ", (void *)info.args[1]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: clock_nanosleep */
@@ -771,7 +787,7 @@ void format_clock_nanosleep(char *buf, int pid, hash_type ts_hash,
 
   free(ts);
   pos += sprintf(buf + pos, ", %p) ", (void *)info.args[3]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: socket */
@@ -791,7 +807,7 @@ void format_socket(char *buf, const syscall_info &info)
 
   int pos =
       sprintf(buf, "socket(%s, %s, %ld) ", domain_str, type_str, info.args[2]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: bind with sockaddr details */
@@ -816,14 +832,14 @@ void format_bind(char *buf, int pid, hash_type ts_hash,
   }
 
   pos += sprintf(buf + pos, ", %ld) ", info.args[2]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: listen/accept */
 void format_socket_fd(char *buf, const syscall_info &info)
 {
   int pos = sprintf(buf, "%s(%ld, ...) ", syscalls[info.nr], info.args[0]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: connect with sockaddr details */
@@ -845,7 +861,7 @@ void format_connect(char *buf, int pid, hash_type ts_hash,
   }
 
   pos += sprintf(buf + pos, ", %ld) ", info.args[2]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 void format_chdir(char *buf, int pid, hash_type ts_hash,
@@ -857,7 +873,7 @@ void format_chdir(char *buf, int pid, hash_type ts_hash,
   memcpy_guest2host(path, (void *)info.args[0], 255);
   path[255] = '\0';
   int pos = sprintf(buf, "chdir(\"%s\") ", path);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* Format: default (6 arguments hex) */
@@ -866,7 +882,7 @@ void format_default(char *buf, const syscall_info &info)
   int pos = sprintf(buf, "%s(0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx) ",
                     syscalls[info.nr], info.args[0], info.args[1], info.args[2],
                     info.args[3], info.args[4], info.args[5]);
-  format_ret(buf + pos, info.rval);
+  format_ret(buf + pos, info.rval, INT_FLAG);
 }
 
 /* ======================================================================
@@ -993,6 +1009,9 @@ void format(char *buf, int pid, hash_type ts_hash)
       break;
     case SYS_mmap:
       format_mmap(body_buf, info);
+      break;
+    case SYS_munmap:
+      format_munmap(body_buf, info);
       break;
 
     /* Time */

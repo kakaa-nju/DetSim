@@ -407,9 +407,7 @@ int handle_mmap(pid_t pid, syscall_info &info)
 
 int handle_munmap(pid_t pid, syscall_info &info)
 {
-  long ret = emu_munmap((void *)info.args[0], info.args[1]);
-  tracee_set_rax(pid, ret);
-  info.rval = ret;
+  emu_munmap((void *)info.args[0], info.args[1]);
   return CKPT_NO;
 }
 
