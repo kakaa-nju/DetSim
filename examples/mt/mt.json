@@ -1,0 +1,7 @@
+{
+  "Loglevel": 1,
+  "Nodes": 1,
+  "Tracee": [
+    ["./mt"]
+  ]
+}
