@@ -51,7 +51,8 @@ static int format_mem_content(char *dest, const char *src, size_t len)
 #define INT_FLAG 2
 static int format_ret(char *dest, long rval, int flag)
 {
-  if(flag == ADDR_FLAG){
+  if (flag == ADDR_FLAG)
+  {
     return sprintf(dest, "= 0x%lx", rval);
   }
   if (rval < 0)
@@ -167,8 +168,7 @@ static void format_pipe_common(char *buf, int pid, hash_type ts_hash,
                                const syscall_info &info, bool has_flags)
 {
   int pos = 0;
-  pos += sprintf(buf + pos, "%s(%p", syscalls[info.nr],
-                 (void *)info.args[0]);
+  pos += sprintf(buf + pos, "%s(%p", syscalls[info.nr], (void *)info.args[0]);
 
   if (has_flags)
   {
@@ -177,8 +177,7 @@ static void format_pipe_common(char *buf, int pid, hash_type ts_hash,
 
   if (info.rval >= 0)
   {
-    int *pipefd =
-        (int *)read_mem(pid, ts_hash, info.args[0], 2 * sizeof(int));
+    int *pipefd = (int *)read_mem(pid, ts_hash, info.args[0], 2 * sizeof(int));
     if (pipefd)
     {
       pos += sprintf(buf + pos, " -> [%d, %d]", pipefd[0], pipefd[1]);
@@ -201,9 +200,8 @@ static void format_select_common(char *buf, const syscall_info &info,
   int pos = 0;
   if (has_sigmask)
   {
-    pos += sprintf(buf + pos,
-                   "pselect6(%ld, %p, %p, %p, %p, %p) ", info.args[0],
-                   (void *)info.args[1], (void *)info.args[2],
+    pos += sprintf(buf + pos, "pselect6(%ld, %p, %p, %p, %p, %p) ",
+                   info.args[0], (void *)info.args[1], (void *)info.args[2],
                    (void *)info.args[3], (void *)info.args[4],
                    (void *)info.args[5]);
   }

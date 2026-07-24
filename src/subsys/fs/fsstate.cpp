@@ -117,9 +117,8 @@ static std::string normalize_device_type(const std::string &type)
 {
   std::string normalized = type;
   std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                 [](unsigned char ch) {
-                   return static_cast<char>(std::tolower(ch));
-                 });
+                 [](unsigned char ch)
+                 { return static_cast<char>(std::tolower(ch)); });
   return normalized;
 }
 
@@ -143,9 +142,8 @@ static const DeviceSpec *find_device(const std::vector<DeviceSpec> &devices,
                                      const std::string &path)
 {
   auto it = std::find_if(devices.begin(), devices.end(),
-                         [&path](const DeviceSpec &device) {
-                           return device.path == path;
-                         });
+                         [&path](const DeviceSpec &device)
+                         { return device.path == path; });
   return it == devices.end() ? nullptr : &(*it);
 }
 
@@ -162,9 +160,8 @@ void FileSystemState::register_device(const std::string &path,
   }
 
   auto it = std::find_if(devices.begin(), devices.end(),
-                         [&normalized_path](const DeviceSpec &device) {
-                           return device.path == normalized_path;
-                         });
+                         [&normalized_path](const DeviceSpec &device)
+                         { return device.path == normalized_path; });
   if (it != devices.end())
   {
     it->type = normalized_type;
@@ -909,7 +906,7 @@ long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt)
   auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
   if (fs.is_pipe(fd))
   {
-    return fs.do_pipe_write(fd,buf.data(),total_len);
+    return fs.do_pipe_write(fd, buf.data(), total_len);
   }
 
   // Check if fd is a socket
@@ -922,13 +919,12 @@ long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt)
   return fs.do_write(fd, buf.data(), total_len);
 }
 
-long emu_select(int nfds, fd_set *readfds, fd_set *writefds,
-                fd_set *exceptfds, struct timeval *timeout)
+long emu_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
+                struct timeval *timeout)
 {
   (void)timeout;
-  return ptmc_state.fs_states[ptmc_state.cursor].do_select(nfds, readfds,
-                                                           writefds, exceptfds,
-                                                           timeout);
+  return ptmc_state.fs_states[ptmc_state.cursor].do_select(
+      nfds, readfds, writefds, exceptfds, timeout);
 }
 
 long emu_pselect6(int nfds, fd_set *readfds, fd_set *writefds,
@@ -945,9 +941,8 @@ long emu_pselect6(int nfds, fd_set *readfds, fd_set *writefds,
     tv.tv_usec = timeout->tv_nsec / 1000;
     tv_ptr = &tv;
   }
-  return ptmc_state.fs_states[ptmc_state.cursor].do_select(nfds, readfds,
-                                                           writefds, exceptfds,
-                                                           tv_ptr);
+  return ptmc_state.fs_states[ptmc_state.cursor].do_select(
+      nfds, readfds, writefds, exceptfds, tv_ptr);
 }
 
 long emu_vfs_close(int fd)

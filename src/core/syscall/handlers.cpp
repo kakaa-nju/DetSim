@@ -324,9 +324,9 @@ int handle_writev(pid_t pid, syscall_info &info)
 
 int handle_select(pid_t pid, syscall_info &info)
 {
-  long ret = emu_select(info.args[0], (fd_set *)info.args[1],
-                        (fd_set *)info.args[2], (fd_set *)info.args[3],
-                        (struct timeval *)info.args[4]);
+  long ret =
+      emu_select(info.args[0], (fd_set *)info.args[1], (fd_set *)info.args[2],
+                 (fd_set *)info.args[3], (struct timeval *)info.args[4]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
   return CKPT_YES;
@@ -337,9 +337,9 @@ int handle_pselect6(pid_t pid, syscall_info &info)
   const struct timespec *timeout = (const struct timespec *)info.args[4];
   (void)info.args[5];
 
-  long ret = emu_pselect6(info.args[0], (fd_set *)info.args[1],
-                          (fd_set *)info.args[2], (fd_set *)info.args[3],
-                          timeout, nullptr, 0);
+  long ret =
+      emu_pselect6(info.args[0], (fd_set *)info.args[1], (fd_set *)info.args[2],
+                   (fd_set *)info.args[3], timeout, nullptr, 0);
   tracee_set_rax(pid, ret);
   info.rval = ret;
   return CKPT_YES;
