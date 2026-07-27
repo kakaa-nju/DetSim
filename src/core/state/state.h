@@ -242,7 +242,8 @@ typedef struct tracee_state
   tracee_state()
       : si{}, brk(0), tv{0, 0}, fs_state(), sock_state()
 #ifdef DETSIM_RAFT_ENABLED
-        , raft_state()
+        ,
+        raft_state()
 #endif
         ,
         threads(), thread_create_records(), main_tid(0), current_thread_idx(0),

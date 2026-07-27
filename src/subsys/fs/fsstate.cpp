@@ -1,6 +1,7 @@
 #include "fsstate.h"
 #include "cereal/archives/binary.hpp"
 #include "cereal/cereal.hpp"
+#include "cereal/types/deque.hpp"
 #include "cereal/types/map.hpp"
 #include "cereal/types/string.hpp"
 #include "cereal/types/utility.hpp"
@@ -59,7 +60,14 @@ template <class Archive>
 void FileSystemState::serialize(Archive &ar)
 {
   /* Note: fd_manager_ is shared and not serialized per instance */
-  ar(filesystem, open_files, cwd, mappings, devices);
+  ar(filesystem, open_files, cwd, mappings, devices, pipes_, pipe_fds_,
+     next_pipe_id_);
+}
+
+template <class Archive>
+void FileSystemState::Pipe::serialize(Archive &ar)
+{
+  ar(buffer, read_closed, write_closed);
 }
 
 /* --- FileSystemState Method Implementations --- */
@@ -153,7 +161,8 @@ static void init_device_node(const DeviceSpec *device, VFSNode &node)
   if (is_output_device(device))
     node.metadata.st_mode = S_IFCHR | 0222; // write-only
   else
-    node.metadata.st_mode = S_IFCHR | (is_zero_read_device(device) ? 0444 : 0644);
+    node.metadata.st_mode =
+        S_IFCHR | (is_zero_read_device(device) ? 0444 : 0644);
   node.metadata.st_size = 0;
 }
 
@@ -1208,13 +1217,17 @@ template void FileSystemState::serialize<cereal::BinaryInputArchive>(
 template void FileSystemState::serialize<cereal::BinaryOutputArchive>(
     cereal::BinaryOutputArchive &);
 
+template void FileSystemState::Pipe::serialize<cereal::BinaryInputArchive>(
+    cereal::BinaryInputArchive &);
+template void FileSystemState::Pipe::serialize<cereal::BinaryOutputArchive>(
+    cereal::BinaryOutputArchive &);
+
 int FileSystemState::do_pipe(int pipefd[2], int flags)
 {
   (void)flags;
 
   // Allocate pipe ID
-  static int next_pipe_id = 1;
-  int pipe_id = next_pipe_id++;
+  int pipe_id = next_pipe_id_++;
 
   // Create the pipe
   pipes_[pipe_id] = Pipe();

@@ -962,9 +962,9 @@ void Socket::serialize(Archive &ar)
   in_port_t peer_port = peer_addr.sin_port;
   uint32_t peer_addr_val = peer_addr.sin_addr.s_addr;
 
-  ar(fd, domain, type, protocol, bound, local_family, local_port,
+  ar(fd, domain, type, protocol, flags, bound, local_family, local_port,
      local_addr_val, connected, listening, peer_family, peer_port,
-     peer_addr_val, backlog, pending_connections);
+     peer_addr_val, backlog, pending_connections, established_connections);
 
   local_addr.sin_family = local_family;
   local_addr.sin_port = local_port;

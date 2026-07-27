@@ -196,6 +196,7 @@ class FileSystemState
 
   std::map<int, Pipe> pipes_;
   std::map<int, int> pipe_fds_;
+  int next_pipe_id_ = 1;
 
   int do_pipe(int pipefd[2], int flags);
   bool is_pipe(int fd) const;

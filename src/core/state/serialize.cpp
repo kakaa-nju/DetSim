@@ -42,9 +42,11 @@ void tracee_state::serialize(Archive &ar)
       std::vector<thread_state> empty_threads;
       ar(si, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state
 #ifdef DETSIM_RAFT_ENABLED
-         , raft_state
+         ,
+         raft_state
 #endif
-         , fd_manager_state, empty_threads, thread_create_records, main_tid,
+         ,
+         fd_manager_state, empty_threads, thread_create_records, main_tid,
          current_thread_idx);
       return;
     }
@@ -52,7 +54,8 @@ void tracee_state::serialize(Archive &ar)
 
   ar(si, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state
 #ifdef DETSIM_RAFT_ENABLED
-     , raft_state
+     ,
+     raft_state
 #endif
      ,
      fd_manager_state, threads, thread_create_records, main_tid,
