@@ -530,65 +530,6 @@ ssize_t SockState::do_recv(int fd, void *buf, size_t len, int flags)
   return to_copy;
 }
 
-/* ==============================================================================
- * SockState Public API - Data Transfer (UDP)
- * ==============================================================================
- */
-
-ssize_t SockState::do_sendto(int fd, const void *buf, size_t len, int flags,
-                             const struct sockaddr *dest_addr,
-                             socklen_t addrlen)
-{
-  Socket *sock = get_socket_mutable(fd);
-  if (!sock)
-  {
-    return -EBADF;
-  }
-
-  if (sock->type != SOCK_DGRAM)
-  {
-    return -EOPNOTSUPP;
-  }
-
-  if (!dest_addr && !sock->connected)
-  {
-    return -EDESTADDRREQ;
-  }
-
-  char *data = (char *)malloc(len);
-  if (!data)
-  {
-    return -ENOMEM;
-  }
-  memcpy_guest2host(data, buf, len);
-
-  struct sockaddr_in dest;
-  if (dest_addr)
-  {
-    /* dest_addr is guest pointer, need to read from guest memory */
-    memcpy_guest2host(&dest, dest_addr, sizeof(struct sockaddr_in));
-  }
-  else
-  {
-    dest = sock->peer_addr;
-  }
-
-  struct sockaddr_in from;
-  memset(&from, 0, sizeof(from));
-  from.sin_family = AF_INET;
-  from.sin_port = sock->bound ? sock->local_addr.sin_port : 0;
-
-  UdpDatagram dg;
-  dg.content = std::string(data, len);
-  dg.from = from;
-  free(data);
-
-  LOG_TRACE("sendto(fd=%d, len=%zu) to %s", fd, len,
-            format_sockaddr(dest).c_str());
-
-  return len;
-}
-
 ssize_t SockState::do_recvfrom(int fd, void *buf, size_t len, int flags,
                                struct sockaddr *src_addr, socklen_t *addrlen)
 {

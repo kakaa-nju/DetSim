@@ -166,10 +166,6 @@ class SockState
   /* accept(fd, addr, addrlen) -> new_fd or -errno (TCP only) */
   int do_accept(int fd, struct sockaddr *addr, socklen_t *addrlen);
 
-  /* sendto(fd, buf, len, flags, dest_addr, addrlen) -> bytes_sent or -errno */
-  ssize_t do_sendto(int fd, const void *buf, size_t len, int flags,
-                    const struct sockaddr *dest_addr, socklen_t addrlen);
-
   /* recvfrom(fd, buf, len, flags, src_addr, addrlen) -> bytes_recv or -errno */
   ssize_t do_recvfrom(int fd, void *buf, size_t len, int flags,
                       struct sockaddr *src_addr, socklen_t *addrlen);
