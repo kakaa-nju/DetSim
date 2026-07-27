@@ -8,6 +8,7 @@
 #include "debug.h"
 #include "monitor.h"
 #include "sockstate.h"
+#include "ui/log_wrapper.h"
 #include <algorithm>
 #include <cctype>
 #include <cstring>
@@ -127,6 +128,21 @@ static bool is_zero_read_device(const DeviceSpec *device)
   return device != nullptr && normalize_device_type(device->type) == "urandom";
 }
 
+static bool is_stdout_device(const DeviceSpec *device)
+{
+  return device != nullptr && normalize_device_type(device->type) == "stdout";
+}
+
+static bool is_stderr_device(const DeviceSpec *device)
+{
+  return device != nullptr && normalize_device_type(device->type) == "stderr";
+}
+
+static bool is_output_device(const DeviceSpec *device)
+{
+  return is_stdout_device(device) || is_stderr_device(device);
+}
+
 static void init_device_node(const DeviceSpec *device, VFSNode &node)
 {
   node.content.clear();
@@ -134,7 +150,10 @@ static void init_device_node(const DeviceSpec *device, VFSNode &node)
   memset(&node.metadata, 0, sizeof(struct stat));
   node.metadata.st_nlink = 1;
 #endif
-  node.metadata.st_mode = S_IFCHR | (is_zero_read_device(device) ? 0444 : 0644);
+  if (is_output_device(device))
+    node.metadata.st_mode = S_IFCHR | 0222; // write-only
+  else
+    node.metadata.st_mode = S_IFCHR | (is_zero_read_device(device) ? 0444 : 0644);
   node.metadata.st_size = 0;
 }
 
@@ -153,7 +172,8 @@ void FileSystemState::register_device(const std::string &path,
   std::string normalized_path = normalize_device_path(path);
   std::string normalized_type = normalize_device_type(type);
 
-  if (normalized_type != "urandom")
+  if (normalized_type != "urandom" && normalized_type != "stdout" &&
+      normalized_type != "stderr")
   {
     LOG_ERROR("Unsupported device type: %s", type.c_str());
     return;
@@ -451,6 +471,11 @@ ssize_t FileSystemState::do_read(int fd, void *buf, size_t count)
     return static_cast<ssize_t>(count);
   }
 
+  if (is_output_device(device))
+  {
+    return -EBADF;
+  }
+
   ssize_t readable_bytes = node.content.size() - ofd.offset;
   if (readable_bytes <= 0)
   {
@@ -478,6 +503,11 @@ ssize_t FileSystemState::do_write(int fd, const void *buf, size_t count)
 
   if (device != nullptr)
   {
+    if (is_output_device(device))
+    {
+      detsim::ui::ui_printf("%.*s", (int)count, buf);
+      return count;
+    }
     return -EBADF;
   }
 
@@ -676,6 +706,12 @@ int FileSystemState::do_close(int fd)
 
 off_t FileSystemState::do_lseek(int fd, off_t offset, int whence)
 {
+  // Pre-opened stdout/stderr are not seekable
+  if (fd == 1 || fd == 2)
+  {
+    return -ESPIPE;
+  }
+
   auto it = open_files.find(fd);
   if (it == open_files.end())
   {
@@ -753,6 +789,16 @@ int FileSystemState::do_stat(const std::string &path, struct stat *statbuf)
 
 int FileSystemState::do_fstat(int fd, struct stat *statbuf)
 {
+  // Pre-opened stdout/stderr
+  if (fd == 1 || fd == 2)
+  {
+    memset(statbuf, 0, sizeof(struct stat));
+    statbuf->st_mode = S_IFCHR | 0622;
+    statbuf->st_nlink = 1;
+    statbuf->st_size = 0;
+    return 0;
+  }
+
   auto it = open_files.find(fd);
   if (it == open_files.end())
   {
@@ -868,6 +914,15 @@ long emu_vfs_write(int fd, const void *buf, size_t count)
     return ret;
   }
 
+  // Pre-opened stdout/stderr (fd 1/2 are inherited, not in open_files)
+  if (fd == 1 || fd == 2)
+  {
+    std::vector<char> host_buf(count);
+    memcpy_guest2host(host_buf.data(), buf, count);
+    detsim::ui::ui_printf("%.*s", (int)count, host_buf.data());
+    return count;
+  }
+
   std::vector<char> host_buf(count);
   memcpy_guest2host(host_buf.data(), buf, count);
 
@@ -900,6 +955,13 @@ long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt)
     memcpy_guest2host(buf.data() + offset, host_iov[i].iov_base,
                       host_iov[i].iov_len);
     offset += host_iov[i].iov_len;
+  }
+
+  // Pre-opened stdout/stderr
+  if (fd == 1 || fd == 2)
+  {
+    detsim::ui::ui_printf("%.*s", (int)total_len, buf.data());
+    return total_len;
   }
 
   // Check if fd is a pipe
@@ -948,6 +1010,12 @@ long emu_pselect6(int nfds, fd_set *readfds, fd_set *writefds,
 long emu_vfs_close(int fd)
 {
   auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
+
+  // Pre-opened stdout/stderr
+  if (fd == 1 || fd == 2)
+  {
+    return 0;
+  }
 
   // Check if it's a socket
   SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
