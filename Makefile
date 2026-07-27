@@ -105,7 +105,11 @@ clear:
 	-mkdir memory sstate
 
 format:
-	@find src -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \) -print0 | xargs -0 clang-format -i
+	@find src -type f \( -name "*.c" -o -name "*.cpp" -o -name "*.h" -o -name "*.hpp" \) \
+		-not -path "src/utils/expr_lexer.cpp" \
+		-not -path "src/utils/expr_parser.cpp" \
+		-not -path "src/utils/expr_parser.hpp" \
+		-print0 | xargs -0 clang-format -i
 
 clean:
 	-/bin/rm -rf $(BUILD_DIR) tracer *.so
