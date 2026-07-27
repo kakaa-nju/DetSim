@@ -40,14 +40,21 @@ void tracee_state::serialize(Archive &ar)
     {
       // When saving, use empty threads vector
       std::vector<thread_state> empty_threads;
-      ar(si, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state, raft_state,
-         fd_manager_state, empty_threads, thread_create_records, main_tid,
+      ar(si, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state
+#ifdef DETSIM_RAFT_ENABLED
+         , raft_state
+#endif
+         , fd_manager_state, empty_threads, thread_create_records, main_tid,
          current_thread_idx);
       return;
     }
   }
 
-  ar(si, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state, raft_state,
+  ar(si, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state
+#ifdef DETSIM_RAFT_ENABLED
+     , raft_state
+#endif
+     ,
      fd_manager_state, threads, thread_create_records, main_tid,
      current_thread_idx);
 }
