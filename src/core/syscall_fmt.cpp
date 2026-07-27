@@ -16,10 +16,8 @@
 #include <sys/syscall.h>
 #include <sys/time.h>
 
-#ifdef DETSIM_RAFT_ENABLED
 /* Raft message parser */
 #include "raft_msg_parser.h"
-#endif
 #define DISPLAY_MAX_LEN 128
 
 /* External syscall name table */
@@ -231,7 +229,6 @@ void format_sendto(char *buf, int pid, hash_type ts_hash,
   char *mem = (char *)read_mem(pid, ts_hash, info.args[1], display_len);
   if (mem)
   {
-#ifdef DETSIM_RAFT_ENABLED
     /* Check if this looks like a Raft message (starts with valid type 0-7) */
     bool is_raft = false;
     if (display_len >= 4)
@@ -253,7 +250,6 @@ void format_sendto(char *buf, int pid, hash_type ts_hash,
     }
 
     if (!is_raft)
-#endif
     {
       /* Regular binary content */
       pos += sprintf(buf + pos, "%p\"", (void *)info.args[1]);
@@ -319,7 +315,6 @@ void format_recvfrom(char *buf, int pid, hash_type ts_hash,
     char *mem = (char *)read_mem(pid, ts_hash, info.args[1], display_len);
     if (mem)
     {
-#ifdef DETSIM_RAFT_ENABLED
       /* Check if this looks like a Raft message */
       bool is_raft = false;
       if (display_len >= 4)
@@ -340,7 +335,6 @@ void format_recvfrom(char *buf, int pid, hash_type ts_hash,
       }
 
       if (!is_raft)
-#endif
       {
         /* Regular binary content */
         pos += sprintf(buf + pos, "%p\"", (void *)info.args[1]);

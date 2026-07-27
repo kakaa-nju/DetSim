@@ -855,9 +855,7 @@ void tracee_state::recover_running_state(int index, hash_type ts_hash) const
   /* Restore subsystems */
   ptmc_state.sock_states[index] = sock_state;
   ptmc_state.fs_states[index] = fs_state;
-#ifdef DETSIM_RAFT_ENABLED
   ptmc_state.raft_states[index] = raft_state;
-#endif
 
   /* Restore FdManager state */
   *ptmc_state.fd_managers[index] = fd_manager_state;
@@ -1257,9 +1255,7 @@ tracee_state::tracee_state(int which, const struct syscall_info info[])
   /* Save subsystems */
   sock_state = ptmc_state.sock_states[which];
   fs_state = ptmc_state.fs_states[which];
-#ifdef DETSIM_RAFT_ENABLED
   raft_state = ptmc_state.raft_states[which];
-#endif
 
   /* Save FdManager state */
   if (ptmc_state.fd_managers[which])
@@ -1586,9 +1582,7 @@ void cleanup_all()
     ptmc_state.sock_states[i] = SockState();
     ptmc_state.fs_states[i] = FileSystemState();
     ptmc_state.fd_managers[i].reset();
-#ifdef DETSIM_RAFT_ENABLED
     ptmc_state.raft_states[i] = raft_check_state();
-#endif
   }
 
   /* 4. Clear global containers */

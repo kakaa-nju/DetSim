@@ -16,9 +16,7 @@
 #include "fsstate.h"
 #include "guest.h"
 #include "proc_status.h"
-#ifdef DETSIM_RAFT_ENABLED
 #include "raft_msg_parser.h"
-#endif
 #include "scheduler.h"
 #include "sockstate.h"
 #include "state/state.h"

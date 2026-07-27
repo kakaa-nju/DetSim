@@ -125,7 +125,6 @@ struct thread_create_info
  * Tracee State (Single Process State)
  * ====================================================================== */
 
-#ifdef DETSIM_RAFT_ENABLED
 /**
  * @brief Raft consensus checking state
  *
@@ -162,7 +161,6 @@ struct raft_check_state
        next_idx[0], next_idx[1], next_idx[2]);
   }
 };
-#endif
 
 /**
  * @brief Per-process state for a single tracee (traced process)
@@ -187,10 +185,8 @@ typedef struct tracee_state
   FileSystemState fs_state;
   SockState sock_state;
 
-#ifdef DETSIM_RAFT_ENABLED
   /* Raft consensus checking state - stored per state for BFS correctness */
   raft_check_state raft_state;
-#endif
 
   /* FdManager state - saved to preserve fd allocation state */
   FdManager fd_manager_state;
@@ -240,12 +236,7 @@ typedef struct tracee_state
 
   // Default constructor - value-initialize all members
   tracee_state()
-      : si{}, brk(0), tv{0, 0}, fs_state(), sock_state()
-#ifdef DETSIM_RAFT_ENABLED
-        ,
-        raft_state()
-#endif
-        ,
+      : si{}, brk(0), tv{0, 0}, fs_state(), sock_state(), raft_state(),
         threads(), thread_create_records(), main_tid(0), current_thread_idx(0),
         futex_state(nullptr)
   {

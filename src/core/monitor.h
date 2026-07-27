@@ -77,10 +77,8 @@ struct PTMC_STATE
   std::unordered_set<std::string> assertions;
   std::vector<int (*)()> user_checks;
 
-#ifdef DETSIM_RAFT_ENABLED
   /* Raft consensus checking state - stored per-process */
   raft_check_state raft_states[NP];
-#endif
 
   int error_bound = 5;
 

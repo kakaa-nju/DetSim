@@ -611,7 +611,6 @@ bool state_to_be_discarded(int index, syscall_info *infos)
   if (ptmc_state.error_bound <= 0)
     return true;
 
-#ifdef DETSIM_RAFT_ENABLED
   if (index == 0)
   {
     uintptr_t raft = eval<uintptr_t>("raft", 0);
@@ -623,7 +622,6 @@ bool state_to_be_discarded(int index, syscall_info *infos)
       return true;
     }
   }
-#endif
 
   return false;
 }

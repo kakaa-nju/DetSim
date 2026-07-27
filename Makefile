@@ -7,22 +7,11 @@ LD = ccache g++ -L/usr/local/lib
 # Build directory
 BUILD_DIR = build
 
-# Raft support (set RAFT=0 to disable all raft-specific code)
-RAFT ?= 1
-
 # Include paths (updated for new directory structure)
-INCLUDES = -I. -Isrc -Isrc/core -Isrc/core/engine -Isrc/core/syscall -Isrc/core/scheduler -Isrc/core/state -Isrc/subsys -Isrc/subsys/fs -Isrc/subsys/net -Isrc/subsys/sync -Isrc/subsys/time -Isrc/utils -Isrc/ui -Isrc/ui/cli -Ithird_party -Isrc/subsys
-ifeq ($(RAFT),1)
-  INCLUDES += -Iexamples/redisraft/plugins
-  CXXFLAGS_RAFT = -DDETSIM_RAFT_ENABLED
-  RAFT_SRCS = examples/redisraft/plugins/raft_msg_parser.cpp
-else
-  CXXFLAGS_RAFT =
-  RAFT_SRCS =
-endif
+INCLUDES = -I. -Isrc -Isrc/core -Isrc/core/engine -Isrc/core/syscall -Isrc/core/scheduler -Isrc/core/state -Isrc/subsys -Isrc/subsys/fs -Isrc/subsys/net -Isrc/subsys/sync -Isrc/subsys/time -Isrc/utils -Isrc/ui -Isrc/ui/cli -Ithird_party -Iexamples/redisraft/plugins -Isrc/subsys
 
 CXXFLAGS ?= $(INCLUDES) -MMD -MP -std=gnu++2a -fno-stack-protector -O3 -g -msse4.2 -D_FORTIFY_SOURCE=0 -fno-omit-frame-pointer \
-						-mavx2 -mbmi -mbmi2 $(CXXFLAGS_RAFT)
+						-mavx2 -mbmi -mbmi2
 LDFLAGS = -g -ldwarf -lreadline -ldw -lzstd -lxxhash -rdynamic \
 				-lunwind-ptrace -lunwind-x86_64 -lunwind -lelf -lfmt \
 				-lncurses -lpthread -fno-omit-frame-pointer
@@ -41,7 +30,7 @@ SRCS = src/main.cpp\
        src/utils/utils.cpp src/utils/expr.cpp src/utils/expr_ast.cpp \
        src/utils/expr_lexer.cpp src/utils/expr_parser.cpp \
        src/utils/file_lock.cpp \
-       $(RAFT_SRCS) \
+       examples/redisraft/plugins/raft_msg_parser.cpp \
        src/ui/ncurses_ui.cpp src/ui/log_wrapper.cpp src/ui/cli/commands.cpp
 
 # Object files in build directory
