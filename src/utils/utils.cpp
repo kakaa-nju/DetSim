@@ -208,7 +208,6 @@ void ensure_directory_for_file(const std::string &path)
 int is_go_program(const char *filename)
 {
   // Force output to stderr for debugging
-  fprintf(stderr, "*** is_go_program called with: %s", filename);
   LOG_INFO("is_go_program: checking %s", filename);
   elf_version(EV_CURRENT);
   int fd = open(filename, O_RDONLY);
