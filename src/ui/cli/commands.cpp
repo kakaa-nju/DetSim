@@ -668,7 +668,6 @@ int cmd_batch(char *args)
       p++;
     if (*p == '\0' || *p == '#')
       continue;
-    detsim::ui::ui_printf("execute command line: %s\n",p);
     int ret = execute_command_line(p);
     cmd_count++;
 
