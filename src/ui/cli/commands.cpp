@@ -135,12 +135,11 @@ int execute_command_line(char *cmd_line)
     return 0;
   }
 
-  char *args = cmd + strlen(cmd);
+  char *args = cmd_line + strlen(cmd) + 1;
   while (*args && isspace(*args))
     args++;
   if (*args == '\0')
     args = nullptr;
-
   return entry->handler(args);
 }
 
@@ -669,7 +668,7 @@ int cmd_batch(char *args)
       p++;
     if (*p == '\0' || *p == '#')
       continue;
-
+    detsim::ui::ui_printf("execute command line: %s\n",p);
     int ret = execute_command_line(p);
     cmd_count++;
 
