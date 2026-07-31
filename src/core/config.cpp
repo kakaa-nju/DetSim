@@ -11,6 +11,7 @@
 #include "monitor.h"
 #include "net/emu.h"
 #include "state/state_store.h"
+#include "syscall/ckpt_policy.h"
 #include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
@@ -300,6 +301,49 @@ static void parse_choose_points(const json &cfg)
   }
 }
 
+/* Parse checkpoint policy configuration.
+ *
+ * Format (list of syscall names or numbers to set CKPT_YES):
+ *   "Checkpoint": ["read", "write", "sendto", "recvfrom"]
+ */
+static void parse_ckpt(const json &cfg)
+{
+  auto ckpt_list = cfg.value("Checkpoint", json::array());
+  LOG_DEBUG("Loading %zu checkpoint syscalls", ckpt_list.size());
+
+  for (const auto &entry : ckpt_list)
+  {
+    int nr = -1;
+
+    if (entry.is_number())
+    {
+      nr = entry.get<int>();
+    }
+    else if (entry.is_string())
+    {
+      std::string syscall_name = entry.get<std::string>();
+      nr = g_ckpt_policy.resolve_syscall(syscall_name.c_str());
+      if (nr < 0)
+      {
+        LOG_ERROR("Unknown syscall name in Checkpoint: %s",
+                  syscall_name.c_str());
+        continue;
+      }
+    }
+    else
+    {
+      LOG_ERROR("Invalid Checkpoint entry (must be syscall number or name)");
+      continue;
+    }
+
+    if (nr >= 0 && nr < CKPT_MAX_SYSCALLS)
+    {
+      g_ckpt_policy.config_set_yes(nr);
+      LOG_DEBUG("  Checkpoint: syscall %d set to CKPT_YES", nr);
+    }
+  }
+}
+
 /* Parse and load choose function plugin */
 static void parse_choose_function(const json &cfg, const fs::path &cfg_dir)
 {
@@ -404,6 +448,7 @@ void read_config(const char *cfg_file)
   parse_user_check(cfg, cfg_dir);
   parse_choose_points(cfg);
   parse_choose_function(cfg, cfg_dir);
+  parse_ckpt(cfg);
   parse_statestore_config(cfg);
 }
 

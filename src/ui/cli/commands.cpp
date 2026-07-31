@@ -13,6 +13,7 @@
 #include "state/state.h"
 #include "state/state_store.h"
 #include "state/sysstate_store.h"
+#include "syscall/ckpt_policy.h"
 #include "utils.h"
 #include <arpa/inet.h>
 #include <cstdio>
@@ -64,6 +65,7 @@ static CommandEntry cmd_table[] = {
     {"stat", "Show stat of files matching pattern", cmd_stat},
     {"hexdump", "Hexdump of a file (c: continue, q: quit)", cmd_hexdump},
     {"diff", "Compare two system states by hash prefix", cmd_diff},
+    {"ckpt","Set CKPT policy: ckpt <syscall> yes|no; ckpt all yes; ckpt restore",cmd_ckpt},
 };
 
 const CommandEntry *get_command_table() { return cmd_table; }
@@ -593,6 +595,72 @@ int cmd_diff(char *args)
 {
   (void)args;
   detsim::ui::ui_printf("diff: not yet implemented in CLI module\n");
+  return 0;
+}
+
+/* ======================================================================
+ * Checkpoint Policy Commands
+ *
+ *   ckpt                    - show current CKPT policy
+ *   ckpt <syscall> yes|no   - set a syscall to CKPT_YES/CKPT_NO
+ *   ckpt all yes            - set all syscalls to CKPT_YES
+ *   ckpt restore            - restore values from config
+ * ====================================================================== */
+
+int cmd_ckpt(char *args)
+{
+  if (args == NULL || *args == '\0')
+  {
+    detsim::ui::ui_printf("Current CKPT policy:\n");
+    g_ckpt_policy.dump();
+    return 0;
+  }
+
+  char *first = strtok(args, " ");
+  if (!first)
+  {
+    detsim::ui::ui_printf("Usage: ckpt [<syscall> yes|no | all yes | restore]\n");
+    return 1;
+  }
+
+  if (strcmp(first, "restore") == 0)
+  {
+    g_ckpt_policy.cli_restore();
+    detsim::ui::ui_printf("CKPT policy restored from config\n");
+    return 0;
+  }
+
+  if (strcmp(first, "all") == 0)
+  {
+    char *second = strtok(nullptr, " ");
+    if (second && strcmp(second, "yes") == 0)
+    {
+      g_ckpt_policy.cli_all_yes();
+      detsim::ui::ui_printf("All syscalls set to CKPT_YES\n");
+      return 0;
+    }
+    detsim::ui::ui_printf("Usage: ckpt all yes\n");
+    return 1;
+  }
+
+  int nr = g_ckpt_policy.resolve_syscall(first);
+  if (nr < 0)
+  {
+    detsim::ui::ui_printf("Unknown syscall: %s\n", first);
+    return 1;
+  }
+
+  char *second = strtok(nullptr, " ");
+  if (!second || (strcmp(second, "yes") != 0 && strcmp(second, "no") != 0))
+  {
+    detsim::ui::ui_printf("Usage: ckpt %s yes|no\n", first);
+    return 1;
+  }
+
+  bool yes = (strcmp(second, "yes") == 0);
+  g_ckpt_policy.cli_set(nr, yes);
+  detsim::ui::ui_printf("ckpt %s set to %s\n", first,
+                        yes ? "CKPT_YES" : "CKPT_NO");
   return 0;
 }
 

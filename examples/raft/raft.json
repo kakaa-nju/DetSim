@@ -1,5 +1,5 @@
 {
-  "Loglevel": 2,
+  "Loglevel": 0,
   "Nodes": 3,
   "Tracee": [
     ["./raft/raft", "0"],
@@ -11,6 +11,9 @@
   "SharedFiles": [],
   "ChoosePoint": [
     { "syscall": 96, "choose": 2 }
+  ],
+  "Checkpoint": [
+    "recvfrom", "gettimeofday"
   ],
   "ChooseFunc": "./plugins/choose.so",
   "UserCheck": "./plugins/check.so",

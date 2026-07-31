@@ -92,6 +92,7 @@ static struct
     {"stat", "Show stat of files matching pattern", cmd_stat},
     {"hexdump", "Hexdump of a file (c: continue, q: quit)", cmd_hexdump},
     {"diff", "Compare two system states by hash prefix", cmd_diff},
+    {"ckpt", "Set CKPT policy: ckpt <syscall> yes|no; ckpt all yes; ckpt restore", cmd_ckpt},
 };
 
 #define NR_CMD (sizeof(cmd_table) / sizeof(cmd_table[0]))

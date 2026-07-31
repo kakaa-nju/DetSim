@@ -3,6 +3,7 @@
  */
 
 #include "handlers.h"
+#include "ckpt_policy.h"
 #include "fs/fsstate.h"
 #include "guest.h"
 #include "log_wrapper.h"
@@ -76,7 +77,7 @@ int handle_sendto(pid_t pid, syscall_info &info)
                  (struct sockaddr *)info.args[4], (socklen_t)info.args[5]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_recvfrom(pid_t pid, syscall_info &info)
@@ -90,7 +91,7 @@ int handle_recvfrom(pid_t pid, syscall_info &info)
   {
     return CKPT_NO;
   }
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_socket(pid_t pid, syscall_info &info)
@@ -98,7 +99,7 @@ int handle_socket(pid_t pid, syscall_info &info)
   long ret = emu_socket(info.args[0], info.args[1], info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_connect(pid_t pid, syscall_info &info)
@@ -107,7 +108,7 @@ int handle_connect(pid_t pid, syscall_info &info)
                          info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_bind(pid_t pid, syscall_info &info)
@@ -116,7 +117,7 @@ int handle_bind(pid_t pid, syscall_info &info)
                       info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_listen(pid_t pid, syscall_info &info)
@@ -124,7 +125,7 @@ int handle_listen(pid_t pid, syscall_info &info)
   long ret = emu_listen(info.args[0], info.args[1]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_accept(pid_t pid, syscall_info &info)
@@ -133,7 +134,7 @@ int handle_accept(pid_t pid, syscall_info &info)
                         (socklen_t *)info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_setsockopt(pid_t pid, syscall_info &info)
@@ -142,7 +143,7 @@ int handle_setsockopt(pid_t pid, syscall_info &info)
                             (void *)info.args[3], info.args[4]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_getsockopt(pid_t pid, syscall_info &info)
@@ -151,7 +152,7 @@ int handle_getsockopt(pid_t pid, syscall_info &info)
                             (void *)info.args[3], (socklen_t *)info.args[4]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_poll(pid_t pid, syscall_info &info)
@@ -160,7 +161,7 @@ int handle_poll(pid_t pid, syscall_info &info)
       emu_poll((struct pollfd *)info.args[0], info.args[1], info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_epoll_create(pid_t pid, syscall_info &info)
@@ -168,7 +169,7 @@ int handle_epoll_create(pid_t pid, syscall_info &info)
   long ret = emu_epoll_create(info.args[0]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_epoll_create1(pid_t pid, syscall_info &info)
@@ -176,7 +177,7 @@ int handle_epoll_create1(pid_t pid, syscall_info &info)
   long ret = emu_epoll_create1(info.args[0]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_epoll_ctl(pid_t pid, syscall_info &info)
@@ -185,7 +186,7 @@ int handle_epoll_ctl(pid_t pid, syscall_info &info)
                            (struct epoll_event *)info.args[3]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_epoll_wait(pid_t pid, syscall_info &info)
@@ -194,7 +195,7 @@ int handle_epoll_wait(pid_t pid, syscall_info &info)
                             info.args[2], info.args[3]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_epoll_pwait(pid_t pid, syscall_info &info)
@@ -204,7 +205,7 @@ int handle_epoll_pwait(pid_t pid, syscall_info &info)
                              (const sigset_t *)info.args[4], info.args[5]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_epoll_pwait2(pid_t pid, syscall_info &info)
@@ -215,7 +216,7 @@ int handle_epoll_pwait2(pid_t pid, syscall_info &info)
                        (const sigset_t *)info.args[4], info.args[5]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 } // namespace network
@@ -284,7 +285,7 @@ int handle_open(pid_t pid, syscall_info &info)
                             info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_openat(pid_t pid, syscall_info &info)
@@ -293,7 +294,7 @@ int handle_openat(pid_t pid, syscall_info &info)
                             info.args[2], info.args[3]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_read(pid_t pid, syscall_info &info)
@@ -301,7 +302,7 @@ int handle_read(pid_t pid, syscall_info &info)
   long ret = emu_vfs_read(info.args[0], (void *)info.args[1], info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_write(pid_t pid, syscall_info &info)
@@ -310,7 +311,7 @@ int handle_write(pid_t pid, syscall_info &info)
       emu_vfs_write(info.args[0], (const void *)info.args[1], info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_writev(pid_t pid, syscall_info &info)
@@ -319,7 +320,7 @@ int handle_writev(pid_t pid, syscall_info &info)
                             info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_select(pid_t pid, syscall_info &info)
@@ -329,7 +330,7 @@ int handle_select(pid_t pid, syscall_info &info)
                  (fd_set *)info.args[3], (struct timeval *)info.args[4]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_pselect6(pid_t pid, syscall_info &info)
@@ -342,7 +343,7 @@ int handle_pselect6(pid_t pid, syscall_info &info)
                    (fd_set *)info.args[3], timeout, nullptr, 0);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_close(pid_t pid, syscall_info &info)
@@ -350,7 +351,7 @@ int handle_close(pid_t pid, syscall_info &info)
   long ret = emu_vfs_close(info.args[0]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_lseek(pid_t pid, syscall_info &info)
@@ -358,7 +359,7 @@ int handle_lseek(pid_t pid, syscall_info &info)
   long ret = emu_vfs_lseek(info.args[0], info.args[1], info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_NO;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_stat(pid_t pid, syscall_info &info)
@@ -367,7 +368,7 @@ int handle_stat(pid_t pid, syscall_info &info)
       emu_vfs_stat((const char *)info.args[0], (struct stat *)info.args[1]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_NO;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_fstat(pid_t pid, syscall_info &info)
@@ -375,7 +376,7 @@ int handle_fstat(pid_t pid, syscall_info &info)
   long ret = emu_vfs_fstat(info.args[0], (struct stat *)info.args[1]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_NO;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_chdir(pid_t pid, syscall_info &info)
@@ -383,7 +384,7 @@ int handle_chdir(pid_t pid, syscall_info &info)
   long ret = emu_chdir((const char *)info.args[0]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_NO;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_pipe(pid_t pid, syscall_info &info)
@@ -396,19 +397,19 @@ int handle_pipe(pid_t pid, syscall_info &info)
   }
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_mmap(pid_t pid, syscall_info &info)
 {
   // VFS mmap is handled in dispatcher
-  return CKPT_NO;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_munmap(pid_t pid, syscall_info &info)
 {
   emu_munmap((void *)info.args[0], info.args[1]);
-  return CKPT_NO;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_madvise(pid_t pid, syscall_info &info)
@@ -457,7 +458,7 @@ int handle_madvise(pid_t pid, syscall_info &info)
   long ret = syscall(SYS_madvise, addr, length, advice);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_NO;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_fsync(pid_t pid, syscall_info &info)
@@ -465,7 +466,7 @@ int handle_fsync(pid_t pid, syscall_info &info)
   long ret = emu_fsync(info.args[0]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_fdatasync(pid_t pid, syscall_info &info)
@@ -473,7 +474,7 @@ int handle_fdatasync(pid_t pid, syscall_info &info)
   long ret = emu_fdatasync(info.args[0]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_fcntl(pid_t pid, syscall_info &info)
@@ -481,7 +482,7 @@ int handle_fcntl(pid_t pid, syscall_info &info)
   long ret = emu_fcntl(info.args[0], info.args[1], info.args[2]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 } // namespace fs
@@ -551,7 +552,7 @@ int handle_clone(pid_t pid, syscall_info &info)
                new_tid, waited);
     }
   }
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_clone3(pid_t pid, syscall_info &info)
@@ -592,7 +593,7 @@ int handle_clone3(pid_t pid, syscall_info &info)
                new_tid, waited);
     }
   }
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_gettid(pid_t pid, syscall_info &info)
@@ -605,7 +606,7 @@ int handle_gettid(pid_t pid, syscall_info &info)
   info.rval = virtual_tid;
   LOG_DEBUG("gettid: returning virtual tid %d for thread %d in process %d",
             virtual_tid, thread_idx, tracee_idx);
-  return CKPT_NO;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_exit(pid_t pid, syscall_info &info)
@@ -748,7 +749,7 @@ int handle_gettimeofday(pid_t pid, syscall_info &info)
                               (struct timezone *)info.args[1]);
   tracee_set_rax(pid, ret);
   info.rval = ret;
-  return CKPT_YES;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_nanosleep(pid_t pid, syscall_info &info)
@@ -756,7 +757,7 @@ int handle_nanosleep(pid_t pid, syscall_info &info)
   // Return immediately for deterministic execution
   tracee_set_rax(pid, 0);
   info.rval = 0;
-  return CKPT_NO;
+  return ckpt_for_syscall(info.nr);
 }
 
 int handle_clock_nanosleep(pid_t pid, syscall_info &info)
@@ -764,7 +765,7 @@ int handle_clock_nanosleep(pid_t pid, syscall_info &info)
   // Return immediately for deterministic execution
   tracee_set_rax(pid, 0);
   info.rval = 0;
-  return CKPT_NO;
+  return ckpt_for_syscall(info.nr);
 }
 
 } // namespace time

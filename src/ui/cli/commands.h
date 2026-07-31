@@ -56,6 +56,7 @@ int cmd_ls(char *args);
 int cmd_stat(char *args);
 int cmd_hexdump(char *args);
 int cmd_diff(char *args);
+int cmd_ckpt(char *args);
 
 /* ======================================================================
  * Command Utilities
