@@ -102,6 +102,7 @@ examples/**/*.pyc
 /examples/devices/devices
 /examples/expr_test/expr_test
 /examples/fs/fs
+/examples/hello/hello
 /examples/interrupt/interrupt
 /examples/loop/loop
 /examples/loop/loop3
