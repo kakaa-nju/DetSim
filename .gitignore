@@ -82,19 +82,3 @@ core.*
 # examples
 !examples/
 !examples/**
-
-# Ignore build artifacts in examples
-examples/**/*.o
-examples/**/*.so
-examples/**/*.a
-examples/**/compile_commands.json
-examples/**/__pycache__/
-examples/**/*.pyc
-
-# Ignore compiled binaries (match specific files)
-/examples/raft/raft/raft
-/examples/raft/raft/raft_dynamic
-/examples/bakery/bakery
-/examples/bakery/bakery_mp
-/examples/raft/plugins/check.so
-/examples/raft/plugins/choose.so

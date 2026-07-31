@@ -1,0 +1,17 @@
+# Ignore build artifacts in examples
+**/*.o
+**/*.so
+**/*.a
+**/compile_commands.json
+**/memory/
+**/sstate/
+**/__pycache__/
+**/*.pyc
+
+# Ignore compiled binaries (match specific files)
+raft/raft/raft
+raft/raft/raft_dynamic
+bakery/bakery
+bakery/bakery_mp
+**/plugins/check.so
+**/plugins/choose.so
