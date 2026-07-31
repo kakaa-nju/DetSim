@@ -218,7 +218,7 @@ ExecResult ExecutionEngine::execute_step(const sys_state &state,
     switch (result)
     {
       case CKPT_NO:
-        return ExecResult(ExecStatus::SUCCESS, CKPT_YES, "Syscall completed");
+        return ExecResult(ExecStatus::SUCCESS, CKPT_NO, "Syscall completed");
       case CKPT_DISCARD:
         return ExecResult(ExecStatus::DISCARD, CKPT_DISCARD, "Thread blocked");
       case CKPT_EXIT:

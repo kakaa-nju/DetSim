@@ -143,10 +143,14 @@ int load_exec_store()
     return -1;
   }
 
-  if (check_state() != 0)
+  if (check_state() != 0){
     detsim::ui::ui_printf("Reach illegal state.\n");
-
-  return 0;
+    return 0;
+  }
+  if (result.code == CKPT_YES){
+    return 0;
+  }
+  return 1;
 }
 extern SSS state_set;
 extern TSS state_tree;

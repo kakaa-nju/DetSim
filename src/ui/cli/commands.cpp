@@ -211,6 +211,9 @@ int cmd_si(char *args)
   }
 
   int ret = load_exec_store();
+  while (ret == 1){
+    ret = load_exec_store();
+  }
   if (ret == 0)
   {
     show_syscall(ptmc_state.pids[cursor],
