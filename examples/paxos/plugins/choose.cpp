@@ -18,7 +18,7 @@ extern "C"
   // choice 1: advance time by a small amount
   choose_out *choose_gettimeofday(int pid, int choice, const choose_in &in)
   {
-    struct timeval tv = in.now;
+    struct timeval tv = in.gettimeofday_now;
     struct timeval *tv_out = (struct timeval *)malloc(sizeof(*tv_out));
 
     if (choice == 0)
