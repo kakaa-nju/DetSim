@@ -42,6 +42,7 @@
 
 # Tests
 !tests/
+!tests/**
 
 # Scripts
 !scripts/
@@ -95,24 +96,5 @@ examples/**/*.pyc
 /examples/raft/raft/raft_dynamic
 /examples/bakery/bakery
 /examples/bakery/bakery_mp
-/examples/brk/brk
-/examples/bt/bt
-/examples/cast_test/cast_test
-/examples/complex/complex
-/examples/devices/devices
-/examples/expr_test/expr_test
-/examples/fs/fs
-/examples/hello/hello
-/examples/interrupt/interrupt
-/examples/loop/loop
-/examples/loop/loop3
-/examples/loop_inf/loop_inf
-/examples/malloc/malloc
-/examples/member/member
-/examples/mt/mt
-/examples/pipe/pipe
-/examples/poll/poll
-/examples/simple_complex/simple_complex
-/examples/write/write
 /examples/raft/plugins/check.so
 /examples/raft/plugins/choose.so
