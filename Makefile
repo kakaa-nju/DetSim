@@ -23,7 +23,7 @@ SRCS = src/main.cpp\
        src/core/dwarf.cpp \
        src/core/state/state.cpp src/core/state/state_store.cpp src/core/state/state_store_packed.cpp src/core/state/sysstate_store.cpp src/core/state/state_transition.cpp src/core/state/serialize.cpp \
        src/core/engine/thread_manager.cpp src/core/engine/signal_handler.cpp src/core/engine/exec_engine.cpp \
-       src/core/syscall/dispatcher.cpp src/core/syscall/handlers.cpp \
+       src/core/syscall/dispatcher.cpp src/core/syscall/handlers.cpp src/core/syscall/ckpt_policy.cpp \
        src/subsys/net/sockstate.cpp src/subsys/net/emu.cpp \
        src/subsys/fs/fsstate.cpp src/subsys/fs/fd_manager.cpp \
        src/subsys/sync/futexstate.cpp \
