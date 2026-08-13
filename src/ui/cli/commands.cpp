@@ -213,14 +213,8 @@ int cmd_si(char *args)
   }
 
   int ret = load_exec_store();
-  while (ret == 1){
-    ret = load_exec_store();
-  }
-  if (ret == 0)
-  {
-    show_syscall(ptmc_state.pids[cursor],
-                 ptmc_state.running_state.ts_hash[cursor]);
-  }
+  show_syscall(ptmc_state.pids[cursor],
+               ptmc_state.running_state.ts_hash[cursor]);
   return 0;
 }
 

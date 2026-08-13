@@ -617,8 +617,8 @@ int handle_exit(pid_t pid, syscall_info &info)
 
 int handle_exit_group(pid_t pid, syscall_info &info)
 {
-  // Mark process as exited
-  ptmc_state.status[ptmc_state.cursor] = (info.args[0] << 8);
+  // Mark process as exited is handled in do_single_syscall:98
+  //ptmc_state.status[ptmc_state.cursor] = (info.args[0] << 8);
   return CKPT_EXIT;
 }
 

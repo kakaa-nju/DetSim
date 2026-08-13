@@ -409,7 +409,7 @@ static void init_tracee_state(int index)
   int go_check = is_go_program(abs_path);
   LOG_INFO("is_go_program result: %d", go_check);
   // Hardcoded detection for Go programs (workaround for is_go_program issues)
-  if (!go_check && strstr(ptmc_state.tracee[index].executable, "test") ||
+  if (!go_check && strstr(ptmc_state.tracee[index].executable, "go_program") ||
       strstr(ptmc_state.tracee[index].executable, "detsim") != NULL)
   {
     LOG_INFO("Hardcoded: treating as Go program due to 'test' in name");
