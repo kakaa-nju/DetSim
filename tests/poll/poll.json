@@ -2,5 +2,6 @@
   "Loglevel": 0,
   "Nodes": 2,
   "Tracee": [["./poll", "0"],["./poll", "1"]],
-  "Addr": ["192.168.0.1","192.168.0.2"]
+  "Addr": ["192.168.0.1","192.168.0.2"],
+  "Checkpoint": ["socket","bind","listen","write","read","poll","connect"]
 }

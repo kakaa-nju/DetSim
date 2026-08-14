@@ -7,6 +7,9 @@
   ],
   "Addr": ["192.168.0.1", "192.168.0.2"],
   "WorkingDir": "/",
+  "Checkpoint": [
+    "recvfrom", "gettimeofday", "read", "write"
+  ],
   "FSMap": [ 
     { "Host": "./fs_root", "Target": "/" }
   ]

@@ -3,5 +3,5 @@
   "Nodes": 1,
   "Tracee": [["./hello", "0"]],
   "Addr": ["192.168.0.1"],
-  "Checkpoint": ["write", "brk"]
+  "Checkpoint": ["write"]
 }

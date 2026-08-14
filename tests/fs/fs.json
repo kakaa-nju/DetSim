@@ -6,5 +6,6 @@
   "WorkingDir": "/",
   "FSMap": [
     { "Host": "./fs_root", "Target": "/" }
-  ]
+  ],
+  "Checkpoint": ["open","write","close"]
 }

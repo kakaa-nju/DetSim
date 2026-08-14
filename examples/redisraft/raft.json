@@ -12,6 +12,9 @@
   "ChoosePoint": [
     { "syscall": 96, "choose": 2 }
   ],
+  "Checkpoint": [
+    "recvfrom", "gettimeofday"
+  ],
   "ChooseFunc": "./plugins/choose.so",
   "UserCheck": "./plugins/check.so",
   "StateStore": {

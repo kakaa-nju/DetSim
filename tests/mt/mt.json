@@ -3,5 +3,6 @@
   "Nodes": 1,
   "Tracee": [
     ["./mt"]
-  ]
+  ],
+  "Checkpoint": ["write"]
 }
