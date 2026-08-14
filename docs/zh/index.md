@@ -334,7 +334,7 @@ regs.rip -= 2;
 
 这里存放了进程做占用的全部虚拟地址空间项目以及类型。我们将根据这里给出的地址等信息做内存的快照。
 
-![maps](assets/image-20250321153834937.png)
+![maps](../assets/image-20250321153834937.png)
 
 #### /proc/$pid/memory
 
@@ -361,7 +361,7 @@ ino: 3                  // 文件系统 inode 号
 
 存放了打开文件的符号链接。这对于我们定位被打开的文件地址非常有用。
 
-![zsh 的 /proc/$pid/fd](assets/image-20250321155418993.png)
+![zsh 的 /proc/$pid/fd](../assets/image-20250321155418993.png)
 
 
 
@@ -459,12 +459,12 @@ ino: 3                  // 文件系统 inode 号
 
 示例：
 ```
-(pmc) p g_basic.x                    # 基本变量
-(pmc) p g_arr[2]                     # 数组索引
-(pmc) p *g_ptr                       # 指针解引用
-(pmc) p g_struct->field              # 结构体访问
-(pmc) p ((Type*)g_void_ptr)->member  # 类型转换
-(pmc) p tracee1(g_remote_var)        # 进程限定
+(detsim) p g_basic.x                    # 基本变量
+(detsim) p g_arr[2]                     # 数组索引
+(detsim) p *g_ptr                       # 指针解引用
+(detsim) p g_struct->field              # 结构体访问
+(detsim) p ((Type*)g_void_ptr)->member  # 类型转换
+(detsim) p tracee1(g_remote_var)        # 进程限定
 ```
 
 ---

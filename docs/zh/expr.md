@@ -62,55 +62,55 @@ tracee1(g_container.num_rects)  # 在进程 1 中求值
 ### 基本类型检查
 
 ```
-(pmc) p g_int
+(detsim) p g_int
 g_int = 42
 
-(pmc) p g_int == 42
+(detsim) p g_int == 42
 true
 
-(pmc) p g_char == 'A'
+(detsim) p g_char == 'A'
 true
 ```
 
 ### 数组和指针
 
 ```
-(pmc) p g_int_arr[2]
+(detsim) p g_int_arr[2]
 g_int_arr[2] = 30
 
-(pmc) p *g_int_ptr
+(detsim) p *g_int_ptr
 *g_int_ptr = 42
 
-(pmc) p **g_double_ptr
+(detsim) p **g_double_ptr
 **g_double_ptr = 42
 ```
 
 ### 结构体访问
 
 ```
-(pmc) p g_basic
+(detsim) p g_basic
 {
   x = 100,
   y = 200,
 }
 
-(pmc) p g_basic_ptr->x
+(detsim) p g_basic_ptr->x
 g_basic_ptr->x = 100
 
-(pmc) p g_rect_ptr->br.x
+(detsim) p g_rect_ptr->br.x
 g_rect_ptr->br.x = 100
 ```
 
 ### 类型转换
 
 ```
-(pmc) p (int*)g_generic_ptr
+(detsim) p (int*)g_generic_ptr
 0x404080
 
-(pmc) p ((point*)g_generic_ptr)->x
+(detsim) p ((point*)g_generic_ptr)->x
 ((point*)g_generic_ptr)->x = 10
 
-(pmc) p ((hidden_struct*)g_container.hidden_data)->secret_value
+(detsim) p ((hidden_struct*)g_container.hidden_data)->secret_value
 ((hidden_struct*)g_container.hidden_data)->secret_value = 42
 ```
 

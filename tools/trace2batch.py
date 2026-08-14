@@ -8,7 +8,7 @@ the exact same execution path in the tracer.
 Usage:
     python3 trace2batch.py trace/example.tr > replay.batch
     ./tracer -c config.json
-    (ptmc) batch replay.batch
+    (detsim) batch replay.batch
 
 Trace file format supported:
     - State transitions: hash => hash

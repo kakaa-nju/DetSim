@@ -142,7 +142,7 @@ char *rl_gets()
     line_read = NULL;
   }
 
-  line_read = readline("(ptmc) ");
+  line_read = readline("(detsim) ");
 
   if (line_read && *line_read)
   {
