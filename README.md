@@ -1,6 +1,6 @@
 # DetSim
 
-> 中文文档：[中文文档](docs/README.md)
+English | [中文](docs/zh/README.md)
 
 DetSim is a deterministic simulation platform for testing, model checking, and debugging distributed systems.
 
