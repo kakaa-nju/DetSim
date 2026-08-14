@@ -1,81 +1,133 @@
 # DetSim
 
-DetSim 是一个确定性模拟测试环境，用于分布式系统的确定性测试和调试。
+> 中文文档：[中文文档](docs/README.md)
 
-## 特性
+DetSim is a deterministic simulation platform for testing, model checking, and debugging distributed systems.
 
-- **确定性执行**: 通过控制调度消除非确定性，确保测试可重复
-- **全局状态管理**: 保存/恢复任意执行点的完整系统状态
-- **表达式求值**: 类似 GDB 的表达式求值，支持结构体、指针、类型转换
-- **状态比较**: 对比不同执行路径的系统状态差异
-- **分布式支持**: 支持多进程分布式系统的统一调试
+DetSim executes real system implementations in a controlled environment by intercepting system calls and virtualizing sources of nondeterminism. It provides deterministic execution, global state management, state-space exploration, and interactive debugging without requiring intrusive modifications to the target system.
 
-## 依赖
+## Overview
 
-- libdw
-- libcereal-dev
-- libdwarf-dev
-- libelf-dev
-- libreadline-dev
-- libcjson-dev
-- libunwind-dev
-- libfmt-dev
-- flex, bison
+Distributed systems are inherently difficult to test and debug because their behavior depends on concurrency, asynchronous communication, scheduling, timing, randomness, and other environmental factors. DetSim provides a controlled execution environment that turns these sources of nondeterminism into explicitly controllable inputs.
 
-## 编译
+At a high level, DetSim:
+
+<img src="docs/assets/DetSim framework.png" alt="DetSim framework" style="zoom: 50%;" />
+
+DetSim treats system calls as boundaries between deterministic execution segments. By controlling system-call inputs and the execution order of processes, DetSim can reproduce an execution, explore alternative executions, and restore previously reached states.
+
+## Features
+
+* **Deterministic Execution**
+  Control scheduling and external inputs to make distributed-system executions reproducible.
+
+* **State-Based Exploration and Debugging**
+  Save, restore, compare, and explore global execution states, supporting systematic execution exploration and deterministic debugging.
+
+* **System Call Interception and Resource Virtualization**
+  Intercept system calls and virtualize nondeterministic resources such as networking, time, and randomness without requiring intrusive modifications to the target system.
+
+* **Distributed-System Support**
+  Coordinate multiple processes as a single globally controlled execution for deterministic testing, model checking, and debugging.
+
+
+## Prerequisites
+
+DetSim currently targets Linux.
+
+Required development libraries:
+
+* `libdw`
+* `libcereal-dev`
+* `libdwarf-dev`
+* `libelf-dev`
+* `libreadline-dev`
+* `libcjson-dev`
+* `libunwind-dev`
+* `libfmt-dev`
+* `flex`
+* `bison`
+
+For Ubuntu, the required packages can be installed with:
 
 ```sh
-make NP=$(NODES)
+sudo apt install \
+    libdw-dev \
+    libcereal-dev \
+    libdwarf-dev \
+    libelf-dev \
+    libreadline-dev \
+    libcjson-dev \
+    libunwind-dev \
+    libfmt-dev \
+    flex \
+    bison
 ```
 
-`NP` 指定被测系统的节点（进程）数量，必须与配置文件中的 `Nodes` 一致。
+The target program must provide DWARF debugging information for expression evaluation and stack inspection.
 
-### 编译被测程序
-
-被测程序需要使用 `-gdwarf-4` 编译以保留调试信息：
+DetSim currently expects the target program to be compiled with DWARF-4:
 
 ```sh
 CFLAGS="-gdwarf-4 -g" make
 ```
 
-## 启动
+## Build
 
-为确保分析准确，需要关闭 Linux 系统的地址空间随机化机制：
-
-```sh
-sudo echo 0 > /proc/sys/kernel/randomize_va_space
-```
-
-### 运行测试
+Build DetSim with the number of target nodes specified by `NP`:
 
 ```sh
-./tracer -c tests/expr_test.json
+make NP=1
 ```
 
-`tests/` 目录下提供了多个测试示例。
+For a distributed system with multiple processes:
 
-## 快速开始
+```sh
+make NP=3
+```
 
-### 1. 编写被测程序
+`NP` must match the `Nodes` value in the DetSim configuration file.
+
+### Build the Target Program
+
+For example:
+
+```sh
+gcc -gdwarf-4 -g -o test test.c
+```
+
+For a project using Make:
+
+```sh
+CFLAGS="-gdwarf-4 -g" make
+```
+
+## Quick Start
+
+### 1. Write a Target Program
+
+Create a simple C program:
 
 ```c
-// test.c
 #include <stdio.h>
 
 int g_value = 42;
 
-int main() {
+int main(void) {
     printf("value = %d\n", g_value);
     return 0;
 }
 ```
 
-编译：
+Compile it with debugging information:
+
 ```sh
 gcc -gdwarf-4 -g -o test test.c
 ```
 
-### 2. 编写配置文件
+### 2. Create a Configuration
+
+Create `test.json`:
 
 ```json
 {
@@ -83,72 +135,129 @@ gcc -gdwarf-4 -g -o test test.c
   "Nodes": 1,
   "Tracee": [["./test", "0"]],
   "Addr": ["192.168.0.1"],
-  "Assertions": ["tracee0(g_value == 42)"]
+  "Assertions": ["tracee0(g_value == 42)"],
+  "Checkpoint": ["write"]
 }
 ```
 
-### 3. 运行测试
+* `Nodes` specifies the number of target processes. 
+* `Tracee` specifies the executable and its node identifier.
+
+### 3. Build DetSim
 
 ```sh
 make NP=1
-./tracer -c test.json -a
 ```
 
-## 命令行界面
+### 4. Run
 
-DetSim 提供交互式 CLI 用于调试：
-
-| 命令 | 描述 |
-|------|------|
-| `c` | 自动探索模式 |
-| `si` | 单步执行当前进程 |
-| `sw N` | 切换到第 N 个进程 |
-| `p EXPR` | 求值表达式 |
-| `diff A B` | 比较两个状态 |
-| `load HASH` | 加载指定状态 |
-| `bt` | 打印调用栈 |
-| `info` | 显示当前状态信息 |
-| `q` | 退出 |
-
-详细文档请参考 [CLI 文档](docs/cli.md)。
-
-## 表达式求值
-
-支持完整的 C 表达式语法：
-
+```sh
+./tracer -c test.json
 ```
-# 基本变量
+
+DetSim starts the target program inside the deterministic execution environment and provides an interactive debugging interface.
+
+> **Note:** For deterministic execution, it may be necessary to disable Linux address-space layout randomization:
+>
+> ```sh
+> sudo sh -c 'echo 0 > /proc/sys/kernel/randomize_va_space'
+> ```
+
+## Execution Model
+
+DetSim models a distributed execution as a sequence of global states:
+
+```text
+        S0
+        │
+        │ system call / scheduling decision
+        ▼
+        S1
+        │
+        │ system call / scheduling decision
+        ▼
+        S2
+       /  \
+      /    \
+     ▼      ▼
+    S3      S4
+    │       │
+    ▼       ▼
+   ...     ...
+```
+
+Each state captures the relevant execution state of the distributed system. DetSim can save states during execution and later restore them to explore alternative execution paths.
+
+## Interactive CLI
+
+DetSim provides an interactive CLI for execution control and state inspection.
+
+| Command     | Description                                 |
+| ----------- | ------------------------------------------- |
+| `bfs/dfs/rand`         | Continue automatic execution/exploration    |
+| `si`        | Execute one step of the current process     |
+| `sw N`      | Switch to process `N`                       |
+| `p EXPR`    | Evaluate a C expression                     |
+| `diff A B`  | Compare two execution states                |
+| `load HASH` | Restore a specified state                   |
+| `bt`        | Print the current call stack                |
+| `info`      | Display current execution-state information |
+| `q`         | Exit                                        |
+
+See [CLI Documentation](docs/cli.md) for the complete command reference.
+
+## Expression Evaluation
+
+DetSim can evaluate C expressions using DWARF debugging information.
+
+Basic variables:
+
+```text
 p g_value
+```
 
-# 数组和指针
+Arrays and pointers:
+
+```text
 p g_arr[2]
 p *g_ptr
 p **g_double_ptr
+```
 
-# 结构体访问
+Structure fields:
+
+```text
 p g_struct.field
 p g_ptr->field
+```
 
-# 类型转换（将 void* 转回结构体指针）
+Type casts:
+
+```text
 p ((hidden_struct*)g_container.hidden_ptr)->secret_value
+```
 
-# 进程限定
+Expressions can also explicitly refer to another target process:
+
+```text
 p tracee1(g_remote_data)
 ```
 
-详见 [表达式求值文档](docs/expr.md)。
+See [Expression Evaluation](docs/expr.md) for details.
 
-## 状态比较
+## State Comparison
 
-使用 `diff` 命令比较两个系统状态：
+DetSim can compare two saved execution states.
 
-```
-(ptmc) diff 80a3 a87f
+For example:
+
+```text
+(detsim) diff 80a3 a87f
 
 === State Diff: 80a3157e vs a87f8fb6 ===
 
 [Overview]
-  System state hash: 80a3157e != a87f8fb6 ✗
+  System state hash: 80a3157e != a87f8fb6
   Process count: 2
 
   [Process 0 - Registers]
@@ -159,26 +268,40 @@ p tracee1(g_remote_data)
     0x404040: A=00 00 00 00  B=2a 00 00 00
 ```
 
-## 项目结构
+This is useful for identifying the first observable differences between alternative executions.
 
-```
+## Documentation
+
+* [Expression Evaluation](docs/expr.md) — C expression evaluation and DWARF support
+* [Command-Line Interface](docs/cli.md) — interactive CLI commands
+* [Backtrace](docs/backtrace.md) — stack and call-stack analysis
+* [Memory Management](docs/brk_and_mmap.md) — `brk`/`mmap` handling
+
+## Project Structure
+
+```text
 .
 ├── src/
-│   ├── core/       # 核心功能（调度、状态管理、DWARF解析）
-│   ├── subsys/     # 子系统（文件系统、网络状态序列化）
-│   └── utils/      # 工具（表达式解析器）
-├── tests/          # 测试用例
-├── docs/           # 文档
+│   ├── core/          # Core execution engine, scheduling, state management
+│   ├── subsys/        # Virtualized subsystems and resource management
+│   └── utils/         # Utilities, parsers, and expression evaluation
+├── tests/             # Test cases 
+├── examples/          # examples
+├── docs/              # Documentation
 └── Makefile
 ```
 
-## 文档
+## Research
 
-- [表达式求值](docs/expr.md) - 详细表达式语法
-- [命令行接口](docs/cli.md) - CLI 命令参考
-- [回溯](docs/backtrace.md) - 调用栈分析
-- [内存管理](docs/brk_and_mmap.md) - brk/mmap 处理
+DetSim is designed as a research platform for deterministic execution of distributed systems. Its primary use cases include:
 
-## 许可证
+* deterministic testing of distributed systems;
+* deterministic debugging and failure reproduction;
 
-[待补充]
+DetSim operates at the system-call boundary and controls the execution of the target program by intercepting and controlling system calls. It requires neither intrusive instrumentation at the application level nor a specific programming language or system design pattern.
+
+
+
+## License
+
+[To be determined]

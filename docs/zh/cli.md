@@ -36,7 +36,7 @@ DetSim 提供交互式命令行界面用于调试和状态探索。
 
 **diff 输出示例**:
 ```
-(ptmc) diff 1f3f 3238
+(detsim) diff 1f3f 3238
 
 === State Diff: 1f3f3246 vs 323803d5 ===
 
@@ -68,16 +68,16 @@ DetSim 提供交互式命令行界面用于调试和状态探索。
 
 **示例**:
 ```
-(ptmc) p g_int
+(detsim) p g_int
 g_int = 42
 
-(ptmc) p g_basic_ptr->x
+(detsim) p g_basic_ptr->x
 g_basic_ptr->x = 100
 
-(ptmc) p ((point*)g_generic_ptr)->x
+(detsim) p ((point*)g_generic_ptr)->x
 ((point*)g_generic_ptr)->x = 10
 
-(ptmc) p tracee1(g_container.num_rects)
+(detsim) p tracee1(g_container.num_rects)
 tracee1(g_container.num_rects) = 2
 ```
 
@@ -98,7 +98,7 @@ tracee1(g_container.num_rects) = 2
 
 **bt 输出示例**:
 ```
-(ptmc) bt
+(detsim) bt
 #0  0x0000000000401176 in main () at test.c:10
 #1  0x00007ffff7a29d90 in __libc_start_main () from /lib/x86_64-linux-gnu/libc.so.6
 #2  0x000000000040105e in _start ()
@@ -119,7 +119,7 @@ tracee1(g_container.num_rects) = 2
 
 **示例**:
 ```
-(ptmc) batch commands.txt
+(detsim) batch commands.txt
 ```
 
 其中 `commands.txt` 包含每行一个命令。

@@ -10,7 +10,7 @@
 
 根据 [x86_64 System V ABI](https://gitlab.com/x86-psABIs/x86-64-ABI/-/jobs/artifacts/master/raw/x86-64-ABI/abi.pdf?job=build)，这是函数调用发生时典型的栈布局：
 
-<img src="backtrace.assets/image-20250512203745671.png" alt="image-20250512203745671" style="zoom: 50%;" />
+<img src="../assets/image-20250512203745671.png" alt="image-20250512203745671" style="zoom: 50%;" />
 
 一般而言，所有函数都需要在最开头做：
 

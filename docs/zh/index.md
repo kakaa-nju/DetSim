@@ -210,7 +210,7 @@ syscall(SYS_exit, 0); // 没有直接的 libc wrapper！
 -process-{thread}
 ```
 
-<img src="assets/image-20241113202635648.png" alt="defuncted process" style="zoom:50%;" />
+<img src="../assets/image-20241113202635648.png" alt="defuncted process" style="zoom:50%;" />
 
 **线程正常退出不会向任何地方发送 `SIGCHLD`，也不能够被任何 `wait` 系统调用等待到。**而线程 crash 会导致整个进程 crash。如果需要线程的返回值，只够通过其他线程与该线程之间的某种同步机制。
 
@@ -300,7 +300,7 @@ Line 11 的 `PTRACE_SETOPTIONS` 是必要的。如果没有设置 `PTRACE_O_TRAC
 
 如果进程受控制了，那么它每一次成功执行 `execve` 都会收到一个正常的 `SIGTRAP`。
 
-<img src="assets/image-20241113181716326.png" alt="SIGTRAP(5) and SIGTRAP | 0x80 (133)" style="zoom:50%;" />
+<img src="../assets/image-20241113181716326.png" alt="SIGTRAP(5) and SIGTRAP | 0x80 (133)" style="zoom:50%;" />
 
 #### 系统调用篡改
 
