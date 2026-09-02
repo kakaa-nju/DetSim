@@ -1,5 +1,11 @@
 # DetSim
 
+<p align="center">
+  <a href="https://github.com/detsim-org/DetSim/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache 2.0">
+  </a>
+</p>
+
 English | [中文](docs/zh/README.md)
 
 DetSim is a deterministic simulation platform for testing, model checking, and debugging distributed systems.
@@ -112,7 +118,7 @@ DetSim starts the target program inside the deterministic execution environment 
 
 ## Documentation
 
-* [User Guide](docs/zh/user_guide.md) — C expression evaluation and DWARF support
+* [User Guide](docs/en/user_guide.md) — C expression evaluation and DWARF support
 * [Expression Evaluation](docs/zh/expr.md) — C expression evaluation and DWARF support
 * [Command-Line Interface](docs/zh/cli.md) — interactive CLI commands
 * [Backtrace](docs/zh/backtrace.md) — stack and call-stack analysis

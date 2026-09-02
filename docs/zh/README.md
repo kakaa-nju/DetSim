@@ -1,5 +1,11 @@
 # DetSim
 
+<p align="center">
+  <a href="https://github.com/detsim-org/DetSim/blob/master/LICENSE">
+    <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache 2.0">
+  </a>
+</p>
+
 [English](../../README.md) | 中文
 
 DetSim 是一个确定性模拟平台，用于分布式系统的测试、模型检测和调试。
