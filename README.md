@@ -48,59 +48,6 @@ Required development libraries:
 * `flex`
 * `bison`
 
-For Ubuntu, the required packages can be installed with:
-
-```sh
-sudo apt install \
-    libdw-dev \
-    libcereal-dev \
-    libdwarf-dev \
-    libelf-dev \
-    libreadline-dev \
-    libcjson-dev \
-    libunwind-dev \
-    libfmt-dev \
-    flex \
-    bison
-```
-
-The target program must provide DWARF debugging information for expression evaluation and stack inspection.
-
-DetSim currently expects the target program to be compiled with DWARF-4:
-
-```sh
-CFLAGS="-gdwarf-4 -g" make
-```
-
-## Build
-
-Build DetSim with the number of target nodes specified by `NP`:
-
-```sh
-make NP=1
-```
-
-For a distributed system with multiple processes:
-
-```sh
-make NP=3
-```
-
-`NP` must match the `Nodes` value in the DetSim configuration file.
-
-### Build the Target Program
-
-For example:
-
-```sh
-gcc -gdwarf-4 -g -o test test.c
-```
-
-For a project using Make:
-
-```sh
-CFLAGS="-gdwarf-4 -g" make
-```
 
 ## Quick Start
 
@@ -163,119 +110,13 @@ DetSim starts the target program inside the deterministic execution environment 
 > sudo sh -c 'echo 0 > /proc/sys/kernel/randomize_va_space'
 > ```
 
-## Execution Model
-
-DetSim models a distributed execution as a sequence of global states:
-
-```text
-        S0
-        │
-        │ system call / scheduling decision
-        ▼
-        S1
-        │
-        │ system call / scheduling decision
-        ▼
-        S2
-       /  \
-      /    \
-     ▼      ▼
-    S3      S4
-    │       │
-    ▼       ▼
-   ...     ...
-```
-
-Each state captures the relevant execution state of the distributed system. DetSim can save states during execution and later restore them to explore alternative execution paths.
-
-## Interactive CLI
-
-DetSim provides an interactive CLI for execution control and state inspection.
-
-| Command     | Description                                 |
-| ----------- | ------------------------------------------- |
-| `bfs/dfs/rand`         | Continue automatic execution/exploration    |
-| `si`        | Execute one step of the current process     |
-| `sw N`      | Switch to process `N`                       |
-| `p EXPR`    | Evaluate a C expression                     |
-| `diff A B`  | Compare two execution states                |
-| `load HASH` | Restore a specified state                   |
-| `bt`        | Print the current call stack                |
-| `info`      | Display current execution-state information |
-| `q`         | Exit                                        |
-
-See [CLI Documentation](docs/cli.md) for the complete command reference.
-
-## Expression Evaluation
-
-DetSim can evaluate C expressions using DWARF debugging information.
-
-Basic variables:
-
-```text
-p g_value
-```
-
-Arrays and pointers:
-
-```text
-p g_arr[2]
-p *g_ptr
-p **g_double_ptr
-```
-
-Structure fields:
-
-```text
-p g_struct.field
-p g_ptr->field
-```
-
-Type casts:
-
-```text
-p ((hidden_struct*)g_container.hidden_ptr)->secret_value
-```
-
-Expressions can also explicitly refer to another target process:
-
-```text
-p tracee1(g_remote_data)
-```
-
-See [Expression Evaluation](docs/expr.md) for details.
-
-## State Comparison
-
-DetSim can compare two saved execution states.
-
-For example:
-
-```text
-(detsim) diff 80a3 a87f
-
-=== State Diff: 80a3157e vs a87f8fb6 ===
-
-[Overview]
-  System state hash: 80a3157e != a87f8fb6
-  Process count: 2
-
-  [Process 0 - Registers]
-    rax    0x0000000000000009   0x0000000000000001
-    ...
-
-  [Process 0 - Memory]
-    0x404040: A=00 00 00 00  B=2a 00 00 00
-```
-
-This is useful for identifying the first observable differences between alternative executions.
-
 ## Documentation
 
-* [Expression Evaluation](docs/expr.md) — C expression evaluation and DWARF support
-* [Command-Line Interface](docs/cli.md) — interactive CLI commands
-* [Backtrace](docs/backtrace.md) — stack and call-stack analysis
-* [Memory Management](docs/brk_and_mmap.md) — `brk`/`mmap` handling
+* [User Guide](docs/zh/user_guide.md) — C expression evaluation and DWARF support
+* [Expression Evaluation](docs/zh/expr.md) — C expression evaluation and DWARF support
+* [Command-Line Interface](docs/zh/cli.md) — interactive CLI commands
+* [Backtrace](docs/zh/backtrace.md) — stack and call-stack analysis
+* [Design Manual](docs/zh/index.md) — Comprehensive design documentation and architecture reference
 
 ## Project Structure
 
