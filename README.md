@@ -146,9 +146,3 @@ DetSim is designed as a research platform for deterministic execution of distrib
 * deterministic debugging and failure reproduction;
 
 DetSim operates at the system-call boundary and controls the execution of the target program by intercepting and controlling system calls. It requires neither intrusive instrumentation at the application level nor a specific programming language or system design pattern.
-
-
-
-## License
-
-[To be determined]
