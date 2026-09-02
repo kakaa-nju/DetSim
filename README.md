@@ -1,7 +1,7 @@
 # DetSim
 
 <p align="center">
-  <a href="https://github.com/detsim-org/DetSim/blob/main/LICENSE">
+  <a href="https://github.com/detsim-org/DetSim/blob/master/LICENSE">
     <img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License: Apache 2.0">
   </a>
 </p>
