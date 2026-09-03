@@ -18,7 +18,9 @@ Distributed systems are inherently difficult to test and debug because their beh
 
 At a high level, DetSim:
 
-<img src="docs/assets/DetSim framework.png" alt="DetSim framework" style="zoom: 50%;" />
+<div align="center">
+  <img src="docs/assets/DetSim framework.png" alt="DetSim framework" style="width: 40%;" />
+</div>
 
 DetSim treats system calls as boundaries between deterministic execution segments. By controlling system-call inputs and the execution order of processes, DetSim can reproduce an execution, explore alternative executions, and restore previously reached states.
 

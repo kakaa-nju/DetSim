@@ -19,8 +19,9 @@ DetSim 提供了一个受控的执行环境，将这些非确定性因素转化�
 
 从整体上看，DetSim 的执行架构如下：
 
-
-<img src="../assets/DetSim framework.png" alt="DetSim 框架图" style="zoom: 50%;" />
+<div align="center">
+  <img src="../assets/DetSim framework.png" alt="DetSim 框架图"style="width: 40%;" />
+</div>
 
 DetSim 将系统调用作为确定性执行片段之间的边界。通过控制系统调用输入以及多进程之间的执行顺序，DetSim 可以复现已有执行、探索替代执行路径，并恢复到之前保存的执行状态。
 
