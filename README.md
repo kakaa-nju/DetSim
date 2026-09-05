@@ -8,7 +8,7 @@
 
 English | [中文](docs/zh/README.md)
 
-DetSim is a deterministic simulation platform for testing, model checking, and debugging distributed systems.
+DetSim is a deterministic simulation platform for testing and debugging distributed systems.
 
 DetSim executes real system implementations in a controlled environment by intercepting system calls and virtualizing sources of nondeterminism. It provides deterministic execution, global state management, state-space exploration, and interactive debugging without requiring intrusive modifications to the target system.
 
