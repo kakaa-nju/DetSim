@@ -90,7 +90,8 @@ N 个 fixed-layout worker；每个 worker `load --adopt` 自己的分支后跑�
 edges`。worker 输出/artifacts 保留在 `.parallel-<pid>-<time>/`。每个 worker 的
 `status=ok` 要求退出码为0、全部分配分支出现 `Loaded state`，且没有
 `Load --adopt rejected`/`DetSim state/execution error` 等错误；否则显示
-`status=FAILED`，即使 batch 本身 exit 0。
+`status=FAILED`，即使 batch 本身 exit 0。失败的 worker 会用 fresh store 在
+`worker-<n>-retry1` 重试一次；仍失败才影响 `parallel` 的失败状态。
 
 它仍是 **branch-partitioned seed-worker**：汇总发生在 worker 结束后，没有共享
 frontier、搜索中实时去重或 merge，worker 失败只汇总不重试；NP=2 root 的 branch

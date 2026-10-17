@@ -949,7 +949,9 @@ worker 退出后，coordinator 读取每个 worker 的 `SysStateStore` visited h
 worker `tree` 输出的 `EDGE` 行，打印 post-hoc union `Merged: ...`。worker 成功不再
 只看 exit code：每个 assigned branch 必须出现 `Loaded state`，且不能出现
 `Load --adopt rejected`/`DetSim state/execution error`；否则标记 `status=FAILED`。
-多线程 frontier 的 fresh worker 无法 adopt，已有 NP1 回归覆盖该失败识别。这仍不是完整
+多线程 frontier 的 fresh worker 无法 adopt，已有 NP1 回归覆盖该失败识别。
+失败 worker 会用 fresh store 在 `worker-<n>-retry1` 重试一次；结构性失败重试后
+仍标记 FAILED，不会被吞掉。这仍不是完整
 并行搜索：没有共享 frontier 或搜索中实时去重/merge，失败只汇总；多线程 worker
 bootstrap 和 loader 归一化仍未完成。普通 ASLR 下 restore 会明确
 失败；不能用冷启动 hash 直接合并。

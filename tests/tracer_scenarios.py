@@ -1292,6 +1292,8 @@ int main(void) {
                           output)
             self.assertIn("worker loaded 0 of 1 assigned branches", output)
             self.assertIn("status=FAILED", output)
+            self.assertIn("retry1", output)
+            self.assertIn("attempt 2", output)
         finally:
             self.assertEqual(session.close(), 0)
 

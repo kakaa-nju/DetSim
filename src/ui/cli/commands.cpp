@@ -684,14 +684,16 @@ int cmd_parallel(char *args) {
         fs::path directory;
         fs::path output;
         size_t branch_count = 0;
+        int attempt = 1;
         std::vector<hash_type> assigned;
     };
-    std::vector<Worker> started;
     const char *shell = "exec \"$0\" -n -c \"$1\" -b \"$2\" > \"$3\" 2>&1";
-    for (int index = 0; index < workers; ++index) {
-        Worker worker;
-        worker.directory = base / ("worker-" + std::to_string(index));
-        worker.output = worker.directory / "worker.out";
+
+    auto setup_and_spawn = [&](Worker &worker, int index,
+                               const fs::path &directory, int attempt) -> bool {
+        worker.directory = directory;
+        worker.output = directory / "worker.out";
+        worker.attempt = attempt;
         try {
             fs::create_directories(worker.directory);
             fs::copy(cwd / "memory", worker.directory / "memory",
@@ -705,23 +707,20 @@ int cmd_parallel(char *args) {
         } catch (const std::exception &error) {
             detsim::ui::ui_printf("parallel: worker %d setup failed: %s\n",
                                   index, error.what());
-            return 1;
+            return false;
         }
 
         const fs::path commands = worker.directory / "commands";
         std::ofstream script(commands);
         if (!script) {
             detsim::ui::ui_printf("parallel: cannot write worker commands\n");
-            return 1;
+            return false;
         }
         script << "sw 0\n";
-        for (size_t branch = index; branch < branches.size();
-             branch += static_cast<size_t>(workers)) {
+        for (hash_type branch : worker.assigned) {
             char branch_hash[32];
-            snprintf(branch_hash, sizeof(branch_hash), "%016lx", branches[branch]);
+            snprintf(branch_hash, sizeof(branch_hash), "%016lx", branch);
             script << "load --adopt " << branch_hash << "\n";
-            worker.assigned.push_back(branches[branch]);
-            ++worker.branch_count;
             if (depth > split_depth)
                 script << "dfs " << (depth - split_depth) << " --quiet\n";
         }
@@ -731,7 +730,7 @@ int cmd_parallel(char *args) {
         posix_spawn_file_actions_t file_actions;
         if (posix_spawn_file_actions_init(&file_actions) != 0) {
             detsim::ui::ui_printf("parallel: spawn actions init failed\n");
-            return 1;
+            return false;
         }
         posix_spawn_file_actions_addchdir_np(&file_actions,
                                              worker.directory.c_str());
@@ -750,8 +749,22 @@ int cmd_parallel(char *args) {
         if (spawn_result != 0) {
             detsim::ui::ui_printf("parallel: worker %d spawn failed: %s\n",
                                   index, strerror(spawn_result));
-            return 1;
+            return false;
         }
+        return true;
+    };
+
+    std::vector<Worker> started;
+    for (int index = 0; index < workers; ++index) {
+        Worker worker;
+        for (size_t branch = index; branch < branches.size();
+             branch += static_cast<size_t>(workers)) {
+            worker.assigned.push_back(branches[branch]);
+        }
+        worker.branch_count = worker.assigned.size();
+        if (!setup_and_spawn(worker, index,
+                             base / ("worker-" + std::to_string(index)), 1))
+            return 1;
         started.push_back(std::move(worker));
     }
 
@@ -762,36 +775,39 @@ int cmd_parallel(char *args) {
     bool failed = false;
     std::unordered_set<hash_type> merged_states;
     std::unordered_set<std::string> merged_edges;
-    for (size_t index = 0; index < started.size(); ++index) {
+
+    auto evaluate = [&](Worker &worker, size_t index, bool merge) -> bool {
         int status = 0;
-        if (waitpid(started[index].pid, &status, 0) != started[index].pid) {
-            detsim::ui::ui_printf("parallel: worker %zu wait failed: %s\n",
-                                  index, strerror(errno));
-            failed = true;
-            continue;
+        if (waitpid(worker.pid, &status, 0) != worker.pid) {
+            detsim::ui::ui_printf(
+                "parallel: worker %zu attempt %d wait failed: %s\n", index,
+                worker.attempt, strerror(errno));
+            return false;
         }
         const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-        if (code != 0) failed = true;
         size_t worker_edges = 0;
-        try {
-            SysStateStore::inspect(
-                (started[index].directory / "sstate").string(),
-                [&](hash_type key, const SysStateEntry&, const std::vector<uint8_t>&) {
-                    merged_states.insert(key);
-                });
-        } catch (const std::exception &error) {
-            detsim::ui::ui_printf("parallel: worker %zu store inspect failed: %s\n",
-                                  index, error.what());
-            failed = true;
+        if (merge) {
+            try {
+                SysStateStore::inspect(
+                    (worker.directory / "sstate").string(),
+                    [&](hash_type key, const SysStateEntry&, const std::vector<uint8_t>&) {
+                        merged_states.insert(key);
+                    });
+            } catch (const std::exception &error) {
+                detsim::ui::ui_printf(
+                    "parallel: worker %zu attempt %d store inspect failed: %s\n",
+                    index, worker.attempt, error.what());
+                return false;
+            }
         }
-        std::ifstream output(started[index].output);
+        std::ifstream output(worker.output);
         std::string line;
         int printed = 0;
         size_t loaded = 0;
         bool worker_ok = code == 0;
         while (std::getline(output, line)) {
             if (line.rfind("EDGE ", 0) == 0) {
-                if (merged_edges.insert(line).second) ++worker_edges;
+                if (merge && merged_edges.insert(line).second) ++worker_edges;
                 continue;
             }
             if (line.find("Loaded state ") != std::string::npos) ++loaded;
@@ -814,17 +830,36 @@ int cmd_parallel(char *args) {
                 ++printed;
             }
         }
-        if (loaded < started[index].assigned.size()) {
+        if (loaded < worker.assigned.size()) {
             worker_ok = false;
             detsim::ui::ui_printf(
                 "  worker loaded %zu of %zu assigned branches\n", loaded,
-                started[index].assigned.size());
+                worker.assigned.size());
         }
-        if (!worker_ok) failed = true;
         detsim::ui::ui_printf(
-            "worker %zu (%zu branches): exit %d, status=%s, edges=%zu, output=%s\n",
-            index, started[index].branch_count, code, worker_ok ? "ok" : "FAILED",
-            worker_edges, started[index].output.c_str());
+            "worker %zu attempt %d (%zu branches): exit %d, status=%s, edges=%zu, output=%s\n",
+            index, worker.attempt, worker.branch_count, code,
+            worker_ok ? "ok" : "FAILED", worker_edges,
+            worker.output.c_str());
+        return worker_ok;
+    };
+
+    for (size_t index = 0; index < started.size(); ++index) {
+        const bool first_ok = evaluate(started[index], index, true);
+        if (first_ok) continue;
+        Worker retry;
+        retry.assigned = started[index].assigned;
+        retry.branch_count = started[index].branch_count;
+        const fs::path directory =
+            base / ("worker-" + std::to_string(index) + "-retry1");
+        if (!setup_and_spawn(retry, static_cast<int>(index), directory, 2)) {
+            failed = true;
+            continue;
+        }
+        const bool retry_ok = evaluate(retry, index, true);
+        detsim::ui::ui_printf("parallel: worker %zu retry1 %s\n", index,
+                              retry_ok ? "ok" : "FAILED");
+        if (!retry_ok) failed = true;
     }
     for (const auto &[target, edge] : state_tree) {
         char text[128];

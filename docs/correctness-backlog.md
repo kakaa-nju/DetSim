@@ -1391,7 +1391,9 @@ the built-in `dfs` for the remaining depth. The NP=2 gate starts two workers on 
 success is now explicit: exit 0 alone is insufficient; the coordinator requires
 every assigned branch to emit `Loaded state` and rejects restore/adoption error
 lines. A multi-thread frontier (fresh single-thread workers cannot adopt it) is
-covered by an NP1 regression and reports `status=FAILED` for both workers. A worker
+covered by an NP1 regression and reports `status=FAILED` for both workers. Failed
+workers are retried once with a fresh store copy in `worker-<n>-retry1`; the
+structural multi-thread failure is retried, still fails, and remains visible. A worker
 that loads several frontier states also exposed a `cmd_load` bug: after
 `recover_running_state()` it overwrote the resolved state with the unbound loaded
 copy, so the second adoption failed with "Logical thread has no unique owned
