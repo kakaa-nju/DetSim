@@ -1400,11 +1400,19 @@ copy, so the second adoption failed with "Logical thread has no unique owned
 carrier binding". The overwrite is removed; NP1 load/replay tests still pass. Artifacts are retained under
 `.parallel-<pid>-<time>/`.
 
+`load --adopt-threads` extends adoption to a saved multi-thread layout: a fresh
+single-main worker creates parked carriers with `create_thread_carrier`, records a
+synthetic layout binding, then restores all registers/memory. A main-futex +
+runnable-worker checkpoint has been restored and searched this way (full backend).
+`parallel --threads` uses this mode; ordinary `--adopt` still rejects a layout
+mismatch.
+
 After the workers exit, the coordinator inspects each worker `SysStateStore` for
 visited hashes and parses `tree` `EDGE` lines, then reports a post-hoc union
 (`Merged: ...`). Workers still have independent visited sets and no shared
 frontier or during-search dedup/merge; failures are only summarized, and
-multi-thread adoption is limited to matching local layouts. Normal cold-start
+ordinary `--adopt` remains limited to matching local layouts; `--adopt-threads`
+creates carriers but has not been tested across all multi-thread lifecycle cases. Normal cold-start
 hashes still cannot be used as shared keys. Normal
 ASLR adoption fails explicitly at brk/mapping restore, multi-thread layouts are
 not yet bootstrapped in workers, and loader bytes are not normalized. A real

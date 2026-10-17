@@ -1294,6 +1294,18 @@ int main(void) {
             self.assertIn("status=FAILED", output)
             self.assertIn("retry1", output)
             self.assertIn("attempt 2", output)
+
+            threaded = session.send("parallel 2 2 --threads")
+            self.assertIn("status=ok", threaded)
+            self.assertIn("Merged:", threaded)
+            artifacts = re.search(r"Artifacts: (.*)", threaded)
+            self.assertIsNotNone(artifacts, threaded)
+            base = Path(artifacts.group(1).strip())
+            for index in range(2):
+                text = (base / f"worker-{index}" / "worker.out").read_text(
+                    errors="replace")
+                self.assertIn("adopted multi-thread cross-process bindings", text)
+                self.assertIn("EDGE ", text)
         finally:
             self.assertEqual(session.close(), 0)
 

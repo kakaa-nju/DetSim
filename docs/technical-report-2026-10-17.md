@@ -930,7 +930,9 @@ pidfd + 本地 carrier layout，设计上不允许跨进程复用。
 
 新增显式 `load --adopt`：仅当新 tracer 已启动同一 executable、model identity
 一致且 logical thread layout 完全匹配时，才把 seed hash 绑定到本地 live
-carrier；普通 `load` 不变。seed 和 worker 都用固定布局
+carrier；普通 `load` 不变。`load --adopt-threads` 进一步允许 fresh single-main
+worker 用 `create_thread_carrier` 为额外逻辑线程创建 parked carrier，再恢复完整
+thread layout；双线程 futex checkpoint 已验证可恢复并继续搜索（full）。seed 和 worker 都用固定布局
 （`setarch x86_64 -R`）时，full/pages store 副本均可恢复。两个 worker 从同一
 checkpoint `load --adopt` 后执行同一 `si`，得到相同 successor hash；测试
 `test_adopted_seed_snapshot_is_identical_across_workers` 覆盖 full/pages；普通
@@ -938,7 +940,8 @@ ASLR worker 在 restore 前被明确拒绝。
 
 随后加入 `parallel N DEPTH [--split-depth=D]`：默认展开一层，D>1 时在 seed 内
 逐层展开 frontier（上限512），再复制 store，用 `posix_spawn` 起 N 个 fixed-layout
-worker；每个 worker `load --adopt` 分到的 frontier 状态并跑内建 `dfs`。NP=2 门禁
+worker；每个 worker `load --adopt`（`--threads` 时 `load --adopt-threads`）分到
+的 frontier 状态并跑内建 `dfs`。NP=2 门禁
 在 depth-2 frontier 上起两个 worker，三个分支都被分配且两边完成 DFS；artifacts
 保留在 `.parallel-<pid>-<time>/`。一个 worker 连续 load 多个 frontier 状态时暴露了
 `cmd_load` 在 `recover_running_state()` 后又用未绑定 state 覆盖全局状态的问题

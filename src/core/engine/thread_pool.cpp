@@ -555,6 +555,20 @@ void prepare_thread_pool(int node, const tracee_state& state)
   }
 }
 
+void ensure_thread_carriers(int node, size_t count)
+{
+  auto& pool = pool_for(node);
+  if (count > MAX_THREADS_PER_PROCESS)
+    throw std::runtime_error("Snapshot needs too many physical thread carriers");
+  while (pool.carriers.size() < count) {
+    const pid_t carrier = create_thread_carrier(pool.anchor);
+    if (carrier <= 0)
+      throw std::runtime_error("Cannot create a carrier for an adopted thread layout");
+    pool.carriers.push_back(carrier);
+  }
+  std::sort(pool.carriers.begin(), pool.carriers.end());
+}
+
 void verify_thread_pool(int node)
 {
   const auto& pool = pool_for(node);

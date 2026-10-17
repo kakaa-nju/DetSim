@@ -9,6 +9,7 @@
 #include "engine/thread_pool.h"
 #include "proc_status.h"
 #include <charconv>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <limits.h>
@@ -575,15 +576,20 @@ int cmd_parallel(char *args) {
     int workers = 0;
     int depth = 0;
     int split_depth = 1;
+    bool adopt_threads = false;
     std::string option;
     if (!(input >> workers >> depth) || workers < 1 || workers > 32 ||
         depth < 1) {
         detsim::ui::ui_printf(
-            "Usage: parallel <workers 1..32> <depth> [--split-depth=N]\n");
+            "Usage: parallel <workers 1..32> <depth> [--split-depth=N] [--threads]\n");
         return 1;
     }
     while (input >> option) {
         std::string value;
+        if (option == "--threads") {
+            adopt_threads = true;
+            continue;
+        }
         if (option == "--split-depth") {
             if (!(input >> value)) {
                 detsim::ui::ui_printf(
@@ -594,7 +600,7 @@ int cmd_parallel(char *args) {
             value = option.substr(14);
         } else {
             detsim::ui::ui_printf(
-                "Usage: parallel <workers 1..32> <depth> [--split-depth=N]\n");
+                "Usage: parallel <workers 1..32> <depth> [--split-depth=N] [--threads]\n");
             return 1;
         }
         size_t parsed = 0;
@@ -652,8 +658,10 @@ int cmd_parallel(char *args) {
 
     namespace fs = std::filesystem;
     const fs::path cwd = fs::current_path();
+    const auto stamp = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
     const fs::path base = cwd / (".parallel-" + std::to_string(getpid()) + "-" +
-                                 std::to_string(time(nullptr)));
+                                 std::to_string(stamp));
     const fs::path config = cfg_file ? fs::absolute(cfg_file) : cwd / "config.json";
     if (!fs::is_regular_file(config)) {
         detsim::ui::ui_printf("parallel: config file not found: %s\n",
@@ -720,7 +728,8 @@ int cmd_parallel(char *args) {
         for (hash_type branch : worker.assigned) {
             char branch_hash[32];
             snprintf(branch_hash, sizeof(branch_hash), "%016lx", branch);
-            script << "load --adopt " << branch_hash << "\n";
+            script << (adopt_threads ? "load --adopt-threads " : "load --adopt ")
+                   << branch_hash << "\n";
             if (depth > split_depth)
                 script << "dfs " << (depth - split_depth) << " --quiet\n";
         }
@@ -875,7 +884,8 @@ int cmd_parallel(char *args) {
 
 int cmd_load(char *args) {
     if (args == NULL) {
-        detsim::ui::ui_printf("Usage: load [--adopt] <hash_prefix>\n");
+        detsim::ui::ui_printf(
+            "Usage: load [--adopt|--adopt-threads] <hash_prefix>\n");
         return 1;
     }
 
@@ -883,18 +893,24 @@ int cmd_load(char *args) {
     std::string token;
     std::string prefix;
     bool adopt = false;
+    bool adopt_threads = false;
     while (input >> token) {
         if (token == "--adopt") {
             adopt = true;
+        } else if (token == "--adopt-threads") {
+            adopt = true;
+            adopt_threads = true;
         } else if (prefix.empty()) {
             prefix = token;
         } else {
-            detsim::ui::ui_printf("Usage: load [--adopt] <hash_prefix>\n");
+            detsim::ui::ui_printf(
+                "Usage: load [--adopt|--adopt-threads] <hash_prefix>\n");
             return 1;
         }
     }
     if (prefix.empty()) {
-        detsim::ui::ui_printf("Usage: load [--adopt] <hash_prefix>\n");
+        detsim::ui::ui_printf(
+            "Usage: load [--adopt|--adopt-threads] <hash_prefix>\n");
         return 1;
     }
 
@@ -919,32 +935,41 @@ int cmd_load(char *args) {
             }
             /* An adopting worker has bootstrapped the same executable but has no
              * capture provenance for the seed's snapshot. Require the local
-             * logical thread layout to match exactly, then bind its carriers. */
-            for (int i = 0; i < NP; ++i) {
-                const auto &current = ptmc_state.running_state.child[i].threads;
-                const auto &target = state.child[i].threads;
-                if (current.size() != target.size() || current.empty()) {
-                    detsim::ui::ui_printf(
-                        "Load --adopt rejected: process %d thread layout differs\n", i);
-                    return 0;
-                }
-                for (size_t j = 0; j < current.size(); ++j) {
-                    if (current[j].tid != target[j].tid ||
-                        current[j].alive != target[j].alive ||
-                        current[j].is_main != target[j].is_main) {
+             * logical thread layout to match exactly, then bind its carriers.
+             * --adopt-threads additionally creates parked carriers for a saved
+             * multi-thread layout from a fresh single-main bootstrap. */
+            if (!adopt_threads) {
+                for (int i = 0; i < NP; ++i) {
+                    const auto &current = ptmc_state.running_state.child[i].threads;
+                    const auto &target = state.child[i].threads;
+                    if (current.size() != target.size() || current.empty()) {
                         detsim::ui::ui_printf(
                             "Load --adopt rejected: process %d thread layout differs\n", i);
                         return 0;
+                    }
+                    for (size_t j = 0; j < current.size(); ++j) {
+                        if (current[j].tid != target[j].tid ||
+                            current[j].alive != target[j].alive ||
+                            current[j].is_main != target[j].is_main) {
+                            detsim::ui::ui_printf(
+                                "Load --adopt rejected: process %d thread layout differs\n", i);
+                            return 0;
+                        }
                     }
                 }
             }
             for (int i = 0; i < NP; ++i)
                 prepare_thread_pool(i, ptmc_state.running_state.child[i]);
-            for (int i = 0; i < NP; ++i)
-                adopt_snapshot_bindings(i, state.ts_hash[i], state.child[i]);
+            for (int i = 0; i < NP; ++i) {
+                if (adopt_threads)
+                    adopt_snapshot_threads(i, state.ts_hash[i], state.child[i]);
+                else
+                    adopt_snapshot_bindings(i, state.ts_hash[i], state.child[i]);
+            }
         }
         state.recover_running_state();
         detsim::ui::ui_printf("Loaded state %016lx%s\n", matches[0],
+                              adopt_threads ? " (adopted multi-thread cross-process bindings)" :
                               adopt ? " (adopted cross-process bindings)" : "");
     } else if (matches.size() == 0) {
         detsim::ui::ui_printf("No state found with prefix '%s'\n", prefix.c_str());

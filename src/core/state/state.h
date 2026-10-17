@@ -24,6 +24,9 @@ void clear_snapshot_thread_bindings();
  * incarnation (parallel seed workers). Normal restore still requires provenance
  * recorded by capture in the same process. */
 void adopt_snapshot_bindings(int index, hash_type hash, const tracee_state& target);
+/* Same explicit adoption, but creates parked carriers for a saved multi-thread
+ * layout from a fresh single-main process. Requires prepare_thread_pool first. */
+void adopt_snapshot_threads(int index, hash_type hash, const tracee_state& target);
 
 /* ======================================================================
  * State Data Format (shared with StateStore)

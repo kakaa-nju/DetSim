@@ -34,9 +34,9 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 | `pending [PROCESS]` | 列出所有阻塞/可完成 syscall、原因、deadline 和 runnable actor |
 | `inspect [PROCESS]` | 输出保存状态的 schema1 JSON（线程/寄存器/pending/futex/描述符/文件/socket） |
 | `plugins` | 列出已加载插件、ABI/monitor schema、time-choice 和当前 monitor 字节 |
-| `parallel N DEPTH [--split-depth=D]` | 展开 D 层 frontier，起 N 个 fixed-layout worker 分工搜索，并汇总 visited/edges |
+| `parallel N DEPTH [--split-depth=D] [--threads]` | 展开 D 层 frontier，起 N 个 fixed-layout worker 分工搜索，并汇总 visited/edges；`--threads` 允许 multi-thread adoption |
 | `tree` | 打印已记录的搜索边（source target process choice thread） |
-| `load [--adopt] HASH` | 按 hash 前缀加载保存状态；`--adopt` 允许匹配 layout 的新进程接管 seed snapshot |
+| `load [--adopt|--adopt-threads] HASH` | 按 hash 前缀加载保存状态；`--adopt` 允许匹配 layout 的新进程接管 seed snapshot，`--adopt-threads` 可创建缺失 carrier |
 | `info` / `info current` | 系统调用历史 / 当前边的单行摘要 |
 | `info sock` | 当前模拟 socket |
 | `p EXPR` | 表达式求值 |
@@ -73,18 +73,21 @@ snapshot 绑定到本地 carrier。它要求：
 - 所有 tracer 和 tracee 使用同一固定地址布局（例如 `setarch x86_64 -R ./tracer`）；
   `load --adopt` 会在恢复前拒绝非 fixed-layout tracee，而不是让 brk/mapping
   restore 走到一半才失败；
-- 本地 logical thread layout 与 snapshot 完全一致（当前 fresh worker 只验证了
-  single-thread；多线程需要 worker 先构造同样 layout）；
+- 普通 `--adopt` 要求本地 logical thread layout 与 snapshot 完全一致；
+  `--adopt-threads` 允许 fresh single-main worker 为 snapshot 的额外逻辑线程
+  创建 parked carrier（`ensure_thread_carriers`），再恢复寄存器/内存；
 - model identity/executable 一致，store 已复制到 worker cwd；
 - 这是显式 opt-in，普通 `load` 仍要求同进程 capture provenance。
 
 已经有 full/pages 回归：同一 seed checkpoint 启动两个 worker，`load --adopt` 后执行
-同一 `si`，得到相同 successor hash。
+同一 `si`，得到相同 successor hash。`--adopt-threads` 已用 main futex + worker
+runnable 的双线程 checkpoint 验证，worker 能恢复完整 thread layout 并继续执行。
 
 `parallel N DEPTH [--split-depth=D]` 现在把这一步接成可执行的 coordinator：
 默认 D=1，从当前状态枚举 actor/choice 后继；D>1 时在 seed 内逐层展开 frontier，
 再把 frontier 状态分给 worker。复制 store 到 worker 目录后，用 `posix_spawn` 起
-N 个 fixed-layout worker；每个 worker `load --adopt` 自己的分支后跑内建
+N 个 fixed-layout worker；每个 worker `load --adopt`（`--threads` 时
+`load --adopt-threads`）自己的分支后跑内建
 `dfs DEPTH-D`，最后执行 `tree` 输出边。父进程汇总每个 worker 的
 `SysStateStore` visited hash 和 `EDGE` 行，打印 `Merged: N unique states, M unique
 edges`。worker 输出/artifacts 保留在 `.parallel-<pid>-<time>/`。每个 worker 的

@@ -39,6 +39,8 @@ void exit_logical_process(int node, pid_t caller, int exit_code);
 // Pool bookkeeping is runtime-only. Initial registration accepts exactly the
 // captured owned slots; subsequent barriers include all parked carriers.
 void prepare_thread_pool(int node, const tracee_state& state);
+/* Create parked carriers so an adopted saved thread layout can bind. */
+void ensure_thread_carriers(int node, size_t count);
 void verify_thread_pool(int node);
 void require_thread_capture_boundary(pid_t tid);
 void normalize_thread_pool_for_restore(int node);

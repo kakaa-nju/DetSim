@@ -874,6 +874,62 @@ void adopt_snapshot_bindings(int index, hash_type hash, const tracee_state& targ
   snapshot_thread_bindings.emplace(key, SnapshotThreadBinding{owner, std::move(layout)});
 }
 
+void adopt_snapshot_threads(int index, hash_type hash, const tracee_state& target)
+{
+  if (index < 0 || index >= NP || !hash)
+    throw std::runtime_error("Snapshot adoption requires a valid node and identity");
+  if (ptmc_state.pids[index] <= 0)
+    throw std::runtime_error("Snapshot adoption requires a live owned process");
+  const auto& current = ptmc_state.running_state.child[index];
+  if (current.threads.size() != 1 || !current.threads[0].alive ||
+      !current.threads[0].is_main || current.threads[0].tid != 1)
+    throw std::runtime_error(
+        "Multi-thread adoption requires a fresh single-main process");
+  if (target.threads.empty() || !target.threads[0].alive ||
+      !target.threads[0].is_main || target.threads[0].tid != 1)
+    throw std::runtime_error("Snapshot has an invalid main-thread layout");
+  size_t alive = 0;
+  for (size_t i = 0; i < target.threads.size(); ++i) {
+    const auto& thread = target.threads[i];
+    if (thread.tid != static_cast<pid_t>(i + 1) ||
+        thread.is_main != (i == 0))
+      throw std::runtime_error("Snapshot has an invalid logical thread layout");
+    if (thread.alive) ++alive;
+  }
+  if (!alive)
+    throw std::runtime_error("Snapshot has no live logical threads");
+
+  const auto key = std::make_pair(index, hash);
+  if (const auto existing = snapshot_thread_bindings.find(key);
+      existing != snapshot_thread_bindings.end()) {
+    if (existing->second.owner->pid != ptmc_state.pids[index])
+      throw std::runtime_error("Snapshot identity belongs to another process incarnation");
+    return;
+  }
+
+  ensure_thread_carriers(index, alive);
+  const pid_t pid = ptmc_state.pids[index];
+  auto owner = process_owners[pid].lock();
+  if (!owner) {
+    const int fd = syscall(SYS_pidfd_open, pid, 0);
+    if (fd == -1)
+      throw std::runtime_error("Cannot retain the adopting process incarnation");
+    owner = std::make_shared<ProcessBindingOwner>();
+    owner->fd = fd;
+    owner->pid = pid;
+    process_owners[pid] = owner;
+  }
+  pollfd descriptor{owner->fd, POLLIN, 0};
+  if (poll(&descriptor, 1, 0) != 0)
+    throw std::runtime_error("Snapshot adoption process incarnation is dead");
+
+  auto layout = std::make_shared<ThreadBindingLayout>();
+  layout->reserve(target.threads.size());
+  for (const auto& thread : target.threads)
+    layout->push_back({thread.tid, 0, thread.alive});
+  snapshot_thread_bindings.emplace(key, SnapshotThreadBinding{owner, std::move(layout)});
+}
+
 tracee_state tracee_state::resolve_thread_bindings(int index, hash_type hash) const
 {
   tracee_state resolved = *this;
