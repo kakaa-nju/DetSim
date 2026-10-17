@@ -6,8 +6,10 @@
 #include "scheduler.h"
 #include "state/state_transition.h"
 #include "engine/pending_syscall.h"
+#include "engine/thread_pool.h"
 #include "proc_status.h"
 #include <charconv>
+#include <fstream>
 #include <string_view>
 #include <cctype>
 #include "state/state.h"
@@ -94,6 +96,15 @@ std::string pending_syscall_text(const PendingSyscall &pending) {
         text += " result=" + std::to_string(pending.result);
     }
     return text;
+}
+
+bool fixed_layout(pid_t pid) {
+    std::ifstream input("/proc/" + std::to_string(pid) + "/personality");
+    std::string value;
+    if (!(input >> value)) return false;
+    char *end = nullptr;
+    const unsigned long personality = strtoul(value.c_str(), &end, 16);
+    return end && !*end && (personality & 0x40000UL);
 }
 
 struct JsonDiffOptions {
@@ -536,28 +547,82 @@ int cmd_plugins(char *args) {
 
 int cmd_load(char *args) {
     if (args == NULL) {
-        detsim::ui::ui_printf("Usage: load <hash_prefix>\n");
+        detsim::ui::ui_printf("Usage: load [--adopt] <hash_prefix>\n");
         return 1;
     }
 
-    char *arg = strtok(args, " ");
-    if (arg == NULL) {
-        detsim::ui::ui_printf("No Arguments!\n");
+    std::istringstream input(args);
+    std::string token;
+    std::string prefix;
+    bool adopt = false;
+    while (input >> token) {
+        if (token == "--adopt") {
+            adopt = true;
+        } else if (prefix.empty()) {
+            prefix = token;
+        } else {
+            detsim::ui::ui_printf("Usage: load [--adopt] <hash_prefix>\n");
+            return 1;
+        }
+    }
+    if (prefix.empty()) {
+        detsim::ui::ui_printf("Usage: load [--adopt] <hash_prefix>\n");
         return 1;
     }
 
     SysStateStore &store = SysStateStore::instance();
-    std::vector<hash_type> matches = store.find_by_prefix(arg);
+    std::vector<hash_type> matches = store.find_by_prefix(prefix);
 
     if (matches.size() == 1) {
         sys_state state(matches[0]);
+        if (adopt) {
+            if (ptmc_state.model_identity.empty() ||
+                state.model_identity != ptmc_state.model_identity) {
+                detsim::ui::ui_printf("Load rejected: snapshot execution model differs\n");
+                return 0;
+            }
+            for (int i = 0; i < NP; ++i) {
+                if (!fixed_layout(ptmc_state.pids[i])) {
+                    detsim::ui::ui_printf(
+                        "Load --adopt rejected: process %d is not fixed-layout; "
+                        "launch both seed and worker with `setarch x86_64 -R`\n", i);
+                    return 0;
+                }
+            }
+            /* An adopting worker has bootstrapped the same executable but has no
+             * capture provenance for the seed's snapshot. Require the local
+             * logical thread layout to match exactly, then bind its carriers. */
+            for (int i = 0; i < NP; ++i) {
+                const auto &current = ptmc_state.running_state.child[i].threads;
+                const auto &target = state.child[i].threads;
+                if (current.size() != target.size() || current.empty()) {
+                    detsim::ui::ui_printf(
+                        "Load --adopt rejected: process %d thread layout differs\n", i);
+                    return 0;
+                }
+                for (size_t j = 0; j < current.size(); ++j) {
+                    if (current[j].tid != target[j].tid ||
+                        current[j].alive != target[j].alive ||
+                        current[j].is_main != target[j].is_main) {
+                        detsim::ui::ui_printf(
+                            "Load --adopt rejected: process %d thread layout differs\n", i);
+                        return 0;
+                    }
+                }
+            }
+            for (int i = 0; i < NP; ++i)
+                prepare_thread_pool(i, ptmc_state.running_state.child[i]);
+            for (int i = 0; i < NP; ++i)
+                adopt_snapshot_bindings(i, state.ts_hash[i], state.child[i]);
+        }
         state.recover_running_state();
         ptmc_state.running_state = state;
-        detsim::ui::ui_printf("Loaded state %016lx\n", matches[0]);
+        detsim::ui::ui_printf("Loaded state %016lx%s\n", matches[0],
+                              adopt ? " (adopted cross-process bindings)" : "");
     } else if (matches.size() == 0) {
-        detsim::ui::ui_printf("No state found with prefix '%s'\n", arg);
+        detsim::ui::ui_printf("No state found with prefix '%s'\n", prefix.c_str());
     } else {
-        detsim::ui::ui_printf("Multiple states match prefix '%s':\n", arg);
+        detsim::ui::ui_printf("Multiple states match prefix '%s':\n", prefix.c_str());
         for (size_t i = 0; i < matches.size() && i < 10; i++) {
             detsim::ui::ui_printf("  %016lx\n", matches[i]);
         }

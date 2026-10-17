@@ -20,6 +20,10 @@
 
 // Runtime provenance is deliberately separate from persistent state identity.
 void clear_snapshot_thread_bindings();
+/* Explicit opt-in for copying a saved snapshot into a fresh, same-layout process
+ * incarnation (parallel seed workers). Normal restore still requires provenance
+ * recorded by capture in the same process. */
+void adopt_snapshot_bindings(int index, hash_type hash, const tracee_state& target);
 
 /* ======================================================================
  * State Data Format (shared with StateStore)

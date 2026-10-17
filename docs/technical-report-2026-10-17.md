@@ -917,5 +917,26 @@ peer write/futex WAKE 或显式 `si timeout` 使其 `Ready`，再 `si 0` 完成�
 仍不支持，`-m` 会明确拒绝。没有自动时间推进或 `wake` 命令；无 deadline
 的 futex 必须由另一个 actor 唤醒。
 
-证据：3项PTY TUI、33项native场景（含futex跨actor回归和inspect JSON解析）、
+证据：3项PTY TUI、35项native场景（含futex跨actor回归和inspect JSON解析）、
 28行native actor、27项session测试、`make check`和NP1生产构建。
+
+
+## 13.8 并行 seed worker 可行性（2026-10-18）
+
+先确认了两个硬边界：跨启动 raw hash 仍受 loader RDTSC/CPUID 影响；把 seed store
+直接复制给新 tracer 后，普通 `load` 被
+`Snapshot has no local thread binding provenance` 拒绝。capture provenance 是
+pidfd + 本地 carrier layout，设计上不允许跨进程复用。
+
+新增显式 `load --adopt`：仅当新 tracer 已启动同一 executable、model identity
+一致且 logical thread layout 完全匹配时，才把 seed hash 绑定到本地 live
+carrier；普通 `load` 不变。seed 和 worker 都用固定布局
+（`setarch x86_64 -R`）时，full/pages store 副本均可恢复。两个 worker 从同一
+checkpoint `load --adopt` 后执行同一 `si`，得到相同 successor hash；测试
+`test_adopted_seed_snapshot_is_identical_across_workers` 覆盖 full/pages；普通
+ASLR worker 在 restore 前被明确拒绝。
+
+这只证明 seed/worker 的状态身份可对齐，不是并行搜索：尚无 coordinator、root
+branch 分工、共享 frontier/去重、merge 或 worker 故障协议；普通 ASLR 下 restore
+会明确失败，多线程 worker bootstrap 和 loader 归一化仍未完成。并行 BFS/DFS
+必须继续由内建搜索执行，不能用冷启动 hash 直接合并。

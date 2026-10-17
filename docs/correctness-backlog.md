@@ -1356,10 +1356,35 @@ Verified blocking behavior with native fixtures:
   explicit `si timeout` is still required.
 
 Evidence: three PTY TUI tests (`make NP=1 check-tui`) cover 24x80, 10x40, resize
-to 8x20, `help/pending/inspect/thread/q` and clean exit; 33 native scenarios
+to 8x20, `help/pending/inspect/thread/q` and clean exit; 35 native scenarios
 (including the new futex UX test and the extended pending listing, which parses
 the inspect JSON and checks pending reason/registers); 28 native actor rows;
 `make check`; and the production NP1 build. The TUI test checks safety/command
 parity, not colors or layout. Raw-memory-only diff remains open (`-m` rejects).
 Automatic time advance, wake injection, and blocking vector/partial pipe writes
 remain open.
+
+
+### Parallel seed workers and cross-process restore (2026-10-18)
+
+Cross-startup identity remains C17-blocked: fixed layout makes mappings/GPRs close,
+but loader RDTSC/CPUID bytes still differ, so raw startup hashes are not a safe
+global key. Directly loading a seed store into a fresh tracer was rejected with
+`Snapshot has no local thread binding provenance`; the capture-time pidfd/layout
+provenance is deliberately process-local.
+
+`load --adopt HASH` now provides an explicit, opt-in provenance bypass for workers
+that bootstrapped the same executable and have an identical logical thread layout.
+It still validates node/hash, model identity, live process incarnation and layout;
+normal `load` is unchanged. With both seed and workers launched under a fixed
+layout (`setarch x86_64 -R`), full and pages store copies restore successfully.
+Two workers loading the same checkpoint and executing the same `si` produced the
+same successor hash (test `test_adopted_seed_snapshot_is_identical_across_workers`).
+The same test also verifies that a normal-ASLR worker is rejected before restore.
+
+This is a seed/worker primitive, not a parallel search: there is no coordinator,
+branch partition, shared frontier/dedup, merge or worker-failure protocol. Normal
+ASLR adoption fails explicitly at brk/mapping restore, multi-thread layouts are
+not yet bootstrapped in workers, and loader bytes are not normalized. A real
+parallel BFS/DFS must keep the built-in search authoritative and merge only
+verified state identities; do not use cold-start hashes as shared keys.

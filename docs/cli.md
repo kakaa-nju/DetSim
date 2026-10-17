@@ -34,7 +34,7 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 | `pending [PROCESS]` | 列出所有阻塞/可完成 syscall、原因、deadline 和 runnable actor |
 | `inspect [PROCESS]` | 输出保存状态的 schema1 JSON（线程/寄存器/pending/futex/描述符/文件/socket） |
 | `plugins` | 列出已加载插件、ABI/monitor schema、time-choice 和当前 monitor 字节 |
-| `load HASH` | 按 hash 前缀加载保存状态 |
+| `load [--adopt] HASH` | 按 hash 前缀加载保存状态；`--adopt` 允许匹配 layout 的新进程接管 seed snapshot |
 | `info` / `info current` | 系统调用历史 / 当前边的单行摘要 |
 | `info sock` | 当前模拟 socket |
 | `p EXPR` | 表达式求值 |
@@ -61,6 +61,25 @@ socket 等），不是原始内存逐字节 diff。`--brief` 只列变化的顶�
 
 `plugins` 显示已加载模块 ID、ABI、monitor schema、是否为 time-choice，以及当前
 保存状态中每个 monitor key 的字节数；无插件时明确显示 `No plugins loaded`。
+
+### 跨进程 seed worker（实验）
+
+`load --adopt HASH` 用于并行探索的 seed-worker：一个 tracer 捕获 snapshot 后，
+其他 tracer 启动同一 executable，跳过本地 capture provenance 的硬拒绝，把 seed
+snapshot 绑定到本地 carrier。它要求：
+
+- 所有 tracer 和 tracee 使用同一固定地址布局（例如 `setarch x86_64 -R ./tracer`）；
+  `load --adopt` 会在恢复前拒绝非 fixed-layout tracee，而不是让 brk/mapping
+  restore 走到一半才失败；
+- 本地 logical thread layout 与 snapshot 完全一致（当前 fresh worker 只验证了
+  single-thread；多线程需要 worker 先构造同样 layout）；
+- model identity/executable 一致，store 已复制到 worker cwd；
+- 这是显式 opt-in，普通 `load` 仍要求同进程 capture provenance。
+
+已经有 full/pages 回归：同一 seed checkpoint 启动两个 worker，`load --adopt` 后执行
+同一 `si`，得到相同 successor hash；但还没有并行 BFS/DFS coordinator、跨 worker
+去重或 merge。跨启动 raw hash 仍受 loader RDTSC/CPUID 差异影响，不能用冷启动
+hash 直接当同一状态。
 
 ## 阻塞 syscall 的行为
 

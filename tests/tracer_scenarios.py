@@ -1257,6 +1257,92 @@ int main(void) {
         code, output = self.run_tracer(scenario, name="diff_stateview")
         self.assertEqual(code, 0, output)
 
+    def test_adopted_seed_snapshot_is_identical_across_workers(self):
+        setarch = shutil.which("setarch")
+        if not setarch:
+            self.skipTest("cross-process seed identity requires setarch")
+        for backend in ("full", "pages"):
+            with self.subTest(backend=backend):
+                env = os.environ.copy()
+                env["DETSIM_SNAPSHOT_BACKEND"] = backend
+                work = self.root / ("seed-fixed-" + backend)
+                work.mkdir()
+                binary = work / "probe"
+                binary.write_bytes((self.root / "probe").read_bytes())
+                binary.chmod(0o755)
+                config = work / "config.json"
+                config.write_text(json.dumps({
+                    "Nodes": 1, "Loglevel": 4, "Tracee": [[str(binary), "0"]],
+                    "Addr": ["192.168.0.1"], "Assertions": [], "Plugins": [],
+                    "RuntimeProfile": {}, "FSMap": [],
+                }))
+                commands = work / "commands"
+                commands.write_text(
+                    "sw 0\ninfo current\nsi 0\nsi 0\ninfo current\nsi 0\ninfo current\nq\n")
+                argv = [setarch, "x86_64", "-R", str(TRACER), "-n",
+                        "-c", str(config), "-b", str(commands)]
+                seed = subprocess.run(argv, cwd=work, env=env,
+                                      stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, text=True,
+                                      timeout=30)
+                self.assertEqual(seed.returncode, 0, seed.stdout)
+                root = re.search(
+                    r"Current state ([0-9a-f]{16}) \(no predecessor\)",
+                    seed.stdout)
+                self.assertIsNotNone(root, seed.stdout)
+                edges = re.findall(r"([0-9a-f]{16}) => ([0-9a-f]{16})",
+                                   seed.stdout)
+                self.assertGreaterEqual(len(edges), 2, seed.stdout)
+                checkpoint = edges[-1][0]
+                expected = edges[-1][1]
+
+                # Adoption is explicit: normal-ASLR workers must be rejected
+                # before any restore can fail halfway through brk/mappings.
+                normal = self.root / f"worker-normal-{backend}"
+                normal.mkdir()
+                for name in ("memory", "sstate"):
+                    shutil.copytree(work / name, normal / name)
+                (normal / "memory" / ".packed.lock").unlink(missing_ok=True)
+                shutil.copy2(config, normal / "config.json")
+                (normal / "commands").write_text(
+                    f"sw 0\nload --adopt {checkpoint}\nq\n")
+                rejected = subprocess.run(
+                    [str(TRACER), "-n", "-c", str(normal / "config.json"),
+                     "-b", str(normal / "commands")],
+                    cwd=normal, env=env, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, timeout=30)
+                self.assertEqual(rejected.returncode, 0, rejected.stdout)
+                self.assertIn("not fixed-layout", rejected.stdout)
+
+                successors = []
+                for index in range(2):
+                    worker = self.root / f"worker-{backend}-{index}"
+                    worker.mkdir()
+                    for name in ("memory", "sstate"):
+                        shutil.copytree(work / name, worker / name)
+                    lock = worker / "memory" / ".packed.lock"
+                    if lock.exists():
+                        lock.unlink()
+                    shutil.copy2(config, worker / "config.json")
+                    worker_commands = worker / "commands"
+                    worker_commands.write_text(
+                        f"sw 0\nload --adopt {checkpoint}\nsi 0\ninfo current\nq\n")
+                    result = subprocess.run(
+                        [setarch, "x86_64", "-R", str(TRACER), "-n",
+                         "-c", str(worker / "config.json"),
+                         "-b", str(worker_commands)],
+                        cwd=worker, env=env, stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stdout)
+                    self.assertIn("adopted cross-process bindings", result.stdout)
+                    worker_edges = re.findall(
+                        r"([0-9a-f]{16}) => ([0-9a-f]{16})", result.stdout)
+                    self.assertTrue(worker_edges, result.stdout)
+                    self.assertEqual(worker_edges[-1][0], checkpoint, result.stdout)
+                    successors.append(worker_edges[-1][1])
+                self.assertEqual(successors, [expected, expected],
+                                 f"backend={backend} seed={expected} workers={successors}")
+
     def test_search_modes_stop_at_first_property_violation(self):
         for mode in ("dfs", "rand"):
             code, output = self.run_tracer("sw 0\n" + mode + " 8\nq\n",

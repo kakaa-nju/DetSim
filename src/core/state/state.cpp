@@ -828,6 +828,52 @@ void clear_snapshot_thread_bindings()
   clear_thread_pools();
 }
 
+void adopt_snapshot_bindings(int index, hash_type hash, const tracee_state& target)
+{
+  if (index < 0 || index >= NP || !hash)
+    throw std::runtime_error("Snapshot adoption requires a valid node and identity");
+  if (ptmc_state.pids[index] <= 0)
+    throw std::runtime_error("Snapshot adoption requires a live owned process");
+  const auto& current = ptmc_state.running_state.child[index];
+  if (current.threads.size() != target.threads.size() || current.threads.empty())
+    throw std::runtime_error("Snapshot adoption requires an identical thread layout");
+  for (size_t i = 0; i < current.threads.size(); ++i) {
+    if (current.threads[i].tid != target.threads[i].tid ||
+        current.threads[i].alive != target.threads[i].alive ||
+        current.threads[i].is_main != target.threads[i].is_main)
+      throw std::runtime_error("Snapshot adoption requires an identical logical thread layout");
+  }
+
+  const auto key = std::make_pair(index, hash);
+  if (const auto existing = snapshot_thread_bindings.find(key);
+      existing != snapshot_thread_bindings.end()) {
+    if (existing->second.owner->pid != ptmc_state.pids[index])
+      throw std::runtime_error("Snapshot identity belongs to another process incarnation");
+    return;
+  }
+
+  const pid_t pid = ptmc_state.pids[index];
+  auto owner = process_owners[pid].lock();
+  if (!owner) {
+    const int fd = syscall(SYS_pidfd_open, pid, 0);
+    if (fd == -1)
+      throw std::runtime_error("Cannot retain the adopting process incarnation");
+    owner = std::make_shared<ProcessBindingOwner>();
+    owner->fd = fd;
+    owner->pid = pid;
+    process_owners[pid] = owner;
+  }
+  pollfd descriptor{owner->fd, POLLIN, 0};
+  if (poll(&descriptor, 1, 0) != 0)
+    throw std::runtime_error("Snapshot adoption process incarnation is dead");
+
+  auto layout = std::make_shared<ThreadBindingLayout>();
+  layout->reserve(current.threads.size());
+  for (const auto& thread : current.threads)
+    layout->push_back({thread.tid, thread.physical_tid, thread.alive});
+  snapshot_thread_bindings.emplace(key, SnapshotThreadBinding{owner, std::move(layout)});
+}
+
 tracee_state tracee_state::resolve_thread_bindings(int index, hash_type hash) const
 {
   tracee_state resolved = *this;
