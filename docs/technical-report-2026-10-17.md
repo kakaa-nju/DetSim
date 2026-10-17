@@ -844,6 +844,18 @@ depth3下曾报告42/27并声称`Complete explore all`，当前为49/27并正确
 `model_budget`；unique相同，多出的7次是重新展开而非新状态。两者二进制和主机
 负载不同，只能作为书签成本的数量级参考，不是受控前后性能对比。
 
+历史维护记录中的约500 states/s（例如
+`build/closed-syscalls-raft-pages`的586.6，full396.2）来自**旧depth8 Raft
+smoke**：2,582 visits/1,347 new，使用当时的checker/choice插件，不是当前
+willemt depth3案例。当前案例在06:18表中已是67 full/99.9 pages。为区分
+workload差异，用当前案例做同配置A/B：iteration23 NP3为42 states/
+83.6 full、42/96.5 pages；当前二进制为49 states/67–88 full、49/113.6 pages。
+再用归档NP3 binaries重放旧depth8 workload（适配choice、无旧checker）：
+full 243–269、pages338–404 states/s，当前266.9/382.2；没有出现500→67的
+同基准阶跃。旧500的checker/choice插件已不在工作区，重放树约1,500 states
+而非2,582，因此不是完全相同的基准。跨driver、depth、prefix和state size的
+states/s不得直接比较；当前自动搜索的主要成本仍是save/restore（>90%）。
+
 端到端wall time（约8.8s/4行，含构建、前缀、重放和驱动）只说明运行上下文，
 **不再作为搜索性能记录**；此前把它与DFS吞吐混在一起的口径已废弃。
 

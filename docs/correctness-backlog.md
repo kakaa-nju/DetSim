@@ -1291,3 +1291,12 @@ times, state-store counters and page capture/restore stats. Native build, manual
 setup, replay, CLI/driver polling and whole-case wall time are operational context
 and must not be mixed into search throughput. End-to-end timings may be reported
 for cost awareness but not as a before/after search optimization result.
+
+There is no fixed search-throughput baseline yet. The historical 500+ states/s
+numbers came from an old depth8 Raft smoke (2,582 visits/1,347 new) whose checker
+and choice plugin binaries are no longer in the workspace; the current depth3
+willemt case is small and budget-cut. A real regression claim needs a pinned
+workload (config, target/plugin hashes, prefix) run against archived and current
+binaries, with only `search_metrics` compared. Same-case A/B with iteration23 NP3
+already shows no 500→67 step: 42 states/83.6 full and 42/96.5 pages, versus the
+current 49 states/67-88 full and 49/113.6 pages.
