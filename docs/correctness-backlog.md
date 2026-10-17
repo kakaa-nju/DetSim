@@ -10,7 +10,7 @@ relationship to the native-binary model-checking goal.
 | --- | --- | --- | --- |
 | C01 | Fixed (unchanged live thread set) | Futex queues are branch-owned, captured and archived; restore reconstructs blocked state, including same-hash restores. | `check-futex-snapshot` exercises capture/copy/assignment/archive, persisted reload and repeated ptrace restore/wake. Raw lifecycle/carrier restore has separate C02 tests; combined lifecycle and futex waiting still needs wider coverage. |
 | C02 | P0 / partial | Capture preserves virtual slots and creation records; raw clone/exit now restore logical contexts over retained carriers; unexpected physical death or untracked creation rejects. Physical TIDs now stay in transient bindings; explicit liveness and logical parent IDs enter archives. Guest-visible physical IDs in register/memory contents are not normalized. | Create A/B, exit A, create C, repeatedly restore with correct logical identity and TLS/stop phases. `check-thread-lifecycle` now covers that sequence, TLS, persisted replay, main-first exit and actual carrier reuse. TID writeback/clear-tid now have join and replay coverage; ordinary pthread TLS/join/condition and non-PI robust owner-death have scoped coverage; full pthread, PI and rseq critical sections remain unsupported. |
-| C03 | Partial: actual CLI actors fixed | Actual CLI BFS and iterative DFS enumerate saved runnable/Ready/Retry threads and each eligible finite timeout, with explicit post-restore actors and per-action choices. Iterative DFS now reopens a hash when a later command has more remaining depth and reports depth/budget cuts instead of claiming completion. RAND, the legacy recursive and unused scheduler paths are not covered; cross-command BFS frontier recovery remains separate. | Native actor gate:28 full/pages rows,76 direct root actions,228 same-source replays and actual BFS terminal projections; pure saved-policy/readiness tests, DFS residency and a depth-reopen regression pass. Consolidation and complete outcome/atom coverage remain open. |
+| C03 | Partial: actual CLI actors fixed | Actual CLI BFS and iterative DFS enumerate saved runnable/Ready/Retry threads and each eligible finite timeout, with explicit post-restore actors and per-action choices. Iterative DFS now reopens a hash when a later command has more remaining depth and reports depth/budget cuts instead of claiming completion. RAND, the unused scheduler path and cross-command BFS frontier recovery are not covered. | Native actor gate:28 full/pages rows,76 direct root actions,228 same-source replays and actual BFS terminal projections; pure saved-policy/readiness tests, DFS residency and a depth-reopen regression pass. Consolidation and complete outcome/atom coverage remain open. |
 | C04 | Partial | Ordered system metadata identity includes status/budget; storage now compares duplicate bytes in cache, packed records and metadata instead of trusting hashes alone. | Identity and all storage gates cover ordering and duplicate conflicts. Logical thread identity and equivalence of differently encoded semantic states remain open. |
 | C05 | Fixed (scoped) | Removed filename heuristics; corrected libelf string-table index in Go-section detection. | Native `test_probe` starts at the same boundary as `probe`; ordinary/Go-section ELF fixtures and two existing gc Go binaries classified correctly. gccgo and actual Go runtime execution remain unverified. |
 | C06 | Fixed (framework boundary) | Removed Raft fields, implicit role pruning, message inference and example parser from the production link. Versioned plugins inspect explicit snapshots; branch-owned opaque monitors enter product identity before successor publication. | `check-state-view`, `check-plugins`, `check-identity` and native counter-plugin restore/violation scenarios cover readonly inspection, ABI failures, history isolation, terminal witnesses and decoder noninterference. Raft examples have separate projection/history contracts; this does not certify every Raft property. |
@@ -1181,10 +1181,11 @@ BFS covers both blocking and producer-first zero-wait success. Per-event validit
 checks remain. Large3cycle pthread control is explicitly a bounded functional
 path; finite raw-thread fixtures verify native BFS/DFS successor sets separately.
 
-This fixes the actual CLI actor dimension, not all of C03/C25: RAND/recursive and
-unused scheduler implementations remain separate, global visited survives some
-commands, DFS hash-only visited ignores different remaining depths, and all
-futex/message outcomes plus instruction atoms are not established. Snapshot37/38
+This fixes the actual CLI actor dimension, not all of C03/C25: RAND and the
+unused scheduler implementation remain separate, BFS still shares discovered
+hashes across commands, and all futex/message outcomes plus instruction atoms
+are not established. The depth-sensitive DFS part is addressed in the
+2026-10-17 section below. Snapshot37/38
 and kernel24 remain unchanged. Four existing actual module attempts still use
 immutable22/24, and no terminal acceptance is inferred from these new tests.
 
@@ -1227,7 +1228,7 @@ build-contract and5 layout tests). Actual NP3 Willemt full/pages healthy/mutant
 rows pass; the healthy rows report49 searched states with
 `search_completion=model_budget`. The RedisLabs library full/pages rows also
 pass; their healthy searches report109 states with the same budget reason.
-This closes the depth-sensitive DFS bookkeeping defect, not C03/C25: RAND, the
-unused scheduler and the legacy recursive path keep their old behavior,
+This closes the depth-sensitive DFS bookkeeping defect, not C03/C25: RAND and
+the unused scheduler path keep their old behavior,
 BFS-after-DFS frontier recovery is reported as incomplete rather than repaired,
 and futex/message outcomes plus instruction atoms remain open.

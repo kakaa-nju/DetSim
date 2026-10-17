@@ -176,7 +176,7 @@ control. Actual CLI BFS and iterative DFS also enumerate each eligible finite
 timeout alongside all saved runnable/Ready/Retry logical threads. Each action
 selects its actor after restore and owns its syscall-choice enumeration. This
 does not certify all futex/message outcomes or instruction-level interleavings.
-RAND, the legacy recursive implementation and the unused scheduler path do not
+RAND and the unused scheduler path do not
 have this coverage guarantee.
 
 Run the NP=1 and NP=2 gates in separate make invocations. The Redis gate requires

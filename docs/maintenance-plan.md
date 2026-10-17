@@ -1137,8 +1137,9 @@ both backends. GDB allocation census showed30 identical large-file buffers.
 
 Implementation: optional DFSFrame resident state, reset after successor capture
 and parent bookkeeping, lazy reconstruction in states1/2. Generic deserialize
-error includes original cause. Historical recursive DFS is unchanged and not the
-CLI execution path. No snapshot format or guest semantics change.
+error includes original cause. The historical recursive DFS was later removed
+rather than kept as a second execution path. No snapshot format or guest
+semantics change.
 
 GREEN: tests/dfs_residency.py against immutable production NP1 binary, eight
 full/pages×small/large×BFS/DFS searches; every graph81unique/80actualtransition
