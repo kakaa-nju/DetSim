@@ -1081,6 +1081,59 @@ int main(void) {
         self.assertNotIn("Complete explore all", output)
         self.assertEqual(code, 0, output)
 
+    def test_depth_bounded_dfs_reopens_with_more_remaining_depth(self):
+        source = self.root / "depth_reopen.c"
+        source.write_text(
+            "#include <sys/syscall.h>\n"
+            "#include <unistd.h>\n"
+            "int main(void) {\n"
+            "  syscall(SYS_getpid);\n"
+            "  if (write(1, \"DEPTH_OK\\n\", 9) != 9) return 1;\n"
+            "  return 0;\n"
+            "}\n"
+        )
+        subprocess.run(
+            shlex.split(os.environ.get("CC", "/usr/bin/gcc"))
+            + ["-O0", "-g", "-gdwarf-4", "-fno-pie", "-no-pie",
+               str(source), "-o", str(self.root / "probe")], check=True,
+        )
+        native = subprocess.run([str(self.root / "probe")], check=True,
+                                stdout=subprocess.PIPE, timeout=5)
+        self.assertEqual(native.stdout, b"DEPTH_OK\n")
+
+        def scenario(send):
+            send("sw 0")
+            info = send("info current")
+            root = re.search(
+                r"Current state ([0-9a-f]{16}) \(no predecessor\)", info).group(1)
+            self.assertIn("Loaded state", send("load " + root))
+            first = send("dfs 1 --quiet")
+            # A depth cut is not complete exploration, even though the root and
+            # its immediate successor were discovered.
+            self.assertNotIn("Complete explore all", first)
+            self.assertIn("Depth limit reached", first)
+            self.assertIn("Searched for", first)
+            self.assertNotIn("SEARCH_EXITED", first)
+            first_unique = int(re.search(r"total unique: (\d+)", first).group(1))
+
+            # Reopening the same saved identity with a larger remaining budget
+            # must expand the frontier left by the previous command instead of
+            # treating the hash as fully visited.
+            self.assertIn("Loaded state", send("load " + root))
+            second = send("dfs 4 --quiet")
+            self.assertNotIn("Depth limit reached", second)
+            self.assertIn("Complete explore all", second)
+            self.assertIn("SEARCH_EXITED", second)
+            second_unique = int(re.search(r"total unique: (\d+)", second).group(1))
+            self.assertGreater(second_unique, first_unique)
+
+        for backend in ("full", "pages"):
+            with self.subTest(backend=backend):
+                code, output = self.run_tracer(
+                    scenario, name="depth_reopen_" + backend, tracee_args=(),
+                    extra_env={"DETSIM_SNAPSHOT_BACKEND": backend})
+                self.assertEqual(code, 0, output)
+
     def test_search_modes_stop_at_first_property_violation(self):
         for mode in ("dfs", "rand"):
             code, output = self.run_tracer("sw 0\n" + mode + " 8\nq\n",

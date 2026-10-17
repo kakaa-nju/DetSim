@@ -106,7 +106,12 @@ def run(work,tracer,binary,plugin,mode,backend,search):
         # Search is FIRST, before manual references write any canonical TSS edge.
         reply=checked(session,'dfs 1 --quiet'if search=='dfs'else 'bfs --quiet')
         (directory/'native-search.log').write_text(reply)
-        require('Complete explore all'in reply,'native search did not finish')
+        if search=='dfs':
+            # Root actions are the whole point; a depth-1 search must say so
+            # instead of claiming complete exploration.
+            require('Depth limit reached'in reply,'native DFS1 hid its depth bound')
+        else:
+            require('Complete explore all'in reply,'native BFS did not finish')
         executed=events(reply);row['native_callback_events']=executed
         reference=[]
         for slot,choice in actions(mode):

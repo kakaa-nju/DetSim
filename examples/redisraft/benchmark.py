@@ -85,7 +85,9 @@ try:
                     chunk=os.read(proc.stdout.fileno(),65536)
                     if not chunk: raise RuntimeError('tracer exited before prompt: '+reply.decode(errors='replace')[-1500:])
                     log.write(chunk);log.flush();reply.extend(chunk)
-                    if command and command.startswith('dfs ') and 'dfs_until_report_s' not in result and b'Complete explore all' in reply:
+                    if command and command.startswith('dfs ') and 'dfs_until_report_s' not in result and (
+                            b'Complete explore all' in reply or b'Depth limit reached' in reply or
+                            b'Model budget exhausted' in reply or b'Search coverage incomplete' in reply):
                         result['dfs_until_report_s']=time.monotonic()-issued
                     if reply.endswith(b'(ptmc) '):
                         text=reply.decode(errors='replace')
@@ -186,8 +188,12 @@ try:
                 match=re.search(prefix+r' (\{[^\n]+\})', reply)
                 if match: result[key]=json.loads(match[1])
             result['dfs_report_tail']=reply[reply.rfind('Time elapsed:'):]
-            m=re.search(r'Complete explore all (\d+) sys_states \(new: (\d+)\)',reply)
-            if not m: raise RuntimeError('DFS did not report normal bounded completion: '+reply[-2000:])
+            m=re.search(r'(?:Complete explore all|Searched for) (\d+) sys_states \(new: (\d+)\)',reply)
+            if not m: raise RuntimeError('DFS did not report a bounded completion: '+reply[-2000:])
+            result['dfs_completion']=('complete' if 'Complete explore all' in reply else
+                                      'depth_limit' if 'Depth limit reached' in reply else
+                                      'model_budget' if 'Model budget exhausted' in reply else
+                                      'unexpanded_frontier')
             result['dfs_states']=int(m[1]);result['dfs_new_states']=int(m[2])
             result['dfs_states_per_s']=int(m[1])/result['dfs_s']
             for label,key in [('Total save time','save_ms'),('Total restore time','restore_ms')]:

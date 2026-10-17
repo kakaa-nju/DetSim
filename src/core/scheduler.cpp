@@ -35,6 +35,7 @@ extern "C" detsim::ui::NCursesUI *get_ncurses_ui();
 #include <cstddef>
 #include <cstdlib>
 #include <fcntl.h>
+#include <limits>
 #include <optional>
 #include <nlohmann/json.hpp>
 #include <random>
@@ -45,6 +46,7 @@ extern "C" detsim::ui::NCursesUI *get_ncurses_ui();
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <unordered_map>
 
 #define pids ptmc_state.pids
 extern FILE *log_fp;
@@ -112,6 +114,42 @@ int load_exec_store(TransitionAction action)
 extern SSS state_set;
 extern TSS state_tree;
 extern int sigint_received;
+
+// Discovery and expansion are distinct. A saved hash may be discovered by a
+// depth-bounded command (or a random walk) without every action having run.
+// This map records the largest remaining depth that was fully expanded for a
+// hash; INT_MAX means an unbounded BFS expansion. A later search may reopen the
+// saved identity when it has a larger budget. It is process-local search
+// bookkeeping, not snapshot identity.
+static constexpr int kExpandedUnbounded = std::numeric_limits<int>::max();
+static std::unordered_map<hash_type, int> expanded_remaining;
+
+static int expanded_budget(hash_type hash)
+{
+  const auto found = expanded_remaining.find(hash);
+  return found == expanded_remaining.end() ? -1 : found->second;
+}
+
+static void record_expanded(hash_type hash, int remaining)
+{
+  auto [position, inserted] = expanded_remaining.try_emplace(hash, remaining);
+  if (!inserted && remaining > position->second)
+    position->second = remaining;
+}
+
+static bool all_discovered_fully_expanded()
+{
+  for (hash_type hash : state_set)
+    if (expanded_budget(hash) != kExpandedUnbounded)
+      return false;
+  return true;
+}
+
+static void clear_search_bookkeeping()
+{
+  state_set.clear();
+  expanded_remaining.clear();
+}
 
 #include <sys/time.h>
 static double gettime()
@@ -660,6 +698,7 @@ int exec_bfs()
   /* Statistics for this execution only */
   size_t states_searched_this_run = 0;
   size_t states_new_this_run = 0;
+  bool budget_cut = false;
 
   /* Reset StateStore statistics for this run */
   StateStore::instance().reset_stats();
@@ -711,6 +750,7 @@ int exec_bfs()
       break;
     }
     const auto actions=enabled_actor_actions(state_fetched.value());
+    bool state_complete = true;
     for (const auto& actor:actions)
     {
       int cardinality=-1;
@@ -754,21 +794,30 @@ int exec_bfs()
 
       remember_search_exited(exited_receipt,s.ss_hash,actor,result);
 
-      if (result.code != CKPT_DISCARD &&
-          !model_budget_exhausted())
+      if (result.code != CKPT_DISCARD)
       {
-        bool is_new = !state_set.count(result.new_state.ss_hash);
-        if (is_new)
+        if (model_budget_exhausted())
         {
-          if (check_result == 0)
-            state_queue_append(result.new_state);
-          state_set.emplace(result.new_state.ss_hash);
-          states_new_this_run++;
+          state_complete = false;
+          budget_cut = true;
+        }
+        else
+        {
+          bool is_new = !state_set.count(result.new_state.ss_hash);
+          if (is_new)
+          {
+            if (check_result == 0)
+              state_queue_append(result.new_state);
+            state_set.emplace(result.new_state.ss_hash);
+            states_new_this_run++;
+          }
         }
       }
 
       } while (!choices.empty());
     }
+    if (state_complete)
+      record_expanded(state_fetched->ss_hash, kExpandedUnbounded);
 
     /* Update global statistics for monitor */
     g_states_searched = states_searched_this_run;
@@ -800,14 +849,23 @@ int exec_bfs()
                             time_used, states_searched_this_run / time_used);
       StateStore::instance().print_stats();
       sigint_received = 0;
-      state_set.clear();
+      clear_search_bookkeeping();
       return 0;
     }
   }
   stop_status_monitor();
-  detsim::ui::ui_printf(
-      "Complete explore all %zu sys_states (new: %zu), total unique: %zu\n",
-      states_searched_this_run, states_new_this_run, state_set.size());
+  if (budget_cut)
+    detsim::ui::ui_printf(
+        "Model budget exhausted; Searched for %zu sys_states (new: %zu), total unique: %zu\n",
+        states_searched_this_run, states_new_this_run, state_set.size());
+  else if (!all_discovered_fully_expanded())
+    detsim::ui::ui_printf(
+        "Search coverage incomplete; Searched for %zu sys_states (new: %zu), total unique: %zu\n",
+        states_searched_this_run, states_new_this_run, state_set.size());
+  else
+    detsim::ui::ui_printf(
+        "Complete explore all %zu sys_states (new: %zu), total unique: %zu\n",
+        states_searched_this_run, states_new_this_run, state_set.size());
   show_syscall_history();
   double time_used = gettime() - start_time;
   detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
@@ -830,6 +888,7 @@ struct DFSFrame
   size_t actor_pos=0;
   std::vector<int> choices;
   int cardinality=-1;
+  bool complete=true;
 };
 
 /**
@@ -984,7 +1043,8 @@ int do_dfs(hash_type ss_hash, int depth)
 }
 
 int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
-                     std::optional<SearchExitedReceipt>& exited_receipt)
+                     std::optional<SearchExitedReceipt>& exited_receipt,
+                     bool& depth_limit_reached, bool& budget_cut)
 {
   std::vector<DFSFrame> stack;
   stack.reserve(1024);
@@ -1004,16 +1064,27 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
     {
       states_searched_this_run++;
       bool is_new = !state_set.count(frame.ss_hash);
-      if (!is_new)
+      if (is_new)
+      {
+        state_set.emplace(frame.ss_hash);
+        states_new_this_run++;
+      }
+
+      // Discovery is not expansion. Reopen the saved identity when this
+      // command has more remaining depth than any earlier expansion.
+      if (expanded_budget(frame.ss_hash) >= frame.depth)
       {
         stack.pop_back();
         continue;
       }
-      state_set.emplace(frame.ss_hash);
-      states_new_this_run++;
 
       if (frame.depth <= 0)
       {
+        sys_state frontier(frame.ss_hash);
+        if (enabled_actor_actions(frontier).empty())
+          record_expanded(frame.ss_hash, 0);
+        else
+          depth_limit_reached = true;
         stack.pop_back();
         continue;
       }
@@ -1029,6 +1100,8 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
     {
       if (frame.actor_pos >= frame.actors.size())
       {
+        if (frame.complete)
+          record_expanded(frame.ss_hash, frame.depth);
         stack.pop_back();
         continue;
       }
@@ -1078,8 +1151,14 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
 
       remember_search_exited(exited_receipt,frame.ss_hash,actor,result);
 
-      if (result.code != CKPT_DISCARD &&
-          !model_budget_exhausted())
+      bool expanded = result.code != CKPT_DISCARD;
+      if (expanded && model_budget_exhausted())
+      {
+        frame.complete = false;
+        budget_cut = true;
+        expanded = false;
+      }
+      if (expanded)
       {
         LOG_DEBUG("DFS depth %d, tracee %d, choose %d, hash %016lx",
                   frame.depth, actor.process, ptmc_state.choose, result.new_state.ss_hash);
@@ -1137,7 +1216,7 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
                               time_used, states_searched_this_run / time_used);
         StateStore::instance().print_stats();
         sigint_received = 0;
-        state_set.clear();
+        clear_search_bookkeeping();
         return 1;
       }
 
@@ -1166,26 +1245,38 @@ int exec_dfs(int depth)
   ptmc_state.mode = PTMC_STATE::MODE_DFS;
   StateStore::instance().reset_stats();
   StateStore::instance().disable_prefetch();
-  g_states_searched = 1;
-  g_states_new = 1;
-  states_searched_this_run = 1;
-  states_new_this_run = 1;
+  g_states_searched = 0;
+  g_states_new = 0;
+  states_searched_this_run = 0;
+  states_new_this_run = 0;
   StatusMonitorScope status_monitor;
 
   StateStore::instance().queue_clear();
   start_time = gettime();
 
   std::optional<SearchExitedReceipt> exited_receipt;
-  const int stopped = do_dfs_iterative(ptmc_state.running_state.ss_hash, depth,exited_receipt);
+  bool depth_limit_reached = false;
+  bool budget_cut = false;
+  const int stopped = do_dfs_iterative(ptmc_state.running_state.ss_hash, depth,
+                                       exited_receipt, depth_limit_reached, budget_cut);
   if (stopped) {
     stop_status_monitor();
     return stopped;
   }
 
   stop_status_monitor();
-  detsim::ui::ui_printf(
-      "Complete explore all %zu sys_states (new: %zu), total unique: %zu\n",
-      states_searched_this_run, states_new_this_run, state_set.size());
+  if (budget_cut)
+    detsim::ui::ui_printf(
+        "Model budget exhausted; Searched for %zu sys_states (new: %zu), total unique: %zu\n",
+        states_searched_this_run, states_new_this_run, state_set.size());
+  else if (depth_limit_reached)
+    detsim::ui::ui_printf(
+        "Depth limit reached; Searched for %zu sys_states (new: %zu), total unique: %zu\n",
+        states_searched_this_run, states_new_this_run, state_set.size());
+  else
+    detsim::ui::ui_printf(
+        "Complete explore all %zu sys_states (new: %zu), total unique: %zu\n",
+        states_searched_this_run, states_new_this_run, state_set.size());
   show_syscall_history();
   double time_used = gettime() - start_time;
   detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,

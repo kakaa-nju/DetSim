@@ -231,10 +231,11 @@ class CompletedSearchProtocolTests(unittest.TestCase):
                         "action": "normal", "exit_codes": [0]}
         self.footers = [self.receipt]
         self.search_error = ""
+        self.search_reply = None
         self.replay_error = False
         self.sessions = []
 
-    def execute(self):
+    def execute(self, *, bug=False):
         owner = self
         current_hash = runner.Session.current_hash
 
@@ -253,6 +254,8 @@ class CompletedSearchProtocolTests(unittest.TestCase):
                 self.commands.append(text)
                 if text.startswith("dfs "):
                     self.state = owner.other
+                    if owner.search_reply is not None:
+                        return owner.search_reply + "(ptmc) "
                     return ("Complete explore all 7 sys_states (new: 7)\n" +
                             "".join("SEARCH_EXITED " + json.dumps(item) + "\n" for item in owner.footers) +
                             owner.search_error + "(ptmc) ")
@@ -294,7 +297,8 @@ class CompletedSearchProtocolTests(unittest.TestCase):
 
         with mock.patch.object(runner, "Session", FakeSession):
             return runner.search(Path("/unused/tracer"), ["fixture"], "checker",
-                                 self.directory, "full", 10, depth=100)
+                                 self.directory, "full", 10, depth=100,
+                                 bug=bug, expected_diagnostic="seeded bug" if bug else None)
 
     def test_receipt_selects_searched_terminal_and_replays_explicit_nonmain_actor(self):
         result = self.execute()
@@ -313,6 +317,35 @@ class CompletedSearchProtocolTests(unittest.TestCase):
         result = self.execute()
         self.assertEqual(result["status"], "bounded", result)
         self.assertIsNone(result["guest_exit"])
+
+    def test_search_completion_classification(self):
+        for marker, expected in (("Complete explore all 7 sys_states (new: 7)", "complete"),
+                                 ("Depth limit reached; Searched for 7 sys_states", "depth_limit"),
+                                 ("Model budget exhausted; Searched for 7 sys_states", "model_budget"),
+                                 ("Search coverage incomplete; Searched for 7 sys_states", "unexpanded_frontier")):
+            with self.subTest(marker=marker):
+                self.assertEqual(runner.search_completion("prefix " + marker + "\n"), expected)
+        self.assertIsNone(runner.search_completion("Stopped for illegal state. Searched for 7 sys_states"))
+
+    def test_depth_limit_without_receipt_stays_bounded_and_records_reason(self):
+        self.search_reply = "Depth limit reached; Searched for 3 sys_states (new: 3), total unique: 2\n"
+        result = self.execute()
+        self.assertEqual(result["status"], "bounded", result)
+        self.assertEqual(result["search_completion"], "depth_limit")
+        self.assertEqual(result["visited"], 3)
+
+    def test_model_budget_with_receipt_is_marked_bounded_completion(self):
+        self.search_reply = ("Model budget exhausted; Searched for 49 sys_states (new: 49), total unique: 49\n" +
+                             "SEARCH_EXITED " + json.dumps(self.receipt) + "\n")
+        result = self.execute()
+        self.assertEqual(result["status"], "pass", result)
+        self.assertEqual(result["search_completion"], "model_budget")
+        self.assertEqual(result["search"], "bounded_guest_completed")
+
+    def test_bug_search_without_violation_stays_non_green(self):
+        self.search_reply = "Depth limit reached; Searched for 3 sys_states (new: 3), total unique: 2\n"
+        result = self.execute(bug=True)
+        self.assertNotIn(result["status"], ("pass", "violation", "bounded"), result)
 
     def test_invalid_receipts_fail_without_current_cursor_fallback(self):
         mutations = [("schema", True), ("schema", 2), ("source", "0" * 16),

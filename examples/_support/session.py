@@ -147,6 +147,17 @@ def require(condition, reason):
         raise CaseFailure(reason)
 
 
+def search_completion(reply):
+    """Classify a CLI search report; None means no recognised completion line."""
+    for marker, label in (("Complete explore all", "complete"),
+                          ("Depth limit reached", "depth_limit"),
+                          ("Model budget exhausted", "model_budget"),
+                          ("Search coverage incomplete", "unexpanded_frontier")):
+        if marker in reply:
+            return label
+    return None
+
+
 def build_plugin(source, destination, cxx):
     result = command(cxx + ["-std=gnu++20", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror",
                            "-I" + str(ROOT / "src"), "-I" + str(ROOT / "third_party"), str(source), "-o", str(destination)], ROOT)
@@ -236,7 +247,13 @@ def search(tracer, argv, plugin, directory, backend, timeout, *, bug=False, dept
             (directory/"witness.json").write_text(json.dumps({"commands":recipe,"predecessor":predecessor,
                 "successor":witness,"replay_action":action,"actor":edge,"diagnostic":expected_diagnostic},indent=2))
         else:
-            require("Complete explore all" in reply and not bug, "expected search result absent")
+            completion = search_completion(reply)
+            complete = completion == "complete"
+            bounded_reason = None if complete else completion
+            require(complete or bounded_reason, "expected search result absent")
+            require(not bug, "expected property violation not found")
+            if bounded_reason:
+                row["search_completion"] = bounded_reason
             receipt = search_exit_receipt(reply)
             if receipt:
                 require("Loaded state " + receipt["target"] in session.send("load " + receipt["target"]),
@@ -248,7 +265,7 @@ def search(tracer, argv, plugin, directory, backend, timeout, *, bug=False, dept
             else:
                 edge = current_search_edge(session.send("info current"))
                 terminal_candidate = "exit_group(" in edge["operation"]
-            if depth is not None and not terminal_candidate:
+            if (bounded_reason or depth is not None) and not terminal_candidate:
                 row.update(status="bounded",search="bounded_no_violation",guest_exit=None)
             else:
                 terminal = session.send("si 0")
@@ -262,7 +279,7 @@ def search(tracer, argv, plugin, directory, backend, timeout, *, bug=False, dept
                     require("has exited with status 0" in session.send("si 0"), "completion replay did not exit zero")
                 row.update(status="pass",guest_exit=0,replay="same_process_hash_match_3x",
                            predecessor=predecessor,completion=successor,
-                           search="finite_fixture_exhausted" if depth is None else "bounded_guest_completed")
+                           search="finite_fixture_exhausted" if complete and depth is None else "bounded_guest_completed")
                 (directory / "completion.json").write_text(json.dumps({"commands": recipe,
                     "predecessor": predecessor, "successor": successor, "replay_action": action, "actor": edge,
                     "scope": "same tracee lifecycle; checked output/zero exit preserved"}, indent=2))

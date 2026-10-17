@@ -268,14 +268,18 @@ def model_case(tracer, binary, checker, choose, directory, backend, variant, tim
             # Finite search is separate from the fixed successful business schedule.
             search=session.send("dfs " + str(depth) + " --quiet")
             (directory / "search.log").write_text(search)
-            common.require("Complete explore all" in search and "illegal state" not in search,
+            common.require("illegal state" not in search,
                            "healthy bounded suffix failed: " + search[-1500:])
-            searched=re.search(r"Complete explore all (\d+) sys_states", search)
+            completion = common.search_completion(search)
+            common.require(completion, "healthy bounded suffix has no completion report: " + search[-1500:])
+            searched=re.search(r"(?:Complete explore all|Searched for) (\d+) sys_states", search)
             common.require(searched and int(searched[1]) > 1, "healthy suffix did not explore successors")
             row["search_states"] = int(searched[1])
+            row["search_completion"] = completion
             row["search_final_budget"] = saved_budget(directory, session.current_hash())
             row["search_budget_cutoff_observed"] = row["search_final_budget"] <= 0
-            row["search_scope"] = "bounded suffix under explicit depth and model budget"
+            row["search_scope"] = "bounded suffix under explicit depth and model budget" + (
+                "" if completion == "complete" else "; " + completion)
             # Replay an observed real final edge three times.
             final=events[-1]
             for _ in range(3):
