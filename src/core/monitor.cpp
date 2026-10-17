@@ -57,43 +57,6 @@ void dwarf_print_local_vars(int pid);
 /* Defined in state.cpp */
 extern int choose_many[450];
 
-/* Forward declarations for command handlers */
-
-static int execute_command(char *cmd_line);
-
-static struct
-{
-  const char *name;
-  const char *description;
-  int (*handler)(char *);
-} cmd_table[] = {
-    {"help", "Display informations about all supported commands", cmd_help},
-    {"bfs", "Perform breadth-first search from current state", cmd_bfs},
-    {"dfs", "Perform depth-first search from current state", cmd_dfs},
-    {"rand", "Perform random search from current state", cmd_rand},
-    {"q", "Exit ptraceMC", cmd_q},
-    {"si", "Step from current state, on focused process", cmd_si},
-    {"sw", "Switch control focus on the n-th process", cmd_sw},
-    {"thread", "Switch to thread N in current process (thread to list)", cmd_thread},
-    {"load", "Load state of given StateHash", cmd_load},
-    {"info", "Display current state history", cmd_info},
-    {"batch", "Read command list from file", cmd_batch},
-    {"p", "Calculate expression", cmd_p},
-    {"x",
-     "Examine memory: x/[count][format][size] <addr> (formats: x,d,u,o,t,c,s; "
-     "sizes: b,h,w,g)",
-     cmd_x},
-    {"bt", "Print backtrace with arguments", cmd_bt},
-    {"frame", "Select stack frame", cmd_frame},
-    {"locals", "Show local variables in current frame", cmd_locals},
-    {"ls", "List files in current node's filesystem", cmd_ls},
-    {"stat", "Show stat of files matching pattern", cmd_stat},
-    {"hexdump", "Hexdump of a file (c: continue, q: quit)", cmd_hexdump},
-    {"diff", "Compare two system states by hash prefix", cmd_diff},
-};
-
-#define NR_CMD (sizeof(cmd_table) / sizeof(cmd_table[0]))
-
 static inline void welcome()
 {
   detsim::ui::ui_printf("Build time: %s, %s\n", __TIME__, __DATE__);
@@ -152,38 +115,6 @@ char *rl_gets()
 /* External declaration for NCursesUI */
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui();
 
-static int execute_command(char *cmd_line)
-{
-  char lastbuf[256] = {0};
-  strncpy(lastbuf, cmd_line, sizeof(lastbuf) - 1);
-  lastbuf[sizeof(lastbuf) - 1] = '\0';
-
-  char *str_end = cmd_line + strlen(cmd_line);
-  /* extract the first token as the command */
-  char *cmd = strtok(cmd_line, " ");
-  if (cmd == NULL)
-  {
-    return 0; // Empty command
-  }
-
-  /* treat the remaining string as the arguments */
-  char *args = cmd + strlen(cmd) + 1;
-  if (args >= str_end)
-    args = NULL;
-
-  int i;
-  for (i = 0; i < NR_CMD; i++)
-  {
-    if (strcmp(cmd, cmd_table[i].name) == 0)
-    {
-      return cmd_table[i].handler(args);
-    }
-  }
-
-  detsim::ui::ui_printf("Unknown command '%s'\n", cmd);
-  return 0;
-}
-
 /* External batch file from config */
 extern char *batch_file;
 
@@ -214,6 +145,10 @@ void ui_mainloop()
     return;
   }
 
+  /* Manual UI: start with process 0 selected so thread/si work immediately. */
+  if (ptmc_state.cursor < 0 && NP > 0)
+    ptmc_state.cursor = 0;
+
   /* If UI is available, use it */
   if (ui)
   {
@@ -223,13 +158,9 @@ void ui_mainloop()
         {
           // Create modifiable copy for strtok
           char *cmd_copy = strdup(cmd_line.c_str());
-          int result = execute_command(cmd_copy);
-          free(cmd_copy);
-          if (result < 0)
-          {
-            // Command wants to exit
-            // Note: In NCursesUI mode, we need a way to signal exit
-            // For now, just handle 'q' command specially
+          if (cmd_copy) {
+            execute_command_line(cmd_copy);
+            free(cmd_copy);
           }
         });
 
@@ -242,53 +173,27 @@ void ui_mainloop()
   }
 
   /* Fallback to readline mode */
-  char lastbuf[256] = {0};
   char lastcmd[256] = {0};
 
   for (char *str; (str = rl_gets()) != NULL;)
   {
+    char line[256];
     if (str[0] != 0)
-      strncpy(lastbuf, str, sizeof(lastbuf) - 1);
-    lastbuf[sizeof(lastbuf) - 1] = '\0';
-
-    char *str_end = str + strlen(str);
-    /* extract the first token as the command */
-    char *cmd = strtok(str, " ");
-    if (cmd == NULL)
     {
-      // Copy lastcmd to str buffer safely for strtok
-      if (strlen(lastcmd) < 256)
-      {
-        strcpy(str, lastcmd);
-        cmd = strtok(str, " ");
-      }
-      if (cmd == NULL)
-      {
-        lastbuf[0] = lastcmd[0] = '\0';
-        continue;
-      }
+      strncpy(line, str, sizeof(line) - 1);
+      line[sizeof(line) - 1] = '\0';
+      strncpy(lastcmd, line, sizeof(lastcmd) - 1);
+      lastcmd[sizeof(lastcmd) - 1] = '\0';
     }
-
-    /* treat the remaining string as the arguments */
-    char *args = cmd + strlen(cmd) + 1;
-    if (args >= str_end)
-      args = NULL;
-
-    int i;
-    for (i = 0; i < NR_CMD; i++)
+    else
     {
-      if (strcmp(cmd, cmd_table[i].name) == 0)
-      {
-        if (cmd_table[i].handler(args) < 0)
-          return;
-        break;
-      }
+      strncpy(line, lastcmd, sizeof(line) - 1);
+      line[sizeof(line) - 1] = '\0';
     }
-
-    if (i == NR_CMD)
-      detsim::ui::ui_printf("Unknown command '%s'\n", cmd);
-    strncpy(lastcmd, lastbuf, sizeof(lastcmd) - 1);
-    lastcmd[sizeof(lastcmd) - 1] = '\0';
+    if (line[0] == '\0')
+      continue;
+    if (execute_command_line(line) < 0)
+      return;
   }
 }
 

@@ -5,6 +5,8 @@
 #include "commands.h"
 #include "scheduler.h"
 #include "state/state_transition.h"
+#include "engine/pending_syscall.h"
+#include "proc_status.h"
 #include <charconv>
 #include <string_view>
 #include <cctype>
@@ -46,6 +48,52 @@ extern char *log_file;
  * Command Table
  * ====================================================================== */
 
+namespace {
+const char *pending_phase_name(PendingPhase phase) {
+    switch (phase) {
+        case PendingPhase::Waiting: return "waiting";
+        case PendingPhase::Retry: return "retry";
+        case PendingPhase::Ready: return "ready";
+    }
+    return "unknown";
+}
+
+const char *pending_reason_name(PendingReason reason) {
+    switch (reason) {
+        case PendingReason::Futex: return "futex";
+        case PendingReason::Io: return "io";
+        case PendingReason::Timer: return "timer";
+    }
+    return "unknown";
+}
+
+std::string pending_syscall_text(const PendingSyscall &pending) {
+    const char *name = pending.nr >= 0 && pending.nr < 450 && syscalls[pending.nr]
+        ? syscalls[pending.nr] : "unknown";
+    char call[512];
+    snprintf(call, sizeof(call),
+             "%s(0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx, 0x%lx)",
+             name, (unsigned long)pending.args[0], (unsigned long)pending.args[1],
+             (unsigned long)pending.args[2], (unsigned long)pending.args[3],
+             (unsigned long)pending.args[4], (unsigned long)pending.args[5]);
+    std::string text = call;
+    text += " reason=";
+    text += pending_reason_name(pending.reason);
+    text += " phase=";
+    text += pending_phase_name(pending.phase);
+    if (pending.deadline) {
+        char deadline[64];
+        snprintf(deadline, sizeof(deadline), " deadline=%lld.%09d",
+                 (long long)pending.deadline->sec, pending.deadline->nsec);
+        text += deadline;
+    }
+    if (pending.phase == PendingPhase::Ready) {
+        text += " result=" + std::to_string(pending.result);
+    }
+    return text;
+}
+}
+
 static CommandEntry cmd_table[] = {
     {"help", "Display information about all supported commands", cmd_help},
     {"bfs", "Perform breadth-first search [--quiet]", cmd_bfs},
@@ -55,6 +103,7 @@ static CommandEntry cmd_table[] = {
     {"si", "Step selected actor [NONNEGATIVE_CHOICE|timeout]", cmd_si},
     {"sw", "Switch control focus on the n-th process", cmd_sw},
     {"thread", "Switch to thread N in current process (thread to list)", cmd_thread},
+    {"pending", "List blocked/ready syscalls, deadlines and runnable actors", cmd_pending},
     {"load", "Load state of given StateHash", cmd_load},
     {"info", "Display state history (info current: scalar current edge only)", cmd_info},
     {"batch", "Read command list from file", cmd_batch},
@@ -66,7 +115,7 @@ static CommandEntry cmd_table[] = {
     {"ls", "List files in current node's filesystem", cmd_ls},
     {"stat", "Show stat of files matching pattern", cmd_stat},
     {"hexdump", "Hexdump of a file (c: continue, q: quit)", cmd_hexdump},
-    {"diff", "Compare two system states by hash prefix", cmd_diff},
+    {"diff", "Compare two system states (currently a placeholder)", cmd_diff},
 };
 
 const CommandEntry* get_command_table() {
@@ -253,13 +302,9 @@ int cmd_thread(char *args) {
                 detsim::ui::ui_printf("%s [%zu] TID %d state=%s %s",
                                       marker, i, thread.tid, state,
                                       threads[i].is_main ? "(main)" : "");
-                if (thread.alive && thread.pending_syscall &&
-                    thread.pending_syscall->phase == PendingPhase::Waiting &&
-                    thread.pending_syscall->deadline) {
-                    const auto& deadline = *thread.pending_syscall->deadline;
-                    detsim::ui::ui_printf(" deadline=%lld.%09d",
-                                          static_cast<long long>(deadline.sec), deadline.nsec);
-                }
+                if (thread.alive && thread.pending_syscall)
+                    detsim::ui::ui_printf(" %s",
+                                          pending_syscall_text(*thread.pending_syscall).c_str());
                 detsim::ui::ui_printf("\n");
             }
         }
@@ -278,6 +323,84 @@ int cmd_thread(char *args) {
     ptmc_state.running_state.child[tracee_idx].current_thread_idx = thread_idx;
     detsim::ui::ui_printf("Switched to thread %d (TID=%d) in process %d\n",
                           thread_idx, threads[thread_idx].tid, tracee_idx);
+    return 0;
+}
+
+int cmd_pending(char *args) {
+    int only = -1;
+    if (args && *args) {
+        char *end = nullptr;
+        long value = strtol(args, &end, 10);
+        while (end && *end && std::isspace(static_cast<unsigned char>(*end))) ++end;
+        if (!end || *end || value < 0 || value >= NP) {
+            detsim::ui::ui_printf("Usage: pending [PROCESS]\n");
+            return 0;
+        }
+        only = static_cast<int>(value);
+    }
+
+    int pending_count = 0;
+    std::vector<std::pair<int, size_t>> runnable;
+    detsim::ui::ui_printf("Pending syscalls:\n");
+    for (int process = 0; process < NP; ++process) {
+        if (only >= 0 && process != only) continue;
+        if (DISDEAD(ptmc_state.status[process])) {
+            detsim::ui::ui_printf("Process %d (pid=%d): exited\n",
+                                  process, ptmc_state.pids[process]);
+            continue;
+        }
+        const auto &child = ptmc_state.running_state.child[process];
+        detsim::ui::ui_printf("Process %d (pid=%d)%s:\n", process,
+                              ptmc_state.pids[process],
+                              process == ptmc_state.cursor ? " [selected]" : "");
+        if (child.threads.empty()) {
+            detsim::ui::ui_printf("  main thread: state=runnable (no threaded pending metadata)\n");
+            runnable.push_back({process, 0});
+            continue;
+        }
+        const int current = ptmc_state.current_thread_idx[process];
+        for (size_t slot = 0; slot < child.threads.size(); ++slot) {
+            const auto &thread = child.threads[slot];
+            const char *marker = slot == static_cast<size_t>(current) ? "*" : " ";
+            const char *state = !thread.alive ? "exited" :
+                thread.pending_syscall &&
+                thread.pending_syscall->phase == PendingPhase::Waiting
+                    ? "waiting" : "runnable";
+            detsim::ui::ui_printf("%s [%zu] TID %d state=%s%s", marker, slot,
+                                  thread.tid, state,
+                                  thread.is_main ? " (main)" : "");
+            if (thread.alive && thread.pending_syscall) {
+                const auto &pending = *thread.pending_syscall;
+                ++pending_count;
+                detsim::ui::ui_printf(" %s\n", pending_syscall_text(pending).c_str());
+                if (pending.phase == PendingPhase::Waiting) {
+                    if (pending.deadline)
+                        detsim::ui::ui_printf(
+                            "       action: si timeout (advance this process clock to the deadline and complete)\n");
+                    else
+                        detsim::ui::ui_printf(
+                            "       action: another actor must wake/complete this wait; use 'thread N' to switch\n");
+                } else if (pending.phase == PendingPhase::Ready) {
+                    detsim::ui::ui_printf("       action: si 0 to publish the assigned result\n");
+                } else {
+                    detsim::ui::ui_printf("       action: si 0 to retry readiness\n");
+                }
+            } else {
+                detsim::ui::ui_printf("\n");
+                if (thread.alive) runnable.push_back({process, slot});
+            }
+        }
+    }
+    detsim::ui::ui_printf("Pending syscalls: %d\n", pending_count);
+    if (!runnable.empty()) {
+        detsim::ui::ui_printf("Runnable actors:");
+        for (const auto &[process, slot] : runnable)
+            detsim::ui::ui_printf(" %d:%zu", process, slot);
+        detsim::ui::ui_printf("\n");
+    } else if (pending_count) {
+        detsim::ui::ui_printf(
+            "No runnable actor; a deadline or peer I/O is still required.\n");
+    }
     return 0;
 }
 

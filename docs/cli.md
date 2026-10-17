@@ -1,125 +1,88 @@
-# 命令行接口 (CLI)
+# 命令行与 TUI
 
-DetSim 提供交互式命令行界面用于调试和状态探索。
+DetSim 有两种手动界面：默认的 ncurses TUI，以及 `-n` 的 readline/批处理界面。
+两者现在使用同一张命令表和同一个解析器；TUI 不再是另一套旧命令集。
 
 ## 启动
 
 ```sh
-./tracer -c tests/config.json
+./tracer -c config.json          # ncurses TUI
+./tracer -n -c config.json       # readline
+./tracer -n -c config.json -b commands   # 批处理，commands 每行一条
 ```
 
-在自动探索模式中按 `Ctrl-C` 会发送 SIGINT，停止探索并回到交互界面。
+TUI 在手动模式下默认选中 process 0；多进程用 `sw N` 切换。自动探索中按
+`Ctrl-C` 会发送 SIGINT，停止搜索并回到交互界面。
 
-## 基础命令
+TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/pending 摘要。
+`make NP=1 check-tui` 通过 PTY 验证最小终端、缩放以及 `help/pending/thread/q`；
+状态区在过小终端上会收缩，不再用负高度建窗。
 
-### 执行控制
+## 命令
 
 | 命令 | 描述 |
 |------|------|
-| `c` | 自动探索模式，从当前状态开始自动执行 |
-| `si` | 单步执行，当前进程向前执行一个系统调用 |
-| `sw N` | 切换到第 N 个进程 (0-indexed) |
-| `q` | 退出程序 |
+| `help [COMMAND]` | 列出命令或显示单条说明 |
+| `bfs [--quiet]` | 从当前状态做内建 BFS |
+| `dfs <depth> [--quiet]` | 从当前状态做内建迭代 DFS，depth 是剩余深度 |
+| `rand <depth> [--quiet]` | 随机执行 depth 步 |
+| `si [CHOICE\|timeout]` | 执行当前 actor 的一个 syscall；timeout 完成有限 deadline |
+| `sw N` | 切换进程焦点（0-indexed） |
+| `thread [N]` | 列出线程，或切换到线程 N |
+| `pending [PROCESS]` | 列出所有阻塞/可完成 syscall、原因、deadline 和 runnable actor |
+| `load HASH` | 按 hash 前缀加载保存状态 |
+| `info` / `info current` | 系统调用历史 / 当前边的单行摘要 |
+| `info sock` | 当前模拟 socket |
+| `p EXPR` | 表达式求值 |
+| `x/[COUNT][FORMAT][SIZE] ADDR` | 读内存；支持 x,d,u,o 和 b,h,w,g |
+| `bt` / `frame N` / `locals` | DWARF 栈、栈帧和局部变量 |
+| `ls` / `stat PATTERN` / `hexdump PATH` | 保存的文件系统视图 |
+| `batch FILE` | 从文件执行命令 |
+| `q` | 退出 |
 
-### 状态管理
+`diff` 目前只是占位，会明确打印 not implemented；不要参考历史文档里的 diff
+选项把它当成已实现功能。
 
-| 命令 | 描述 |
-|------|------|
-| `info` | 显示当前状态信息，包括系统调用历史 |
-| `load HASH` | 加载指定 HASH 前缀的全局状态 |
-| `diff [options] HASH1 HASH2` | 比较两个全局状态的差异 |
+## 阻塞 syscall 的行为
 
-**diff 命令选项**:
-- `-b, --brief`: 仅显示概览，跳过详细差异
-- `-m, --memory-only`: 仅比较内存内容
-- `--max-diff=N`: 每部分最多显示 N 个差异 (默认 10)
+阻塞调用不会在执行 `si` 时推进用户代码。actor 进入 pending：
 
-**diff 输出示例**:
+- `Waiting`：没有可完成的返回值，自己的 `si` 会失败并保留源状态；
+- `Retry`：I/O 条件可能已变化，下一次 `si` 重新检查；
+- `Ready`：已经有结果，下一次 `si 0` 只发布结果，不执行后续用户指令。
+
+`pending` 会显示 `futex(...) reason=futex phase=waiting`、deadline，并给出下一步：
+
 ```
-(ptmc) diff 1f3f 3238
-
-=== State Diff: 1f3f3246 vs 323803d5 ===
-
-[Overview]
-  System state hash: 1f3f3246 != 323803d5 ✗
-  Process count: 2
-  Process 0: ts_hash f60152ec a15d5492, exited=✗/running running
-  Process 1: ts_hash e93e60aa 93655747, exited=✗/running running
-
-  [Process 0]
-    ts_hash: 8c38ae4b != de260c5c
-    pid: 1308513 != 1308577
-    brk: 0x27c0e000 != 0x26231000
-  [Process 0 - Registers]
-    rax    0x0000000000000009   0x0000000000000001
-    rbx    0x00007ab79427e128   0x00007ab79427e000
-    ...
-```
-
-## 调试命令
-
-### 表达式求值
-
-| 命令 | 描述 |
-|------|------|
-| `p EXPRESSION` | 计算并打印表达式值 |
-
-表达式支持完整的 C 语法，详见 [表达式求值文档](expr.md)。
-
-**示例**:
-```
-(ptmc) p g_int
-g_int = 42
-
-(ptmc) p g_basic_ptr->x
-g_basic_ptr->x = 100
-
-(ptmc) p ((point*)g_generic_ptr)->x
-((point*)g_generic_ptr)->x = 10
-
-(ptmc) p tracee1(g_container.num_rects)
-tracee1(g_container.num_rects) = 2
+(ptmc) pending
+Pending syscalls:
+Process 0 (pid=3540325) [selected]:
+* [0] TID 1 state=waiting (main) futex(0x40405c, 0x80, 0x0, 0x0, 0x0, 0x0) reason=futex phase=waiting
+       action: another actor must wake/complete this wait; use 'thread N' to switch
+  [1] TID 2 state=runnable
+Pending syscalls: 1
+Runnable actors: 0:1
 ```
 
-### 内存检查
+阻塞期间**可以执行其他 actor**：`thread N` 切到 runnable 线程后 `si`；waker、
+peer read/write/close 或 `si timeout` 使等待者变 Ready，再切回并 `si 0`。
+如果所有线程都在 Waiting 且没有 deadline/peer，`pending` 会明确显示没有
+runnable actor，这就是死锁/等待外部输入状态。
 
-| 命令 | 描述 |
-|------|------|
-| `x ADDR` | 打印指定内存地址的内容 (16字节) |
-| `hexdump PATH` | 以十六进制格式打印文件内容 |
+有限 deadline 的完成只由显式 `si timeout` 触发：它把该进程的模型时钟推进到
+deadline 并完成 pending，不自动推进时间，也不执行后续 guest 指令。无 deadline
+的 futex 只能由另一个 actor 的 wake 完成。
 
-### 调用栈
+原生 futex 验证示例（`tests/native_search_actors.c` 的 `w` 模式）：
 
-| 命令 | 描述 |
-|------|------|
-| `bt` | 打印当前进程的调用栈 (backtrace) |
-| `frame N` | 切换到第 N 个栈帧 |
-| `locals` | 显示当前帧的局部变量 |
-
-**bt 输出示例**:
 ```
-(ptmc) bt
-#0  0x0000000000401176 in main () at test.c:10
-#1  0x00007ffff7a29d90 in __libc_start_main () from /lib/x86_64-linux-gnu/libc.so.6
-#2  0x000000000040105e in _start ()
+si 0                      # main: futex WAIT <pending:waiting>
+thread 1; si 0            # worker: nanosleep <pending:waiting deadline=...>
+si timeout                # worker sleep 到期
+si 0                      # worker write B
+si 0                      # worker futex WAKE
+thread 0; si 0            # main futex WAIT 返回，执行继续
 ```
 
-## 文件系统
-
-| 命令 | 描述 |
-|------|------|
-| `ls` | 列出当前进程文件系统中的文件 |
-| `stat PATTERN` | 显示匹配模式的文件状态信息 |
-
-## 批处理
-
-| 命令 | 描述 |
-|------|------|
-| `batch FILE` | 从文件批量读取命令 |
-
-**示例**:
-```
-(ptmc) batch commands.txt
-```
-
-其中 `commands.txt` 包含每行一个命令。
+`make NP=1 check-tui` 覆盖 TUI 命令/缩放；`tests/tracer_scenarios.py` 的
+pending listing 测试覆盖 `thread`/`pending` 和 `si timeout`。

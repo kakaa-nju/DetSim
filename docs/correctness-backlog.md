@@ -1300,3 +1300,50 @@ workload (config, target/plugin hashes, prefix) run against archived and current
 binaries, with only `search_metrics` compared. Same-case A/B with iteration23 NP3
 already shows no 500→67 step: 42 states/83.6 full and 42/96.5 pages, versus the
 current 49 states/67-88 full and 49/113.6 pages.
+
+### TUI/CLI command parity and blocking display (2026-10-17)
+
+The ncurses TUI had a second stale command table in `monitor.cpp`; new commands
+such as `pending` existed only in `commands.cpp`, while readline/batch used the
+new table. Both manual paths now call `execute_command_line`/`find_command`, so
+TUI help, argument parsing and commands match the CLI. Manual UI startup selects
+process 0 so `thread`/`si` work before an explicit `sw 0`.
+
+TUI crash risks were reproduced at a 10x40 PTY: the 11-row status area produced a
+negative content height and a zero/null ncurses window. Init and resize now clamp
+the effective status/content heights, reject unusable dimensions, check
+`newwin`/`wresize`/`mvwin`, guard zero-width rendering, disable mouse reporting on
+shutdown, and serialize public UI entry points against shutdown. The status bar
+now lists real commands and a live runnable/waiting/ready/retry count.
+
+New CLI surface:
+
+- `pending [PROCESS]` lists each logical thread, its pending syscall/arguments,
+  reason/phase, deadline/result, the next legal action, and all runnable actors.
+- `thread` includes the pending call, reason, phase and deadline instead of only
+  `state=waiting`.
+- A blocked `si` now points to `pending`, `thread N` and `si timeout` instead of
+  only saying "Cannot step".
+
+Verified blocking behavior with native fixtures:
+
+- futex WAIT: the waiting actor's `si` returns blocked and preserves the exact
+  saved state; `pending` shows `reason=futex` and a runnable peer. Running the
+  peer's nanosleep (`si timeout`), write and futex WAKE makes the waiter Ready;
+  `si 0` then completes the original futex call. New full/pages regression:
+  `test_futex_wait_blocks_actor_but_other_thread_can_run`.
+- pipe read: the reader enters `read(...) reason=io phase=waiting`; the peer
+  thread remains runnable, writes one byte, and the reader's next `si 0` returns
+  the byte. A later pthread-join futex is again visible in `pending`.
+- oversized pipe write: explicitly fails with "Blocking pipe writes requiring
+  partial progress are unsupported"; it is not reported as a pending wait. Fits-in-
+  capacity writes remain synchronous. There is no `wake` command; a peer actor or
+  explicit `si timeout` is still required.
+
+Evidence: three PTY TUI tests (`make NP=1 check-tui`) cover 24x80, 10x40, resize
+to 8x20, `help/pending/thread/q` and clean exit; 33 native scenarios (including
+the new futex UX test and the extended pending listing); 28 native actor rows;
+`make check`; and the production NP1 build. The TUI test checks safety/command
+parity, not colors or layout. `diff` remains a placeholder. Automatic time
+advance, wake injection, blocking vector/partial pipe writes, and a live per-
+thread TUI panel beyond the summary line remain open.

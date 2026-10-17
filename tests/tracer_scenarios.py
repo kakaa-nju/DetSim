@@ -234,10 +234,20 @@ int main(void) {
             self.assertEqual(len(edges), 1)
             predecessor, successor = edges[0]
             self.assertIn("state=waiting", send("thread"))
+            self.assertIn("nanosleep", send("thread"))
+            pending_view = send("pending")
+            self.assertIn("Pending syscalls: 1", pending_view)
+            self.assertIn("nanosleep", pending_view)
+            self.assertIn("reason=timer", pending_view)
+            self.assertIn("deadline=", pending_view)
+            self.assertIn("action: si timeout", pending_view)
+            blocked = send("si")
+            self.assertIn("blocked (pending syscall)", blocked)
             self.assertEqual(send("info current"), history)
             completed = send("si timeout")
             self.assertIn("Timeout completed.", completed)
             self.assertNotIn("<pending:", completed)
+            self.assertNotIn("nanosleep", send("pending"))
             self.assertIn("after_sleep = 0", send("p after_sleep"))
             timed_history = send("info current")
             self.assertIn("(timeout)", timed_history)
@@ -266,6 +276,56 @@ int main(void) {
             with self.subTest(backend=backend):
                 code, output = self.run_tracer(scenario, name="pending_list_" + backend,
                     tracee_args=(), extra_env={"DETSIM_SNAPSHOT_BACKEND": backend})
+                self.assertEqual(code, 0, output)
+
+    def test_futex_wait_blocks_actor_but_other_thread_can_run(self):
+        source = ROOT / "tests/native_search_actors.c"
+        subprocess.run(
+            shlex.split(os.environ.get("CC", "/usr/bin/gcc"))
+            + ["-std=gnu11", "-O0", "-g", "-gdwarf-4", "-fno-pie", "-no-pie",
+               "-Wall", "-Wextra", "-Werror", str(source),
+               "-o", str(self.root / "probe")], check=True)
+
+        def scenario(send):
+            send("sw 0")
+            for _ in range(40):
+                if re.search(r"\[1\] TID 2 state=runnable", send("thread")):
+                    break
+                send("si 0")
+            else:
+                self.fail("worker clone did not publish")
+
+            send("thread 0")
+            self.assertIn("<pending:waiting>", send("si 0"))
+            self.assertIn("reason=futex", send("pending"))
+            self.assertIn("Runnable actors:", send("pending"))
+            before = send("info current")
+            blocked = send("si 0")
+            self.assertIn("blocked (pending syscall)", blocked)
+            self.assertIn("'pending'", blocked)
+            self.assertEqual(send("info current"), before,
+                             "blocked actor advanced its saved state")
+
+            send("thread 1")
+            self.assertIn("<pending:waiting>", send("si 0"))
+            worker_pending = send("pending")
+            self.assertIn("reason=timer", worker_pending)
+            self.assertIn("action: si timeout", worker_pending)
+            self.assertIn("Timeout completed.", send("si timeout"))
+            self.assertIn("write(", send("si 0"))
+            self.assertIn("futex(", send("si 0"))
+            send("si 0")  # worker exit
+            send("thread 0")
+            self.assertIn("= 0", send("si 0"),
+                          "worker wake did not complete the futex wait")
+            self.assertIn("word = 1", send("p word"))
+
+        for backend in ("full", "pages"):
+            with self.subTest(backend=backend):
+                code, output = self.run_tracer(
+                    scenario, name="futex_actor_" + backend, tracee_args=("w",),
+                    runtime_profile={"initial_time_us": 1000000},
+                    extra_env={"DETSIM_SNAPSHOT_BACKEND": backend})
                 self.assertEqual(code, 0, output)
 
     def test_nonmain_timeout_preserves_actor_and_blocked_main_on_replay(self):

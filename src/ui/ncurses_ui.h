@@ -222,9 +222,11 @@ class NCursesUI {
 private:
     ContentWindow* content_win_ = nullptr;
     StatusWindow* status_win_ = nullptr;
+    int status_height_requested_ = 8;
     int status_height_ = 8;
     bool running_ = false;
     bool initialized_ = false;
+    std::mutex lifecycle_mutex_;
     
     // 信号处理
     static std::atomic<bool> resize_pending_;

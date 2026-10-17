@@ -43,6 +43,7 @@ int cmd_q(char *args);
 int cmd_si(char *args);
 int cmd_sw(char *args);
 int cmd_thread(char *args);
+int cmd_pending(char *args);
 int cmd_load(char *args);
 int cmd_info(char *args);
 int cmd_batch(char *args);

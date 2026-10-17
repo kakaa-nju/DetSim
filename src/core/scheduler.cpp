@@ -97,8 +97,10 @@ int load_exec_store(TransitionAction action)
   if (result.code == CKPT_DISCARD)
   {
     int thread_idx = ptmc_state.current_thread_idx[index];
-    detsim::ui::ui_printf("Thread %d is blocked (pending syscall). Cannot step.\n",
-                          thread_idx);
+    detsim::ui::ui_printf(
+        "Thread %d is blocked (pending syscall). Use 'pending' for details, "
+        "'thread N' to pick another actor, or 'si timeout' for a finite deadline.\n",
+        thread_idx);
     // Restore to the original state before this si command
     // A blocked actor did not execute; retain the exact source state.
     ptmc_state.running_state = original_state;
@@ -434,6 +436,33 @@ static void update_ui_status(detsim::ui::NCursesUI *ui, const struct StoreStats 
   /* Line 5: State stats */
   snprintf(buf, sizeof(buf), "Error Bound: %d", ptmc_state.error_bound);
   ui->set_status_line(5, buf);
+
+  /* Line 6: Logical thread/pending summary; details are in the `pending` command. */
+  int runnable = 0, waiting = 0, ready = 0, retry = 0;
+  for (int process = 0; process < NP; ++process) {
+    if (DISDEAD(ptmc_state.status[process])) continue;
+    const auto &threads = ptmc_state.running_state.child[process].threads;
+    if (threads.empty()) {
+      ++runnable;
+      continue;
+    }
+    for (const auto &thread : threads) {
+      if (!thread.alive) continue;
+      if (!thread.pending_syscall) {
+        ++runnable;
+      } else if (thread.pending_syscall->phase == PendingPhase::Waiting) {
+        ++waiting;
+      } else if (thread.pending_syscall->phase == PendingPhase::Ready) {
+        ++ready;
+      } else {
+        ++retry;
+      }
+    }
+  }
+  snprintf(buf, sizeof(buf),
+           "Threads: runnable=%d waiting=%d ready=%d retry=%d | 'pending' for details",
+           runnable, waiting, ready, retry);
+  ui->set_status_line(6, buf);
 }
 
 /* Helper: Print text status to console */

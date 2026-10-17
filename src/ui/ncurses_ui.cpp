@@ -61,18 +61,22 @@ Window::~Window() {
 }
 
 void Window::init() {
+    if (win_ || height_ < 1 || width_ < 1) return;
     win_ = newwin(height_, width_, start_y_, start_x_);
+    if (!win_) return;
     leaveok(win_, TRUE);
 }
 
 void Window::resize(int height, int width, int start_y, int start_x) {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
+    if (height < 1 || width < 1) return;
+    if (win_) {
+        if (wresize(win_, height, width) == ERR) return;
+        if (mvwin(win_, start_y, start_x) == ERR) return;
+    }
     height_ = height; width_ = width;
     start_y_ = start_y; start_x_ = start_x;
-    if (win_) {
-        wresize(win_, height_, width_);
-        mvwin(win_, start_y_, start_x_);
-    }
+    if (!win_) init();
 }
 
 void Window::print(const std::string& text) {
@@ -111,6 +115,7 @@ ContentWindow::ContentWindow(int height, int width, int start_y, int start_x,
 
 void ContentWindow::init() {
     Window::init();
+    if (!win_) return;
     scrollok(win_, TRUE);
     idlok(win_, TRUE);
     keypad(win_, TRUE);
@@ -126,10 +131,11 @@ void ContentWindow::resize(int height, int width, int start_y, int start_x) {
 }
 
 int ContentWindow::window_row_to_buffer_line(int win_row, int* out_col_offset) {
-    int content_height = height_ - 1;
-    size_t total_lines = buffer_.size();
-    
     if (out_col_offset) *out_col_offset = 0;
+    if (!win_ || width_ < 1 || height_ < 1) return -1;
+
+    int content_height = std::max(0, height_ - 1);
+    size_t total_lines = buffer_.size();
     
     if (total_lines == 0) return -1;
     
@@ -223,11 +229,11 @@ std::string ContentWindow::extract_selected_text() {
 }
 
 void ContentWindow::render_buffer() {
-    if (!win_) return;
+    if (!win_ || width_ < 1 || height_ < 1) return;
     
     werase(win_);
     
-    int content_height = height_ - 1;
+    int content_height = std::max(0, height_ - 1);
     size_t total_lines = buffer_.size();
     
     // 计算软换行后的总行数
@@ -306,7 +312,8 @@ void ContentWindow::render_buffer() {
     }
     
     // 输入行 - 根据模式显示不同的提示符
-    std::string display_input = current_input_.substr(0, width_ - 4);
+    const size_t input_limit = width_ > 4 ? static_cast<size_t>(width_ - 4) : 1;
+    std::string display_input = current_input_.substr(0, input_limit);
     int cursor_x = 2;  // 默认：普通命令模式 "> " 占 2 字符
     
     if (in_prompt_mode_) {
@@ -669,7 +676,7 @@ bool ContentWindow::handle_input(int ch) {
         input_cursor_pos_ = current_input_.length();
         render_buffer();
     } else if (ch >= 32 && ch < 127) {
-        if (current_input_.length() < (size_t)(width_ - 4)) {
+        if (current_input_.length() < (size_t)(width_ > 4 ? width_ - 4 : 1)) {
             current_input_.insert(input_cursor_pos_, 1, (char)ch);
             input_cursor_pos_++;
             if (history_index_ != -1) {
@@ -771,6 +778,7 @@ StatusWindow::StatusWindow(int height, int width, int start_y, int start_x)
 
 void StatusWindow::init() {
     Window::init();
+    if (!win_) return;
     scrollok(win_, FALSE);
 }
 
@@ -806,10 +814,10 @@ void StatusWindow::clear_line(int row) {
 void StatusWindow::refresh_display() {
     {
         std::lock_guard<std::recursive_mutex> lock(mutex_);
-        if (!win_) return;
+        if (!win_ || height_ < 1 || width_ < 1) return;
         
         werase(win_);
-        box(win_, 0, 0);
+        if (height_ > 1 && width_ > 1) box(win_, 0, 0);
         
         for (const auto& line : status_lines_) {
             if (line.first >= 0 && line.first < height_) {
@@ -829,13 +837,15 @@ void StatusWindow::refresh_display() {
 // ============== NCursesUI ==============
 
 NCursesUI::NCursesUI(int status_height) 
-    : status_height_(status_height), running_(false), initialized_(false) {}
+    : status_height_requested_(status_height), status_height_(status_height),
+      running_(false), initialized_(false) {}
 
 NCursesUI::~NCursesUI() {
     shutdown();
 }
 
 bool NCursesUI::init() {
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
     if (initialized_) return true;
     
     initscr();
@@ -852,7 +862,14 @@ bool NCursesUI::init() {
     
     int rows, cols;
     getmaxyx(stdscr, rows, cols);
-    
+    if (rows < 3 || cols < 2) {
+        endwin();
+        return false;
+    }
+
+    const int min_content = rows >= 4 ? 3 : 1;
+    status_height_ = std::min(status_height_requested_, rows - min_content);
+    if (status_height_ < 1) status_height_ = 1;
     int content_height = rows - status_height_;
     
     content_win_ = new ContentWindow(content_height, cols, 0, 0, 10000);
@@ -862,6 +879,14 @@ bool NCursesUI::init() {
     
     content_win_->init();
     status_win_->init();
+    if (!content_win_->get_window() || !status_win_->get_window()) {
+        delete content_win_;
+        delete status_win_;
+        content_win_ = nullptr;
+        status_win_ = nullptr;
+        endwin();
+        return false;
+    }
     
     // 启用扩展鼠标事件
     printf("\033[?1002h");
@@ -876,15 +901,19 @@ bool NCursesUI::init() {
 }
 
 void NCursesUI::shutdown() {
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
     if (!initialized_) return;
     
+    initialized_ = false;
+    printf("\033[?1002l\033[?1000l");
+    fflush(stdout);
+
     delete content_win_;
     delete status_win_;
     content_win_ = nullptr;
     status_win_ = nullptr;
     
     endwin();
-    initialized_ = false;
 }
 
 void NCursesUI::on_resize_signal(int sig) {
@@ -898,6 +927,10 @@ bool NCursesUI::check_resize() {
 void NCursesUI::handle_resize() {
     if (!initialized_) return;
     
+    int rows, cols;
+    getmaxyx(stdscr, rows, cols);
+    if (rows < 3 || cols < 2) return;
+
     resize_pending_.store(false);
     
     endwin();
@@ -910,21 +943,21 @@ void NCursesUI::handle_resize() {
     printf("\033[?1002h");
     fflush(stdout);
     
-    int rows, cols;
-    getmaxyx(stdscr, rows, cols);
-    
+    const int min_content = rows >= 4 ? 3 : 1;
+    status_height_ = std::min(status_height_requested_, rows - min_content);
+    if (status_height_ < 1) status_height_ = 1;
     int content_height = rows - status_height_;
-    if (content_height < 5) content_height = 5;
+    if (content_height < 1) content_height = 1;
     
-    content_win_->resize(content_height, cols, 0, 0);
-    status_win_->resize(status_height_, cols, content_height, 0);
+    if (content_win_) content_win_->resize(content_height, cols, 0, 0);
+    if (status_win_) status_win_->resize(status_height_, cols, content_height, 0);
     
-    content_win_->refresh();
-    status_win_->refresh_display();
+    if (content_win_) content_win_->refresh();
+    if (status_win_) status_win_->refresh_display();
 }
 
 void NCursesUI::run() {
-    if (!initialized_) return;
+    if (!initialized_ || !content_win_ || !content_win_->get_window()) return;
     
     running_ = true;
     g_ui_should_exit = false;  // 重置退出标志
@@ -939,6 +972,7 @@ void NCursesUI::run() {
         if (check_resize()) {
             handle_resize();
         }
+        if (!content_win_ || !content_win_->get_window()) break;
         
         // 使用非阻塞读取，以便检查退出标志
         wtimeout(content_win_->get_window(), 100);  // 100ms 超时
@@ -965,11 +999,12 @@ void NCursesUI::run() {
 }
 
 bool NCursesUI::poll_input(int timeout_ms) {
-    if (!initialized_) return false;
+    if (!initialized_ || !content_win_ || !content_win_->get_window()) return false;
     
     if (check_resize()) {
         handle_resize();
     }
+    if (!content_win_ || !content_win_->get_window()) return false;
     
     // 设置超时
     wtimeout(content_win_->get_window(), timeout_ms);
@@ -987,18 +1022,22 @@ bool NCursesUI::poll_input(int timeout_ms) {
 }
 
 void NCursesUI::print(const std::string& text) {
-    if (content_win_) content_win_->print(text);
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+    if (!initialized_ || !content_win_) return;
+    content_win_->print(text);
 }
 
 void NCursesUI::add_line(const std::string& line) {
-    if (content_win_) content_win_->add_line(line);
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+    if (!initialized_ || !content_win_) return;
+    content_win_->add_line(line);
 }
 
 void NCursesUI::set_status_line(int row, const std::string& text) {
-    if (status_win_) {
-        status_win_->set_line(row, text);
-        status_win_->refresh_display();
-    }
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mutex_);
+    if (!initialized_ || !status_win_) return;
+    status_win_->set_line(row, text);
+    status_win_->refresh_display();
 }
 
 void NCursesUI::set_on_command(std::function<void(const std::string&)> callback) {
@@ -1238,7 +1277,7 @@ void ContentWindow::handle_prompt_input(int ch) {
     
     if (ch >= 32 && ch < 127) {
         // 可打印字符
-        if (current_input_.length() < (size_t)(width_ - 4)) {
+        if (current_input_.length() < (size_t)(width_ > 4 ? width_ - 4 : 1)) {
             current_input_.insert(input_cursor_pos_, 1, (char)ch);
             input_cursor_pos_++;
             render_buffer();

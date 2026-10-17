@@ -150,3 +150,5 @@
 !native_search_actors.mk
 !native_search_actors.cpp
 !example_layout_test.py
+
+!tui_smoke_test.py

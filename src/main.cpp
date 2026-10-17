@@ -95,7 +95,8 @@ static int run_tracer(int argc, char *argv[])
       ui.set_status_line(3, "Status: Ready");
       ui.set_status_line(4, "States: 0");
       ui.set_status_line(5, "Depth: 0");
-      ui.set_status_line(9, "Commands: c(ontinue), s(tep), b(ack), q(uit)");
+      ui.set_status_line(6, "Pending: use 'pending' for blocked syscalls");
+      ui.set_status_line(9, "Commands: help | si [choice|timeout] | sw N | thread [N] | pending | q");
     }
   }
 

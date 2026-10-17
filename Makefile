@@ -3,7 +3,7 @@
 .DELETE_ON_ERROR:
 .PHONY: all debug release tracer test check check-build-contracts help FORCE \
         wc clean clear benchmark tools pgo-generate pgo-use pgo-clean \
-        check-integration check-scenarios check-redis
+        check-integration check-scenarios check-tui check-redis
 
 ifneq ($(filter benchmark-redisraft,$(MAKECMDGOALS)),)
 NP ?= 3
@@ -14,7 +14,7 @@ NP ?= 2
 endif
 
 # Integration fixtures use one node unless explicitly overridden.
-ifneq ($(filter check-integration check-dwarf check-elf check-scenarios check-cases audit-runtimes check-xstate check-exec check-state-io check-mappings check-futex-snapshot check-futex check-thread-control check-thread-identity check-thread-carrier check-thread-lifecycle check-thread-tid check-thread-signal-mask check-thread-robust check-pending-syscall check-storage check-store-cache check-store-packed check-store-metadata check-store-tools benchmark-storage check-soft-dirty check-page-snapshot check-vfs-content check-thread-altstack check-dfs-residency check-history-presentation,$(MAKECMDGOALS)),)
+ifneq ($(filter check-integration check-dwarf check-elf check-scenarios check-tui check-cases audit-runtimes check-xstate check-exec check-state-io check-mappings check-futex-snapshot check-futex check-thread-control check-thread-identity check-thread-carrier check-thread-lifecycle check-thread-tid check-thread-signal-mask check-thread-robust check-pending-syscall check-storage check-store-cache check-store-packed check-store-metadata check-store-tools benchmark-storage check-soft-dirty check-page-snapshot check-vfs-content check-thread-altstack check-dfs-residency check-history-presentation,$(MAKECMDGOALS)),)
 NP ?= 1
 endif
 
@@ -158,6 +158,10 @@ audit-runtimes: tracer
 check-scenarios: tracer
 	@test "$(NP)" = 1 || { echo 'check-scenarios requires NP=1' >&2; exit 1; }
 	CC="$(CC)" DETSIM_TRACER="$(abspath tracer)" python3 tests/tracer_scenarios.py
+
+check-tui: tracer
+	@test "$(NP)" = 1 || { echo 'check-tui requires NP=1' >&2; exit 1; }
+	python3 tests/tui_smoke_test.py --tracer "$(abspath tracer)"
 
 check-redis: tracer
 	@test "$(NP)" = 2 || { echo 'check-redis requires NP=2' >&2; exit 1; }
