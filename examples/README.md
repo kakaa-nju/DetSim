@@ -7,7 +7,9 @@
 实际状态探索优先使用内建 CLI BFS/DFS/RAND。案例 `run.py` 只负责准备输入、
 生成配置、启动 tracer、观察保存状态和重放验收；手工 `si` 只用于确定性场景
 构造或明确的 unsupported 边界，不能替代内建探索覆盖。案例内已有的 Python
-beam/sibling/layer 搜索是待移除的债务，不得继续扩展。
+beam/sibling/layer 搜索是待移除的债务，不得继续扩展。性能记录只取前缀之后
+内建自动搜索的报告（`search_metrics`），不把 native 构建、手工前缀、重放、
+CLI/驱动开销或整案例 wall time 算作搜索性能。
 
 | 案例 | 目标与驱动 | 插件、配置与入口 |
 | --- | --- | --- |

@@ -1283,3 +1283,11 @@ Acceptance for retiring a Python search strategy:
 New cases must not add a Python search loop. If a case cannot yet use built-in
 exploration, record the concrete unsupported boundary and removal target here
 before adding any workaround.
+
+Performance record rule: a case performance record uses only the built-in
+automatic search report after the deterministic prefix. `search_metrics` exposes
+engine/completion, searched/new/unique, elapsed_s/states_per_s, save/restore
+times, state-store counters and page capture/restore stats. Native build, manual
+setup, replay, CLI/driver polling and whole-case wall time are operational context
+and must not be mixed into search throughput. End-to-end timings may be reported
+for cost awareness but not as a before/after search optimization result.

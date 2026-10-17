@@ -41,6 +41,11 @@ Use source call sites and repeatable tests to settle contradictions.
   beam or layer search. Deterministic manual stepping is scenario setup or an
   explicit unsupported boundary, never a substitute for built-in exploration
   coverage; record the gap and removal target in the backlog.
+- Performance records for case runs use only the built-in automatic search phase
+  after the deterministic prefix (the tracer's search report / `search_metrics`).
+  Exclude native build, manual setup, replay, CLI/driver polling and whole-case
+  wall time; label any end-to-end timing as operational context, not search
+  performance.
 - For cleanup, write the deletion/simplification plan before editing; lock behavior
   with regression tests first. Avoid bundling semantic fixes with restructuring.
 - Prefer removal and existing utilities. No new dependencies without a request.

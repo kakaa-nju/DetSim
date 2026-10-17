@@ -242,6 +242,7 @@ def model_case(tracer, binary, checker, choose, directory, backend, variant, tim
             reply=session.send("dfs " + str(depth) + " --quiet")
             row["search_seed_epoch_candidates"] = list(range(seed_before,int(time.time())+1))
             (directory / "search.log").write_text(reply)
+            row["search_metrics"] = common.search_metrics(reply)
             common.require("Reach illegal state" in reply or "Stopped for illegal state" in reply,
                            "bounded mutant search did not find a safety violation: " + reply[-1500:])
             common.require(expected_mutant_violation(reply, inspect(session), received(1)),
@@ -314,6 +315,7 @@ def model_case(tracer, binary, checker, choose, directory, backend, variant, tim
             search=session.send("dfs " + str(depth) + " --quiet")
             row["search_seed_epoch_candidates"] = list(range(seed_before,int(time.time())+1))
             (directory / "search.log").write_text(search)
+            row["search_metrics"] = common.search_metrics(search)
             (directory / "search-history.log").write_text(session.send("info"))
             common.require("illegal state" not in search,
                            "healthy bounded suffix failed: " + search[-1500:])

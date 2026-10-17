@@ -738,7 +738,10 @@ edges, but they must not implement a parallel sibling/beam/layer search. Manual
 stepping is reserved for deterministic scenario setup (for example a controlled
 Raft election prefix) or a documented unsupported boundary; it is not built-in
 exploration coverage. Remaining case-side search strategies are recorded as debt in
-the backlog and must not grow.
+the backlog and must not grow. Performance records use only the built-in automatic
+search report after the deterministic prefix (`search_metrics`); native build,
+manual setup, replay, CLI/driver polling and whole-case wall time are operational
+context, not search performance.
 Feature additions
 should name a failing case, its expected native behavior and the property or
 admission boundary they enable. Healthy/mutant pairs and counterexample replay

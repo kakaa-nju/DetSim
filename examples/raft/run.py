@@ -205,6 +205,7 @@ def model_case(tracer, binary, checker, choose, directory, backend, variant, tim
             # Search actual syscall successors; B's queued denied response is choice1.
             reply=session.send("dfs " + str(depth) + " --quiet")
             (directory / "search.log").write_text(reply)
+            row["search_metrics"] = common.search_metrics(reply)
             common.require("Reach illegal state" in reply or "Stopped for illegal state" in reply,
                            "bounded mutant search did not find a safety violation: " + reply[-1500:])
             common.require(expected_mutant_violation(reply, inspect(session), received(1)),
@@ -269,6 +270,7 @@ def model_case(tracer, binary, checker, choose, directory, backend, variant, tim
             # Finite search is separate from the fixed successful business schedule.
             search=session.send("dfs " + str(depth) + " --quiet")
             (directory / "search.log").write_text(search)
+            row["search_metrics"] = common.search_metrics(search)
             common.require("illegal state" not in search,
                            "healthy bounded suffix failed: " + search[-1500:])
             completion = common.search_completion(search)

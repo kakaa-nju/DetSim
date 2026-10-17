@@ -158,6 +158,52 @@ def search_completion(reply):
     return None
 
 
+def search_metrics(reply):
+    """Automatic-search-only metrics parsed from the built-in CLI report.
+
+    The tracer report starts when the `dfs`/`bfs` command runs. Native builds,
+    manual scenario setup, replay and driver polling are outside this scope and
+    must not be mixed into a performance record.
+    """
+    result = {"engine": "builtin_cli", "completion": search_completion(reply)}
+    numbers = re.search(
+        r"(?:Complete explore all|Searched for) (\d+) sys_states"
+        r"(?: \(new: (\d+)\))?(?:, total unique: (\d+))?", reply)
+    if numbers:
+        result["searched"] = int(numbers[1])
+        if numbers[2] is not None:
+            result["new"] = int(numbers[2])
+        if numbers[3] is not None:
+            result["unique"] = int(numbers[3])
+    timing = re.search(r"Time elapsed: ([\d.]+)s, speed = ([\d.]+) states/s", reply)
+    if timing:
+        result["elapsed_s"] = float(timing[1])
+        result["states_per_s"] = float(timing[2])
+    for label, key in (("Total save time", "save_ms"),
+                       ("Total restore time", "restore_ms")):
+        match = re.search(label + r":\s+(\d+) ms \(([\d.]+)%\)", reply)
+        if match:
+            result[key] = int(match[1])
+            result[key + "_pct"] = float(match[2])
+    overhead = re.search(r"Save\+Restore overhead: ([\d.]+)%", reply)
+    if overhead:
+        result["save_restore_pct"] = float(overhead[1])
+    store = re.search(
+        r"StateStore: loads=(\d+) L1=(\d+) L2=(\d+) disk=(\d+) hit=([\d.]+)%.*?"
+        r"saves=(\d+) new=(\d+) dedup=([\d.]+)%", reply)
+    if store:
+        result["state_store"] = {
+            "loads": int(store[1]), "l1": int(store[2]), "l2": int(store[3]),
+            "disk": int(store[4]), "hit_pct": float(store[5]),
+            "saves": int(store[6]), "new": int(store[7]), "dedup_pct": float(store[8])}
+    for prefix, key in (("PAGE_CAPTURE", "page_capture"),
+                        ("PAGE_RESTORE", "page_restore")):
+        match = re.search(prefix + r" (\{[^\n]+\})", reply)
+        if match:
+            result[key] = json.loads(match[1])
+    return result
+
+
 def build_plugin(source, destination, cxx):
     result = command(cxx + ["-std=gnu++20", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror",
                            "-I" + str(ROOT / "src"), "-I" + str(ROOT / "third_party"), str(source), "-o", str(destination)], ROOT)
@@ -230,6 +276,7 @@ def search(tracer, argv, plugin, directory, backend, timeout, *, bug=False, dept
         row["search"] = "started"
         reply = session.send("bfs --quiet" if depth is None else f"dfs {depth} --quiet")
         require("DetSim state/execution error:" not in reply, reply[-4000:])
+        row["search_metrics"] = search_metrics(reply)
         numbers = re.search(r"(?:all |Searched for )(\d+) sys_states(?: \(new: (\d+)\))?", reply)
         if numbers:
             row["visited"] = int(numbers[1])

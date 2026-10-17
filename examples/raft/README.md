@@ -17,6 +17,8 @@ addresses, startup profile, choice configuration and bounded search/replay polic
 the exact generated configuration is `<session>/config.json`, with reports and
 hashes beneath `--output` (default `build/raft-cases`). The 131-step controlled
 prefix is deterministic scenario setup, not search; the suffix exploration is the
-built-in CLI `dfs <depth> --quiet`. Do not add a Python sibling/beam search loop to
-this case. Native-only success is not model-check success; bounded results do not
-establish exhaustive interleavings.
+built-in CLI `dfs <depth> --quiet`. Performance records use `search_metrics` from
+that built-in search report; native build, prefix, replay and driver overhead are
+excluded. Do not add a Python sibling/beam search loop to this case. Native-only
+success is not model-check success; bounded results do not establish exhaustive
+interleavings.

@@ -327,6 +327,33 @@ class CompletedSearchProtocolTests(unittest.TestCase):
                 self.assertEqual(runner.search_completion("prefix " + marker + "\n"), expected)
         self.assertIsNone(runner.search_completion("Stopped for illegal state. Searched for 7 sys_states"))
 
+    def test_search_metrics_parse_automatic_mode_report_only(self):
+        reply = (
+            "Manual prefix is not part of this report.\n"
+            "Model budget exhausted; Searched for 49 sys_states (new: 27), total unique: 27\n"
+            "Time elapsed: 0.767792s, speed = 63.819349 states/s\n"
+            "StateStore: loads=992 L1=984 L2=8 disk=0 hit=100.0% saves=210 new=26 dedup=87.6% reference=131\n"
+            "  Total save time:    597 ms (77.8%)\n"
+            "  Total restore time: 136 ms (17.8%)\n"
+            "  Save+Restore overhead: 95.6%\n"
+            "PAGE_RESTORE {\"read_bytes\":193683456,\"write_bytes\":491520}\n")
+        metrics = runner.search_metrics(reply)
+        self.assertEqual(metrics["engine"], "builtin_cli")
+        self.assertEqual(metrics["completion"], "model_budget")
+        self.assertEqual((metrics["searched"], metrics["new"], metrics["unique"]), (49, 27, 27))
+        self.assertAlmostEqual(metrics["elapsed_s"], 0.767792)
+        self.assertAlmostEqual(metrics["states_per_s"], 63.819349)
+        self.assertEqual((metrics["save_ms"], metrics["restore_ms"]), (597, 136))
+        self.assertEqual(metrics["save_restore_pct"], 95.6)
+        self.assertEqual(metrics["state_store"]["saves"], 210)
+        self.assertEqual(metrics["page_restore"]["read_bytes"], 193683456)
+
+        violation = runner.search_metrics("Stopped for illegal state. Searched for 17 sys_states (new: 15)\n"
+                                          "Time elapsed: 0.1s, speed = 10.0 states/s\n")
+        self.assertEqual((violation["searched"], violation["new"]), (17, 15))
+        self.assertNotIn("unique", violation)
+        self.assertEqual(runner.search_metrics("timeout\n"), {"engine": "builtin_cli", "completion": None})
+
     def test_depth_limit_without_receipt_stays_bounded_and_records_reason(self):
         self.search_reply = "Depth limit reached; Searched for 3 sys_states (new: 3), total unique: 2\n"
         result = self.execute()
