@@ -801,3 +801,66 @@ ASan/UBSan下完整运行、无诊断，普通`make NP=1 xxh_bench`运行exit0�
 忽略的`examples/cases`兼容路径和原不可变tracer；本轮没有重启、修改或验收它们，
 其结果继续单独记录。xxhash修复只针对离线microbenchmark，不构成存储或Redis
 性能claim。
+
+### 13.5 Raft案例效率实测（2026-10-17 19:35–19:40 CST）
+
+使用当前不可变NP3 tracer SHA256
+`0462c696106e2421ef8f4fb9a982be43d605086d33137ddb4392478800af6fa1`，
+默认`--depth 3`，对healthy/mutant × full/pages各跑3次完整矩阵取中位数。
+主机load average约2.7，三组旧24 module任务仍在运行，因此不是隔离性能实验；
+wall time包含native构建、131/33步受控前缀、搜索和三次重放，不能解释为纯DFS
+吞吐。
+
+| 行 | 结果 | searched/unique | 搜索耗时 | 搜索速度 | save/restore占比 |
+| --- | --- | ---: | ---: | ---: | ---: |
+| healthy full | pass, model_budget | 49 / 27 | 0.725s | 67.6 states/s | 77.8% / 17.8% |
+| healthy pages | pass, model_budget | 49 / 27 | 0.431s | 113.6 states/s | 68.8% / 26.7% |
+| mutant full | violation | 17（17–23） / 15 | 0.165s | 122.8 states/s | 未打印 |
+| mutant pages | violation | 23（17–23） / 19 | 0.126s | 168.0 states/s | 未打印 |
+
+完整4行矩阵wall time为8.75–9.40s（中位数8.81s），最大RSS 188–194MiB，
+约120% CPU。单独按行运行约4.38/3.58/2.80/2.55s，其中native构建约
+0.72–0.77s/变体；矩阵内搜索合计约1.45s（约16%），native构建约1.5s（约17%），
+其余约5.9s是受控前缀查询、重放和CLI/驱动开销。因此在这个小案例上，搜索本身
+很快，**端到端时间主要不是DFS，而是驱动控制和native构建**。
+
+搜索内部成本高度集中在状态保存/恢复：healthy full的save+restore约95.6%，
+pages约95.5%。full的healthy搜索有992次load、210次save、87.6% dedup；
+pages有52,680次page load、382次save、86.6% dedup，并读取约549MiB页面完成
+210次捕获、恢复约194MiB/47,286页比较。pages在depth3的搜索墙钟约为full的
+0.59倍，RSS也更低，但它做了大量页级读写；这不是无损加速，也没有跨负载外推。
+
+depth扫描（healthy full，单次）显示默认深度的“便宜”来自模型预算提前截断，
+不是状态空间小：
+
+| depth | 结果 | searched/unique | 搜索耗时 | 说明 |
+| ---: | --- | ---: | ---: | --- |
+| 3 | model_budget | 49 / 27 | 0.725s | 后缀初始预算1，结束0 |
+| 5 | model_budget | 387 / 107 | 5.06s | 约76.5 states/s |
+| 10 | timeout（非green） | ≥15,849 / 1,549 | 240s上限 | 最后样本depth≈140，约68.6 states/s，tracer被-9终止 |
+
+因此增大depth会把更多状态重新打开并沿环继续，搜索可撞上案例的240s会话上限；
+depth10结果不是完成、不是通过，也没有violation。旧visited规则在同一depth3
+下曾报告42/27并声称`Complete explore all`，当前为49/27并正确报告
+`model_budget`；unique相同，多出的7次是重新展开而非新状态。两者二进制和主机
+负载不同，只能作为书签成本的数量级参考，不是受控前后性能对比。
+
+### 13.6 violation发现证据
+
+mutant的注入是副本源码中的一处替换：
+`switch (r->vote_granted)` → `switch (RAFT_REQUESTVOTE_ERR_GRANTED)`。
+native reference同样观察到`leaders:2`并打印`NATIVE_EXPECTED_VIOLATION`；
+healthy reference是`leaders:1`/`NATIVE_OK`。因此这是原生程序确实出现的
+受控缺陷，不是模型凭空报告。
+
+模型在full/pages都：
+
+- 报出`willemt-raft.safety: property violation: multiple leaders in term 1`并停止；
+- 保存状态为node0/node1均为leader、term1，node2为follower、term1且voted_for0；
+- 观察到C→B的拒绝票回复`kind=2, from=2, to=1, reply.vote_granted=0`；
+- 从同一predecessor重放该边3次，successor哈希完全相同；
+- 在17–23个 searched状态、0.10–0.19s内找到，默认depth3即可。
+
+这证明案例能稳定发现这处**注入的**Raft安全违反并保存可重放反例；它不证明
+发现了未知的真实RedisRaft缺陷，也不等于完整module验收。未运行更深的mutant
+全矩阵；depth10的healthy超时属于有界压力测试的负面结果，单独记录。
