@@ -1356,7 +1356,7 @@ Verified blocking behavior with native fixtures:
   explicit `si timeout` is still required.
 
 Evidence: three PTY TUI tests (`make NP=1 check-tui`) cover 24x80, 10x40, resize
-to 8x20, `help/pending/inspect/thread/q` and clean exit; 35 native scenarios
+to 8x20, `help/pending/inspect/thread/q` and clean exit; 36 native scenarios
 (including the new futex UX test and the extended pending listing, which parses
 the inspect JSON and checks pending reason/registers); 28 native actor rows;
 `make check`; and the production NP1 build. The TUI test checks safety/command
@@ -1387,7 +1387,11 @@ it expands D frontier levels (default 1; actors plus discovered choices, capped 
 512), copies the store to per-worker directories, spawns fixed-layout workers with
 `posix_spawn`, and each worker `load --adopt`s assigned frontier states and runs
 the built-in `dfs` for the remaining depth. The NP=2 gate starts two workers on a depth-2 frontier
-(three branches) and checks adopted/search outputs plus the merged union. A worker
+(three branches) and checks adopted/search outputs plus the merged union. Worker
+success is now explicit: exit 0 alone is insufficient; the coordinator requires
+every assigned branch to emit `Loaded state` and rejects restore/adoption error
+lines. A multi-thread frontier (fresh single-thread workers cannot adopt it) is
+covered by an NP1 regression and reports `status=FAILED` for both workers. A worker
 that loads several frontier states also exposed a `cmd_load` bug: after
 `recover_running_state()` it overwrote the resolved state with the unbound loaded
 copy, so the second adoption failed with "Logical thread has no unique owned

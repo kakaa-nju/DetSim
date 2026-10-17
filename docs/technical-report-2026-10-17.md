@@ -917,7 +917,7 @@ peer write/futex WAKE 或显式 `si timeout` 使其 `Ready`，再 `si 0` 完成�
 仍不支持，`-m` 会明确拒绝。没有自动时间推进或 `wake` 命令；无 deadline
 的 futex 必须由另一个 actor 唤醒。
 
-证据：3项PTY TUI、35项native场景（含futex跨actor回归和inspect JSON解析）、
+证据：3项PTY TUI、36项native场景（含futex跨actor回归和inspect JSON解析）、
 28行native actor、27项session测试、`make check`和NP1生产构建。
 
 
@@ -946,7 +946,10 @@ worker；每个 worker `load --adopt` 分到的 frontier 状态并跑内建 `dfs
 删除；NP1 load/replay 仍通过。
 
 worker 退出后，coordinator 读取每个 worker 的 `SysStateStore` visited hash，并解析
-worker `tree` 输出的 `EDGE` 行，打印 post-hoc union `Merged: ...`。这仍不是完整
+worker `tree` 输出的 `EDGE` 行，打印 post-hoc union `Merged: ...`。worker 成功不再
+只看 exit code：每个 assigned branch 必须出现 `Loaded state`，且不能出现
+`Load --adopt rejected`/`DetSim state/execution error`；否则标记 `status=FAILED`。
+多线程 frontier 的 fresh worker 无法 adopt，已有 NP1 回归覆盖该失败识别。这仍不是完整
 并行搜索：没有共享 frontier 或搜索中实时去重/merge，失败只汇总；多线程 worker
 bootstrap 和 loader 归一化仍未完成。普通 ASLR 下 restore 会明确
 失败；不能用冷启动 hash 直接合并。

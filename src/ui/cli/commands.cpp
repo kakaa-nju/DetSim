@@ -787,9 +787,23 @@ int cmd_parallel(char *args) {
         std::ifstream output(started[index].output);
         std::string line;
         int printed = 0;
+        size_t loaded = 0;
+        bool worker_ok = code == 0;
         while (std::getline(output, line)) {
             if (line.rfind("EDGE ", 0) == 0) {
                 if (merged_edges.insert(line).second) ++worker_edges;
+                continue;
+            }
+            if (line.find("Loaded state ") != std::string::npos) ++loaded;
+            if (line.find("DetSim state/execution error:") != std::string::npos ||
+                line.find("Load --adopt rejected") != std::string::npos ||
+                line.find("Load rejected:") != std::string::npos ||
+                line.find("No state found with prefix") != std::string::npos) {
+                worker_ok = false;
+                if (printed < 3) {
+                    detsim::ui::ui_printf("  %s\n", line.c_str());
+                    ++printed;
+                }
                 continue;
             }
             if (printed < 3 &&
@@ -800,10 +814,17 @@ int cmd_parallel(char *args) {
                 ++printed;
             }
         }
+        if (loaded < started[index].assigned.size()) {
+            worker_ok = false;
+            detsim::ui::ui_printf(
+                "  worker loaded %zu of %zu assigned branches\n", loaded,
+                started[index].assigned.size());
+        }
+        if (!worker_ok) failed = true;
         detsim::ui::ui_printf(
-            "worker %zu (%zu branches): exit %d, edges=%zu, output=%s\n",
-            index, started[index].branch_count, code, worker_edges,
-            started[index].output.c_str());
+            "worker %zu (%zu branches): exit %d, status=%s, edges=%zu, output=%s\n",
+            index, started[index].branch_count, code, worker_ok ? "ok" : "FAILED",
+            worker_edges, started[index].output.c_str());
     }
     for (const auto &[target, edge] : state_tree) {
         char text[128];

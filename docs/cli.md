@@ -87,7 +87,10 @@ snapshot 绑定到本地 carrier。它要求：
 N 个 fixed-layout worker；每个 worker `load --adopt` 自己的分支后跑内建
 `dfs DEPTH-D`，最后执行 `tree` 输出边。父进程汇总每个 worker 的
 `SysStateStore` visited hash 和 `EDGE` 行，打印 `Merged: N unique states, M unique
-edges`。worker 输出/artifacts 保留在 `.parallel-<pid>-<time>/`。
+edges`。worker 输出/artifacts 保留在 `.parallel-<pid>-<time>/`。每个 worker 的
+`status=ok` 要求退出码为0、全部分配分支出现 `Loaded state`，且没有
+`Load --adopt rejected`/`DetSim state/execution error` 等错误；否则显示
+`status=FAILED`，即使 batch 本身 exit 0。
 
 它仍是 **branch-partitioned seed-worker**：汇总发生在 worker 结束后，没有共享
 frontier、搜索中实时去重或 merge，worker 失败只汇总不重试；NP=2 root 的 branch

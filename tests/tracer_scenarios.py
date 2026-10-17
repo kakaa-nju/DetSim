@@ -13,6 +13,9 @@ import tempfile
 import time
 import unittest
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "examples"))
+from _support.session import Session
+
 
 ROOT = Path(__file__).resolve().parents[1]
 TRACER = Path(os.environ.get("DETSIM_TRACER", ROOT / "tracer")).resolve()
@@ -1256,6 +1259,41 @@ int main(void) {
 
         code, output = self.run_tracer(scenario, name="diff_stateview")
         self.assertEqual(code, 0, output)
+
+    def test_parallel_detects_unadoptable_multithread_workers(self):
+        setarch = shutil.which("setarch")
+        if not setarch:
+            self.skipTest("parallel fixed-layout check requires setarch")
+        binary = self.root / "actors"
+        subprocess.run(
+            shlex.split(os.environ.get("CC", "/usr/bin/gcc"))
+            + ["-O0", "-g", "-gdwarf-4", "-fno-pie", "-no-pie", "-pthread",
+               str(ROOT / "tests/native_search_actors.c"), "-o", str(binary)],
+            check=True)
+        wrapper = self.root / "fixed-tracer"
+        wrapper.write_text(
+            "#!/bin/sh\nexec " + shlex.quote(setarch) +
+            " x86_64 -R " + shlex.quote(str(TRACER)) + ' "$@"\n')
+        wrapper.chmod(0o755)
+        session = Session(str(wrapper), [str(binary), "w"], [], self.root / "run",
+                          "full", 60, choices=False)
+        try:
+            session.send()
+            session.send("sw 0")
+            for _ in range(60):
+                if re.search(r"\[1\].*state=runnable", session.send("thread")):
+                    break
+                session.send("si 0")
+            else:
+                self.fail("worker thread did not become runnable")
+            output = session.send("parallel 2 1")
+            self.assertIn("Parallel exploration:", output)
+            self.assertIn("Load --adopt rejected: process 0 thread layout differs",
+                          output)
+            self.assertIn("worker loaded 0 of 1 assigned branches", output)
+            self.assertIn("status=FAILED", output)
+        finally:
+            self.assertEqual(session.close(), 0)
 
     def test_adopted_seed_snapshot_is_identical_across_workers(self):
         setarch = shutil.which("setarch")
