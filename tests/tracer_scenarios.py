@@ -1233,6 +1233,30 @@ int main(void) {
                     extra_env={"DETSIM_SNAPSHOT_BACKEND": backend})
                 self.assertEqual(code, 0, output)
 
+    def test_diff_reports_saved_stateview_changes(self):
+        def scenario(send):
+            send("sw 0")
+            send("si")
+            first = re.findall(r"([0-9a-f]{16}) => ([0-9a-f]{16})",
+                               send("info current"))[-1]
+            send("si")
+            second = re.findall(r"([0-9a-f]{16}) => ([0-9a-f]{16})",
+                                send("info current"))[-1]
+            changed = send("diff " + first[0] + " " + second[0])
+            self.assertIn("=== State diff:", changed)
+            self.assertIn("Differences:", changed)
+            self.assertNotIn("not yet implemented", changed)
+            same = send("diff " + first[0] + " " + first[0])
+            self.assertIn("No StateView differences.", same)
+            brief = send("diff --brief --max-diff=1 " + first[0] + " " + second[0])
+            self.assertIn("differs", brief)
+            self.assertIn("limit reached", brief)
+            memory = send("diff -m " + first[0] + " " + second[0])
+            self.assertIn("memory-only comparison is unavailable", memory)
+
+        code, output = self.run_tracer(scenario, name="diff_stateview")
+        self.assertEqual(code, 0, output)
+
     def test_search_modes_stop_at_first_property_violation(self):
         for mode in ("dfs", "rand"):
             code, output = self.run_tracer("sw 0\n" + mode + " 8\nq\n",

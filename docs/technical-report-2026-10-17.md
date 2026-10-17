@@ -912,8 +912,10 @@ TUI 看不到；`pending` 等新命令只存在于一侧。现在 readline、bat
 该 actor 自己的 `si` 不推进且保留源状态；其他 runnable actor 可执行；
 peer write/futex WAKE 或显式 `si timeout` 使其 `Ready`，再 `si 0` 完成。
 超大 pipe write 需要部分进展时明确报 unsupported，不会被伪装成 pending。
-没有自动时间推进或 `wake` 命令；无 deadline 的 futex 必须由另一个 actor
-唤醒。`diff` 仍是 placeholder。
+`diff` 现在比较两个保存状态的 StateView JSON（寄存器/线程/pending/文件/
+描述符/socket），支持 `--brief` 和 `--max-diff=N`；原始内存逐字节 diff
+仍不支持，`-m` 会明确拒绝。没有自动时间推进或 `wake` 命令；无 deadline
+的 futex 必须由另一个 actor 唤醒。
 
 证据：3项PTY TUI、33项native场景（含futex跨actor回归和inspect JSON解析）、
 28行native actor、27项session测试、`make check`和NP1生产构建。

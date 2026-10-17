@@ -43,9 +43,13 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 | `ls` / `stat PATTERN` / `hexdump PATH` | 保存的文件系统视图 |
 | `batch FILE` | 从文件执行命令 |
 | `q` | 退出 |
+| `diff [--brief] [--max-diff=N] H1 H2` | 比较两个保存状态的 StateView JSON；`-m` 明确不可用 |
 
-`diff` 目前只是占位，会明确打印 not implemented；不要参考历史文档里的 diff
-选项把它当成已实现功能。
+`diff` 只比较保存状态的 `StateView` JSON（寄存器/线程/pending/描述符/文件/
+socket 等），不是原始内存逐字节 diff。`--brief` 只列变化的顶层 section；
+`--max-diff=N` 限制叶子差异数（默认10）。哈希参数是 `SysStateStore` 的
+前缀，必须唯一。`-m/--memory-only` 会明确打印 memory-only 不可用，不会
+静默降级。
 
 ## 状态观察
 

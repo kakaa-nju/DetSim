@@ -1333,6 +1333,10 @@ New CLI surface:
 - `plugins` lists loaded module IDs, ABI/monitor schema, time-choice presence and
   the current saved monitor-state keys/sizes; it does not expose opaque monitor
   payload semantics.
+- `diff [--brief] [--max-diff=N] H1 H2` compares two saved `StateView` JSON
+  identities recursively (processes/registers/threads/files/descriptors/sockets).
+  `--brief` compares top-level sections; `-m/--memory-only` is explicitly
+  unavailable instead of silently comparing something weaker.
 - A blocked `si` now points to `pending`, `thread N` and `si timeout` instead of
   only saying "Cannot step".
 
@@ -1356,5 +1360,6 @@ to 8x20, `help/pending/inspect/thread/q` and clean exit; 33 native scenarios
 (including the new futex UX test and the extended pending listing, which parses
 the inspect JSON and checks pending reason/registers); 28 native actor rows;
 `make check`; and the production NP1 build. The TUI test checks safety/command
-parity, not colors or layout. `diff` remains a placeholder. Automatic time
-advance, wake injection, and blocking vector/partial pipe writes remain open.
+parity, not colors or layout. Raw-memory-only diff remains open (`-m` rejects).
+Automatic time advance, wake injection, and blocking vector/partial pipe writes
+remain open.

@@ -95,6 +95,92 @@ std::string pending_syscall_text(const PendingSyscall &pending) {
     }
     return text;
 }
+
+struct JsonDiffOptions {
+    bool brief = false;
+    size_t max = 10;
+    size_t count = 0;
+};
+
+std::string compact_json(const nlohmann::json &value) {
+    std::string text = value.dump();
+    if (text.size() > 120) text = text.substr(0, 117) + "...";
+    return text;
+}
+
+void json_diff(const nlohmann::json &left, const nlohmann::json &right,
+               const std::string &path, JsonDiffOptions &options) {
+    if (options.count >= options.max) return;
+    if (options.brief) {
+        if (left.is_object() && right.is_object()) {
+            for (auto it = left.begin(); it != left.end(); ++it) {
+                if (options.count >= options.max) return;
+                if (!right.contains(it.key()) || right[it.key()] != *it) {
+                    detsim::ui::ui_printf("%s/%s differs\n", path.c_str(), it.key().c_str());
+                    ++options.count;
+                }
+            }
+            for (auto it = right.begin(); it != right.end(); ++it) {
+                if (options.count >= options.max) return;
+                if (!left.contains(it.key())) {
+                    detsim::ui::ui_printf("%s/%s only in right\n", path.c_str(), it.key().c_str());
+                    ++options.count;
+                }
+            }
+        } else if (left != right) {
+            detsim::ui::ui_printf("%s differs\n", path.c_str());
+            ++options.count;
+        }
+        return;
+    }
+    if (left.is_object() && right.is_object()) {
+        for (auto it = left.begin(); it != left.end(); ++it) {
+            if (options.count >= options.max) return;
+            const std::string child = path + "/" + it.key();
+            if (!right.contains(it.key())) {
+                detsim::ui::ui_printf("%s: %s != <absent>\n", child.c_str(),
+                                      compact_json(*it).c_str());
+                ++options.count;
+            } else {
+                json_diff(*it, right[it.key()], child, options);
+            }
+        }
+        for (auto it = right.begin(); it != right.end(); ++it) {
+            if (options.count >= options.max) return;
+            if (!left.contains(it.key())) {
+                detsim::ui::ui_printf("%s/<%s>: <absent> != %s\n", path.c_str(),
+                                      it.key().c_str(), compact_json(*it).c_str());
+                ++options.count;
+            }
+        }
+        return;
+    }
+    if (left.is_array() && right.is_array()) {
+        const size_t common = std::min(left.size(), right.size());
+        for (size_t i = 0; i < common; ++i) {
+            if (options.count >= options.max) return;
+            json_diff(left[i], right[i], path + "/" + std::to_string(i), options);
+        }
+        for (size_t i = common; i < left.size(); ++i) {
+            if (options.count >= options.max) return;
+            detsim::ui::ui_printf("%s/%zu: %s != <absent>\n", path.c_str(), i,
+                                  compact_json(left[i]).c_str());
+            ++options.count;
+        }
+        for (size_t i = common; i < right.size(); ++i) {
+            if (options.count >= options.max) return;
+            detsim::ui::ui_printf("%s/%zu: <absent> != %s\n", path.c_str(), i,
+                                  compact_json(right[i]).c_str());
+            ++options.count;
+        }
+        return;
+    }
+    if (left != right) {
+        detsim::ui::ui_printf("%s: %s != %s\n", path.c_str(),
+                              compact_json(left).c_str(), compact_json(right).c_str());
+        ++options.count;
+    }
+}
 }
 
 static CommandEntry cmd_table[] = {
@@ -120,7 +206,7 @@ static CommandEntry cmd_table[] = {
     {"ls", "List files in current node's filesystem", cmd_ls},
     {"stat", "Show stat of files matching pattern", cmd_stat},
     {"hexdump", "Hexdump of a file (c: continue, q: quit)", cmd_hexdump},
-    {"diff", "Compare two system states (currently a placeholder)", cmd_diff},
+    {"diff", "Compare two saved StateView JSONs [--brief] [--max-diff=N] H1 H2", cmd_diff},
 };
 
 const CommandEntry* get_command_table() {
@@ -695,8 +781,89 @@ int cmd_info(char *args) {
 }
 
 int cmd_diff(char *args) {
-    (void)args;
-    detsim::ui::ui_printf("diff: not yet implemented in CLI module\n");
+    std::istringstream input(args ? args : "");
+    std::string token;
+    std::vector<std::string> prefixes;
+    JsonDiffOptions options;
+    bool memory_only = false;
+
+    while (input >> token) {
+        if (token == "-b" || token == "--brief") {
+            options.brief = true;
+        } else if (token == "-m" || token == "--memory-only") {
+            memory_only = true;
+        } else if (token.rfind("--max-diff=", 0) == 0) {
+            const std::string value = token.substr(11);
+            size_t parsed = 0;
+            const auto result = std::from_chars(value.data(), value.data() + value.size(), parsed);
+            if (value.empty() || result.ec != std::errc{} || result.ptr != value.data() + value.size() ||
+                parsed == 0 || parsed > 10000) {
+                detsim::ui::ui_printf("Usage: diff [--brief] [--max-diff=N] HASH1 HASH2\n");
+                return 0;
+            }
+            options.max = parsed;
+        } else if (!token.empty() && token[0] == '-') {
+            detsim::ui::ui_printf("Usage: diff [--brief] [--max-diff=N] HASH1 HASH2\n");
+            return 0;
+        } else {
+            prefixes.push_back(token);
+        }
+    }
+
+    if (memory_only) {
+        detsim::ui::ui_printf(
+            "diff: memory-only comparison is unavailable; this command compares saved StateView JSON\n");
+        return 0;
+    }
+    if (prefixes.size() != 2) {
+        detsim::ui::ui_printf("Usage: diff [--brief] [--max-diff=N] HASH1 HASH2\n");
+        return 0;
+    }
+
+    hash_type hashes[2] = {};
+    for (int i = 0; i < 2; ++i) {
+        auto matches = SysStateStore::instance().find_by_prefix(prefixes[i]);
+        if (matches.size() == 1) {
+            hashes[i] = matches[0];
+        } else if (matches.empty()) {
+            detsim::ui::ui_printf("No state found with prefix '%s'\n", prefixes[i].c_str());
+            return 0;
+        } else {
+            detsim::ui::ui_printf("Multiple states match prefix '%s':\n", prefixes[i].c_str());
+            for (size_t j = 0; j < matches.size() && j < 10; ++j)
+                detsim::ui::ui_printf("  %016lx\n", matches[j]);
+            if (matches.size() > 10)
+                detsim::ui::ui_printf("  ... and %zu more\n", matches.size() - 10);
+            return 0;
+        }
+    }
+
+    detsim::ui::ui_printf("=== State diff: %016lx vs %016lx ===\n",
+                          hashes[0], hashes[1]);
+    try {
+        sys_state left(hashes[0]);
+        sys_state right(hashes[1]);
+        for (int process = 0; process < NP; ++process) {
+            if (options.count >= options.max) break;
+            detsim::StateView left_view(left);
+            detsim::StateView right_view(right);
+            const auto left_json = nlohmann::json::parse(left_view.inspect_json(process));
+            const auto right_json = nlohmann::json::parse(right_view.inspect_json(process));
+            const size_t before = options.count;
+            json_diff(left_json, right_json, "process" + std::to_string(process), options);
+            if (options.count > before)
+                detsim::ui::ui_printf("  (process %d)\n", process);
+        }
+    } catch (const std::exception &error) {
+        detsim::ui::ui_printf("diff unavailable: %s\n", error.what());
+        return 0;
+    }
+
+    if (options.count == 0)
+        detsim::ui::ui_printf("No StateView differences.\n");
+    else
+        detsim::ui::ui_printf("Differences: %zu%s\n", options.count,
+                              options.count >= options.max ? " (limit reached)" : "");
     return 0;
 }
 
