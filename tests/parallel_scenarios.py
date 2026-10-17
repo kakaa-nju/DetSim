@@ -53,6 +53,11 @@ class ParallelScenarios(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout)
         self.assertIn("Parallel exploration: 2 workers, 2 branches, depth 2",
                       result.stdout)
+        merged = re.search(
+            r"Merged: (\d+) unique states, (\d+) unique edges", result.stdout)
+        self.assertIsNotNone(merged, result.stdout)
+        self.assertGreaterEqual(int(merged.group(1)), 2)
+        self.assertGreaterEqual(int(merged.group(2)), 1)
         self.assertEqual(result.stdout.count("worker ") >= 2, True, result.stdout)
         artifacts = re.search(r"Artifacts: (.*)", result.stdout)
         self.assertIsNotNone(artifacts, result.stdout)
@@ -65,6 +70,7 @@ class ParallelScenarios(unittest.TestCase):
             text = output.read_text(errors="replace")
             self.assertNotIn("DetSim state/execution error:", text)
             self.assertIn("adopted cross-process bindings", text)
+            self.assertIn("EDGE ", text)
             match = re.search(r"Loaded state ([0-9a-f]{16})", text)
             self.assertIsNotNone(match, text[-2000:])
             loaded.append(match.group(1))

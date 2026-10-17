@@ -384,6 +384,7 @@ typedef struct sys_state
 
 /* Runtime observation/search bookkeeping: child -> (parent, process, choice, actor slot). */
 typedef std::unordered_map<hash_type, std::tuple<hash_type, int, int, int>> TSS;
+extern TSS state_tree;
 
 /* State queue (BFS exploration) */
 typedef std::deque<hash_type> LSS;

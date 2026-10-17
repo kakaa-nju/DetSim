@@ -941,6 +941,8 @@ ASLR worker 在 restore 前被明确拒绝。
 跑内建 `dfs`。NP=2 门禁实际起了两个 worker，root successor 不同且两边都完成
 DFS。artifacts 保留在 `.parallel-<pid>-<time>/`。
 
-这仍不是完整并行搜索：没有共享 frontier、跨 worker 去重/merge，失败只汇总；
-多线程 worker bootstrap 和 loader 归一化仍未完成。普通 ASLR 下 restore 会明确
+worker 退出后，coordinator 读取每个 worker 的 `SysStateStore` visited hash，并解析
+worker `tree` 输出的 `EDGE` 行，打印 post-hoc union `Merged: ...`。这仍不是完整
+并行搜索：没有共享 frontier 或搜索中实时去重/merge，失败只汇总；多线程 worker
+bootstrap 和 loader 归一化仍未完成。普通 ASLR 下 restore 会明确
 失败；不能用冷启动 hash 直接合并。

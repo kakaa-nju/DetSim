@@ -15,6 +15,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <unordered_set>
 #include <string_view>
 #include <cctype>
 #include "state/state.h"
@@ -214,6 +215,7 @@ static CommandEntry cmd_table[] = {
     {"inspect", "Print saved process/thread/resource JSON (inspect [PROCESS])", cmd_inspect},
     {"plugins", "List loaded plugins, monitor schemas and current monitor bytes", cmd_plugins},
     {"parallel", "Run N tracer workers over distinct successor branches (parallel <N> <depth>)", cmd_parallel},
+    {"tree", "Print recorded search edges (source target process choice thread)", cmd_tree},
     {"load", "Load state of given StateHash", cmd_load},
     {"info", "Display state history (info current: scalar current edge only)", cmd_info},
     {"batch", "Read command list from file", cmd_batch},
@@ -553,6 +555,20 @@ int cmd_plugins(char *args) {
     return 0;
 }
 
+int cmd_tree(char *args) {
+    (void)args;
+    if (state_tree.empty()) {
+        detsim::ui::ui_printf("No recorded search edges.\n");
+        return 0;
+    }
+    for (const auto &[target, edge] : state_tree) {
+        detsim::ui::ui_printf("EDGE %016lx %016lx %d %d %d\n",
+                              std::get<0>(edge), target, std::get<1>(edge),
+                              std::get<2>(edge), std::get<3>(edge));
+    }
+    return 0;
+}
+
 int cmd_parallel(char *args) {
     std::istringstream input(args ? args : "");
     int workers = 0;
@@ -618,7 +634,8 @@ int cmd_parallel(char *args) {
         pid_t pid = -1;
         fs::path directory;
         fs::path output;
-        size_t branches = 0;
+        size_t branch_count = 0;
+        std::vector<hash_type> assigned;
     };
     std::vector<Worker> started;
     const char *shell = "exec \"$0\" -n -c \"$1\" -b \"$2\" > \"$3\" 2>&1";
@@ -651,12 +668,15 @@ int cmd_parallel(char *args) {
         script << "sw 0\n";
         for (size_t branch = index; branch < branches.size();
              branch += static_cast<size_t>(workers)) {
-            script << "load --adopt " << std::hex << branches[branch] << std::dec << "\n";
-            ++worker.branches;
+            char branch_hash[32];
+            snprintf(branch_hash, sizeof(branch_hash), "%016lx", branches[branch]);
+            script << "load --adopt " << branch_hash << "\n";
+            worker.assigned.push_back(branches[branch]);
+            ++worker.branch_count;
             if (depth > 1)
                 script << "dfs " << (depth - 1) << " --quiet\n";
         }
-        script << "q\n";
+        script << "tree\nq\n";
         script.close();
 
         posix_spawn_file_actions_t file_actions;
@@ -690,6 +710,8 @@ int cmd_parallel(char *args) {
                           workers, branches.size(), depth);
     detsim::ui::ui_printf("Artifacts: %s\n", base.c_str());
     bool failed = false;
+    std::unordered_set<hash_type> merged_states;
+    std::unordered_set<std::string> merged_edges;
     for (size_t index = 0; index < started.size(); ++index) {
         int status = 0;
         if (waitpid(started[index].pid, &status, 0) != started[index].pid) {
@@ -700,21 +722,48 @@ int cmd_parallel(char *args) {
         }
         const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
         if (code != 0) failed = true;
-        detsim::ui::ui_printf("worker %zu (%zu branches): exit %d, output=%s\n",
-                              index, started[index].branches, code,
-                              started[index].output.c_str());
+        size_t worker_edges = 0;
+        try {
+            SysStateStore::inspect(
+                (started[index].directory / "sstate").string(),
+                [&](hash_type key, const SysStateEntry&, const std::vector<uint8_t>&) {
+                    merged_states.insert(key);
+                });
+        } catch (const std::exception &error) {
+            detsim::ui::ui_printf("parallel: worker %zu store inspect failed: %s\n",
+                                  index, error.what());
+            failed = true;
+        }
         std::ifstream output(started[index].output);
         std::string line;
         int printed = 0;
-        while (std::getline(output, line) && printed < 3) {
-            if (line.find("Stopped for illegal state") != std::string::npos ||
-                line.find("Complete explore all") != std::string::npos ||
-                line.find("No runnable") != std::string::npos) {
+        while (std::getline(output, line)) {
+            if (line.rfind("EDGE ", 0) == 0) {
+                if (merged_edges.insert(line).second) ++worker_edges;
+                continue;
+            }
+            if (printed < 3 &&
+                (line.find("Stopped for illegal state") != std::string::npos ||
+                 line.find("Complete explore all") != std::string::npos ||
+                 line.find("No runnable") != std::string::npos)) {
                 detsim::ui::ui_printf("  %s\n", line.c_str());
                 ++printed;
             }
         }
+        detsim::ui::ui_printf(
+            "worker %zu (%zu branches): exit %d, edges=%zu, output=%s\n",
+            index, started[index].branch_count, code, worker_edges,
+            started[index].output.c_str());
     }
+    for (const auto &[target, edge] : state_tree) {
+        char text[128];
+        snprintf(text, sizeof(text), "EDGE %016lx %016lx %d %d %d",
+                 std::get<0>(edge), target, std::get<1>(edge),
+                 std::get<2>(edge), std::get<3>(edge));
+        merged_edges.insert(text);
+    }
+    detsim::ui::ui_printf("Merged: %zu unique states, %zu unique edges\n",
+                          merged_states.size(), merged_edges.size());
     return failed ? 1 : 0;
 }
 

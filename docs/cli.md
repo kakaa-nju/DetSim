@@ -34,7 +34,8 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 | `pending [PROCESS]` | 列出所有阻塞/可完成 syscall、原因、deadline 和 runnable actor |
 | `inspect [PROCESS]` | 输出保存状态的 schema1 JSON（线程/寄存器/pending/futex/描述符/文件/socket） |
 | `plugins` | 列出已加载插件、ABI/monitor schema、time-choice 和当前 monitor 字节 |
-| `parallel N DEPTH` | 从当前状态枚举后继，起 N 个 fixed-layout tracer worker 各搜一个分支 |
+| `parallel N DEPTH` | 从当前状态枚举后继，起 N 个 fixed-layout tracer worker 各搜一个分支，并汇总 visited/edges |
+| `tree` | 打印已记录的搜索边（source target process choice thread） |
 | `load [--adopt] HASH` | 按 hash 前缀加载保存状态；`--adopt` 允许匹配 layout 的新进程接管 seed snapshot |
 | `info` / `info current` | 系统调用历史 / 当前边的单行摘要 |
 | `info sock` | 当前模拟 socket |
@@ -83,9 +84,13 @@ snapshot 绑定到本地 carrier。它要求：
 `parallel N DEPTH` 现在把这一步接成可执行的 coordinator：从当前状态用
 `enumerate_successors` 枚举 actor/choice 后继，复制 store 到 worker 目录，用
 `posix_spawn` 起 N 个 fixed-layout worker；每个 worker `load --adopt` 自己的分支后
-跑内建 `dfs DEPTH-1`。worker 输出/artifacts 保留在 `.parallel-<pid>-<time>/`。
-它仍是 **branch-partitioned seed-worker**：没有共享 frontier、跨 worker 去重/merge，
-worker 失败只汇总不重试；NP=2 root 的 branch 分工已验证。跨启动 raw hash 仍受
+跑内建 `dfs DEPTH-1`，最后执行 `tree` 输出边。父进程汇总每个 worker 的
+`SysStateStore` visited hash 和 `EDGE` 行，打印 `Merged: N unique states, M unique
+edges`。worker 输出/artifacts 保留在 `.parallel-<pid>-<time>/`。
+
+它仍是 **branch-partitioned seed-worker**：汇总发生在 worker 结束后，没有共享
+frontier、搜索中实时去重或 merge，worker 失败只汇总不重试；NP=2 root 的 branch
+分工和汇总已验证。跨启动 raw hash 仍受
 loader RDTSC/CPUID 差异影响，不能用冷启动 hash 直接当同一状态。
 
 ## 阻塞 syscall 的行为

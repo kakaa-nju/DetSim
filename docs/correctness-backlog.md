@@ -1390,10 +1390,12 @@ built-in `dfs`. The NP=2 gate starts two workers on distinct root branches and
 checks both adopted/search outputs. Artifacts are retained under
 `.parallel-<pid>-<time>/`.
 
-This is still not a full parallel search: workers have independent visited sets and
-no shared frontier/dedup/merge, failures are only summarized, and multi-thread
-adoption is limited to matching local layouts. Normal cold-start hashes still
-cannot be used as shared keys. Normal
+After the workers exit, the coordinator inspects each worker `SysStateStore` for
+visited hashes and parses `tree` `EDGE` lines, then reports a post-hoc union
+(`Merged: ...`). Workers still have independent visited sets and no shared
+frontier or during-search dedup/merge; failures are only summarized, and
+multi-thread adoption is limited to matching local layouts. Normal cold-start
+hashes still cannot be used as shared keys. Normal
 ASLR adoption fails explicitly at brk/mapping restore, multi-thread layouts are
 not yet bootstrapped in workers, and loader bytes are not normalized. A real
 parallel BFS/DFS must keep the built-in search authoritative and merge only
