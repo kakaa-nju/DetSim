@@ -3,13 +3,13 @@
 .DELETE_ON_ERROR:
 .PHONY: all debug release tracer test check check-build-contracts help FORCE \
         wc clean clear benchmark tools pgo-generate pgo-use pgo-clean \
-        check-integration check-scenarios check-tui check-redis
+        check-integration check-scenarios check-tui check-parallel check-redis
 
 ifneq ($(filter benchmark-redisraft,$(MAKECMDGOALS)),)
 NP ?= 3
 endif
 
-ifneq ($(filter check-accept check-redis check-port check-identity check-capture check-io-boundary check-writev check-state-view check-plugins check-runtime-profile check-syscall-policy check-process-state check-pending-io check-pending-io-snapshot check-getdents,$(MAKECMDGOALS)),)
+ifneq ($(filter check-accept check-redis check-parallel check-port check-identity check-capture check-io-boundary check-writev check-state-view check-plugins check-runtime-profile check-syscall-policy check-process-state check-pending-io check-pending-io-snapshot check-getdents,$(MAKECMDGOALS)),)
 NP ?= 2
 endif
 
@@ -162,6 +162,10 @@ check-scenarios: tracer
 check-tui: tracer
 	@test "$(NP)" = 1 || { echo 'check-tui requires NP=1' >&2; exit 1; }
 	python3 tests/tui_smoke_test.py --tracer "$(abspath tracer)"
+
+check-parallel: tracer
+	@test "$(NP)" = 2 || { echo 'check-parallel requires NP=2' >&2; exit 1; }
+	python3 tests/parallel_scenarios.py --tracer "$(abspath tracer)"
 
 check-redis: tracer
 	@test "$(NP)" = 2 || { echo 'check-redis requires NP=2' >&2; exit 1; }

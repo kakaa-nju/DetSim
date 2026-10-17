@@ -152,3 +152,5 @@
 !example_layout_test.py
 
 !tui_smoke_test.py
+
+!parallel_scenarios.py

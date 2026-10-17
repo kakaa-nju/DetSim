@@ -46,6 +46,7 @@ int cmd_thread(char *args);
 int cmd_pending(char *args);
 int cmd_inspect(char *args);
 int cmd_plugins(char *args);
+int cmd_parallel(char *args);
 int cmd_load(char *args);
 int cmd_info(char *args);
 int cmd_batch(char *args);

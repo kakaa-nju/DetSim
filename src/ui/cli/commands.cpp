@@ -9,7 +9,12 @@
 #include "engine/thread_pool.h"
 #include "proc_status.h"
 #include <charconv>
+#include <filesystem>
 #include <fstream>
+#include <limits.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #include <string_view>
 #include <cctype>
 #include "state/state.h"
@@ -29,6 +34,8 @@
 #include <readline/history.h>
 #include <cstring>
 #include <cstdlib>
+
+extern char **environ;
 #include <cstdio>
 #include <sstream>
 #include <arpa/inet.h>
@@ -206,6 +213,7 @@ static CommandEntry cmd_table[] = {
     {"pending", "List blocked/ready syscalls, deadlines and runnable actors", cmd_pending},
     {"inspect", "Print saved process/thread/resource JSON (inspect [PROCESS])", cmd_inspect},
     {"plugins", "List loaded plugins, monitor schemas and current monitor bytes", cmd_plugins},
+    {"parallel", "Run N tracer workers over distinct successor branches (parallel <N> <depth>)", cmd_parallel},
     {"load", "Load state of given StateHash", cmd_load},
     {"info", "Display state history (info current: scalar current edge only)", cmd_info},
     {"batch", "Read command list from file", cmd_batch},
@@ -543,6 +551,171 @@ int cmd_plugins(char *args) {
     for (const auto &[key, bytes] : ptmc_state.running_state.monitor_states)
         detsim::ui::ui_printf("  %s (%zu bytes)\n", key.c_str(), bytes.size());
     return 0;
+}
+
+int cmd_parallel(char *args) {
+    std::istringstream input(args ? args : "");
+    int workers = 0;
+    int depth = 0;
+    std::string extra;
+    if (!(input >> workers >> depth) || workers < 1 || workers > 32 ||
+        depth < 1 || (input >> extra)) {
+        detsim::ui::ui_printf("Usage: parallel <workers 1..32> <depth>\n");
+        return 1;
+    }
+    for (int i = 0; i < NP; ++i) {
+        if (!fixed_layout(ptmc_state.pids[i])) {
+            detsim::ui::ui_printf(
+                "parallel requires fixed layout; launch with `setarch x86_64 -R`\n");
+            return 1;
+        }
+    }
+
+    std::vector<hash_type> branches;
+    try {
+        branches = enumerate_successors(ptmc_state.running_state);
+    } catch (const std::exception &error) {
+        detsim::ui::ui_printf("parallel branch enumeration failed: %s\n", error.what());
+        return 1;
+    }
+    if (branches.empty()) {
+        detsim::ui::ui_printf("parallel: no runnable successor branches\n");
+        return 1;
+    }
+    if (workers > static_cast<int>(branches.size()))
+        workers = static_cast<int>(branches.size());
+
+    namespace fs = std::filesystem;
+    const fs::path cwd = fs::current_path();
+    const fs::path base = cwd / (".parallel-" + std::to_string(getpid()) + "-" +
+                                 std::to_string(time(nullptr)));
+    const fs::path config = cfg_file ? fs::absolute(cfg_file) : cwd / "config.json";
+    if (!fs::is_regular_file(config)) {
+        detsim::ui::ui_printf("parallel: config file not found: %s\n",
+                              config.c_str());
+        return 1;
+    }
+    char exe_buffer[PATH_MAX];
+    const ssize_t exe_size = readlink("/proc/self/exe", exe_buffer,
+                                      sizeof(exe_buffer) - 1);
+    if (exe_size <= 0) {
+        detsim::ui::ui_printf("parallel: cannot locate tracer executable\n");
+        return 1;
+    }
+    exe_buffer[exe_size] = '\0';
+    const std::string exe = exe_buffer;
+
+    try {
+        StateStore::instance().wait_for_completion();
+        SysStateStore::instance().flush_index();
+        fs::create_directories(base);
+    } catch (const std::exception &error) {
+        detsim::ui::ui_printf("parallel store barrier failed: %s\n", error.what());
+        return 1;
+    }
+
+    struct Worker {
+        pid_t pid = -1;
+        fs::path directory;
+        fs::path output;
+        size_t branches = 0;
+    };
+    std::vector<Worker> started;
+    const char *shell = "exec \"$0\" -n -c \"$1\" -b \"$2\" > \"$3\" 2>&1";
+    for (int index = 0; index < workers; ++index) {
+        Worker worker;
+        worker.directory = base / ("worker-" + std::to_string(index));
+        worker.output = worker.directory / "worker.out";
+        try {
+            fs::create_directories(worker.directory);
+            fs::copy(cwd / "memory", worker.directory / "memory",
+                     fs::copy_options::recursive);
+            fs::copy(cwd / "sstate", worker.directory / "sstate",
+                     fs::copy_options::recursive);
+            const auto lock = worker.directory / "memory" / ".packed.lock";
+            if (fs::exists(lock)) fs::remove(lock);
+            fs::copy_file(config, worker.directory / "config.json",
+                          fs::copy_options::overwrite_existing);
+        } catch (const std::exception &error) {
+            detsim::ui::ui_printf("parallel: worker %d setup failed: %s\n",
+                                  index, error.what());
+            return 1;
+        }
+
+        const fs::path commands = worker.directory / "commands";
+        std::ofstream script(commands);
+        if (!script) {
+            detsim::ui::ui_printf("parallel: cannot write worker commands\n");
+            return 1;
+        }
+        script << "sw 0\n";
+        for (size_t branch = index; branch < branches.size();
+             branch += static_cast<size_t>(workers)) {
+            script << "load --adopt " << std::hex << branches[branch] << std::dec << "\n";
+            ++worker.branches;
+            if (depth > 1)
+                script << "dfs " << (depth - 1) << " --quiet\n";
+        }
+        script << "q\n";
+        script.close();
+
+        posix_spawn_file_actions_t file_actions;
+        if (posix_spawn_file_actions_init(&file_actions) != 0) {
+            detsim::ui::ui_printf("parallel: spawn actions init failed\n");
+            return 1;
+        }
+        posix_spawn_file_actions_addchdir_np(&file_actions,
+                                             worker.directory.c_str());
+        std::string exe_arg = exe;
+        std::string config_arg = config.string();
+        std::string commands_arg = commands.string();
+        std::string output_arg = worker.output.string();
+        char *argv[] = {const_cast<char *>("/bin/sh"),
+                        const_cast<char *>("-c"),
+                        const_cast<char *>(shell),
+                        exe_arg.data(), config_arg.data(), commands_arg.data(),
+                        output_arg.data(), nullptr};
+        const int spawn_result = posix_spawn(&worker.pid, "/bin/sh", &file_actions,
+                                             nullptr, argv, environ);
+        posix_spawn_file_actions_destroy(&file_actions);
+        if (spawn_result != 0) {
+            detsim::ui::ui_printf("parallel: worker %d spawn failed: %s\n",
+                                  index, strerror(spawn_result));
+            return 1;
+        }
+        started.push_back(std::move(worker));
+    }
+
+    detsim::ui::ui_printf("Parallel exploration: %d workers, %zu branches, depth %d\n",
+                          workers, branches.size(), depth);
+    detsim::ui::ui_printf("Artifacts: %s\n", base.c_str());
+    bool failed = false;
+    for (size_t index = 0; index < started.size(); ++index) {
+        int status = 0;
+        if (waitpid(started[index].pid, &status, 0) != started[index].pid) {
+            detsim::ui::ui_printf("parallel: worker %zu wait failed: %s\n",
+                                  index, strerror(errno));
+            failed = true;
+            continue;
+        }
+        const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
+        if (code != 0) failed = true;
+        detsim::ui::ui_printf("worker %zu (%zu branches): exit %d, output=%s\n",
+                              index, started[index].branches, code,
+                              started[index].output.c_str());
+        std::ifstream output(started[index].output);
+        std::string line;
+        int printed = 0;
+        while (std::getline(output, line) && printed < 3) {
+            if (line.find("Stopped for illegal state") != std::string::npos ||
+                line.find("Complete explore all") != std::string::npos ||
+                line.find("No runnable") != std::string::npos) {
+                detsim::ui::ui_printf("  %s\n", line.c_str());
+                ++printed;
+            }
+        }
+    }
+    return failed ? 1 : 0;
 }
 
 int cmd_load(char *args) {

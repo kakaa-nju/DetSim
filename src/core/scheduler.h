@@ -13,9 +13,11 @@
 
 #include "types.h"
 #include <sys/types.h>
+#include <vector>
 
 /* Forward declarations */
 struct syscall_info;
+struct sys_state;
 enum class TransitionAction;
 
 /* ========================================================================
@@ -52,6 +54,10 @@ int exec_rand(int depth);
 
 /* Load a saved state by hash */
 void load(hash_type hash);
+
+/* Enumerate unique one-step successors of source (actor actions and discovered
+ * syscall choices). Restores source before returning; used by parallel workers. */
+std::vector<hash_type> enumerate_successors(const sys_state& source);
 
 /* ========================================================================
  * State Management

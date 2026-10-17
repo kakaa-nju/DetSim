@@ -936,7 +936,11 @@ checkpoint `load --adopt` 后执行同一 `si`，得到相同 successor hash；�
 `test_adopted_seed_snapshot_is_identical_across_workers` 覆盖 full/pages；普通
 ASLR worker 在 restore 前被明确拒绝。
 
-这只证明 seed/worker 的状态身份可对齐，不是并行搜索：尚无 coordinator、root
-branch 分工、共享 frontier/去重、merge 或 worker 故障协议；普通 ASLR 下 restore
-会明确失败，多线程 worker bootstrap 和 loader 归一化仍未完成。并行 BFS/DFS
-必须继续由内建搜索执行，不能用冷启动 hash 直接合并。
+随后加入 `parallel N DEPTH`：从当前状态枚举 actor/choice 后继，复制 store，
+用 `posix_spawn` 起 N 个 fixed-layout worker；每个 worker `load --adopt` 一个分支并
+跑内建 `dfs`。NP=2 门禁实际起了两个 worker，root successor 不同且两边都完成
+DFS。artifacts 保留在 `.parallel-<pid>-<time>/`。
+
+这仍不是完整并行搜索：没有共享 frontier、跨 worker 去重/merge，失败只汇总；
+多线程 worker bootstrap 和 loader 归一化仍未完成。普通 ASLR 下 restore 会明确
+失败；不能用冷启动 hash 直接合并。

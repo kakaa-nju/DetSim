@@ -38,6 +38,7 @@ extern "C" detsim::ui::NCursesUI *get_ncurses_ui();
 #include <optional>
 #include <nlohmann/json.hpp>
 #include <random>
+#include <set>
 #include <readline/readline.h>
 #include <signal.h>
 #include <string.h>
@@ -696,6 +697,29 @@ static TransitionResult search_actor_choice(const sys_state& source,const ActorA
     throw std::runtime_error("Syscall choice cardinality/preset changed for the same saved actor action");
   }
   return result;
+}
+
+std::vector<hash_type> enumerate_successors(const sys_state& source)
+{
+  std::set<hash_type> unique;
+  const auto actions = enabled_actor_actions(source);
+  for (const auto& actor : actions) {
+    int cardinality = -1;
+    std::vector<int> choices;
+    TransitionResult first = search_actor_choice(source, actor, 0, cardinality, choices);
+    if (first.code != CKPT_DISCARD && first.new_state.ss_hash)
+      unique.insert(first.new_state.ss_hash);
+    const std::vector<int> alternatives = choices;
+    for (int choice : alternatives) {
+      std::vector<int> unused;
+      TransitionResult result =
+          search_actor_choice(source, actor, choice, cardinality, unused);
+      if (result.code != CKPT_DISCARD && result.new_state.ss_hash)
+        unique.insert(result.new_state.ss_hash);
+    }
+  }
+  load(source.ss_hash);
+  return std::vector<hash_type>(unique.begin(), unique.end());
 }
 
 /* auto mode: */

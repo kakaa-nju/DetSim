@@ -31,6 +31,7 @@ make check-cases         # NP=1 healthy/mutant counterexamples and replay
 make audit-runtimes      # NP=1 language admission; reports unsupported cases as failures
 make check-scenarios     # build NP=1 tracer and run isolated native ptrace scenarios
 make check-tui           # NP=1 headless PTY: TUI startup, commands, resize, small terminal
+make check-parallel      # NP=2 fixed-layout seed workers partition root branches
 make check-thread-control check-thread-identity check-thread-carrier # NP=1 thread gates
 make check-pending-syscall # NP=1 blocked/wake/completion/deadline replay
 make check-pending-timeout # NP=2 explicit timeout event, zero user resume, cold replay

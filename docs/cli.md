@@ -34,6 +34,7 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 | `pending [PROCESS]` | 列出所有阻塞/可完成 syscall、原因、deadline 和 runnable actor |
 | `inspect [PROCESS]` | 输出保存状态的 schema1 JSON（线程/寄存器/pending/futex/描述符/文件/socket） |
 | `plugins` | 列出已加载插件、ABI/monitor schema、time-choice 和当前 monitor 字节 |
+| `parallel N DEPTH` | 从当前状态枚举后继，起 N 个 fixed-layout tracer worker 各搜一个分支 |
 | `load [--adopt] HASH` | 按 hash 前缀加载保存状态；`--adopt` 允许匹配 layout 的新进程接管 seed snapshot |
 | `info` / `info current` | 系统调用历史 / 当前边的单行摘要 |
 | `info sock` | 当前模拟 socket |
@@ -77,9 +78,15 @@ snapshot 绑定到本地 carrier。它要求：
 - 这是显式 opt-in，普通 `load` 仍要求同进程 capture provenance。
 
 已经有 full/pages 回归：同一 seed checkpoint 启动两个 worker，`load --adopt` 后执行
-同一 `si`，得到相同 successor hash；但还没有并行 BFS/DFS coordinator、跨 worker
-去重或 merge。跨启动 raw hash 仍受 loader RDTSC/CPUID 差异影响，不能用冷启动
-hash 直接当同一状态。
+同一 `si`，得到相同 successor hash。
+
+`parallel N DEPTH` 现在把这一步接成可执行的 coordinator：从当前状态用
+`enumerate_successors` 枚举 actor/choice 后继，复制 store 到 worker 目录，用
+`posix_spawn` 起 N 个 fixed-layout worker；每个 worker `load --adopt` 自己的分支后
+跑内建 `dfs DEPTH-1`。worker 输出/artifacts 保留在 `.parallel-<pid>-<time>/`。
+它仍是 **branch-partitioned seed-worker**：没有共享 frontier、跨 worker 去重/merge，
+worker 失败只汇总不重试；NP=2 root 的 branch 分工已验证。跨启动 raw hash 仍受
+loader RDTSC/CPUID 差异影响，不能用冷启动 hash 直接当同一状态。
 
 ## 阻塞 syscall 的行为
 
