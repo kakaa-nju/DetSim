@@ -463,6 +463,7 @@ static void update_ui_status(detsim::ui::NCursesUI *ui, const struct StoreStats 
            "Threads: runnable=%d waiting=%d ready=%d retry=%d | 'pending' for details",
            runnable, waiting, ready, retry);
   ui->set_status_line(6, buf);
+  refresh_thread_panel();
 }
 
 /* Helper: Print text status to console */

@@ -900,6 +900,9 @@ TUI 看不到；`pending` 等新命令只存在于一侧。现在 readline、bat
 - `thread`：附加 pending syscall/reason/phase/deadline。
 - `inspect [PROCESS]`：`StateView` schema1 JSON，包含寄存器、线程、pending、
   futex 队列、信号/robust/clear-tid、描述符、文件、socket、pipe 和虚拟映射。
+- TUI 状态区第7/8行是选中 process 的 live thread panel：当前 slot/TID、
+  `run/wait/ready/retry/dead`、pending reason/deadline；每个命令后和自动搜索
+  轮询时刷新。
 - 阻塞 `si` 提示 `pending`/`thread N`/`si timeout`。旧的固定4KiB
   `ui_printf` 会把真实4,247字节的 inspect 输出截断；格式化现在按需扩容。
 
@@ -908,7 +911,7 @@ TUI 看不到；`pending` 等新命令只存在于一侧。现在 readline、bat
 peer write/futex WAKE 或显式 `si timeout` 使其 `Ready`，再 `si 0` 完成。
 超大 pipe write 需要部分进展时明确报 unsupported，不会被伪装成 pending。
 没有自动时间推进或 `wake` 命令；无 deadline 的 futex 必须由另一个 actor
-唤醒。`diff` 仍是 placeholder，TUI 还没有 live per-thread 面板。
+唤醒。`diff` 仍是 placeholder。
 
 证据：3项PTY TUI、33项native场景（含futex跨actor回归和inspect JSON解析）、
 28行native actor、27项session测试、`make check`和NP1生产构建。

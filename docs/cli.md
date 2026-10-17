@@ -15,8 +15,10 @@ TUI 在手动模式下默认选中 process 0；多进程用 `sw N` 切换。自�
 `Ctrl-C` 会发送 SIGINT，停止搜索并回到交互界面。
 
 TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/pending 摘要。
-`make NP=1 check-tui` 通过 PTY 验证最小终端、缩放以及 `help/pending/thread/q`；
-状态区在过小终端上会收缩，不再用负高度建窗。
+第7/8行是选中 process 的 live thread panel：`T0:run | T1:wait:futex@1` 等，
+每次命令后以及自动搜索轮询时刷新。`make NP=1 check-tui` 通过 PTY 验证最小终端、
+缩放以及 `help/pending/inspect/thread/q`；状态区在过小终端上会收缩，不再用
+负高度建窗。
 
 ## 命令
 

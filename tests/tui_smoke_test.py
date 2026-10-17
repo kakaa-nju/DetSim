@@ -109,6 +109,8 @@ class TuiSmokeTest(unittest.TestCase):
         text = output.decode("utf-8", "replace")
         self.assertIn("pending - List blocked/ready syscalls", text)
         self.assertIn("Runnable actors:", text)
+        self.assertIn("Process 0/1", text)
+        self.assertIn("T0:run", text)
         self.assertNotIn("Unknown command 'pending'", text)
         self.assertNotIn("Unknown command 'inspect'", text)
 

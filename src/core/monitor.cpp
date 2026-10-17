@@ -115,6 +115,69 @@ char *rl_gets()
 /* External declaration for NCursesUI */
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui();
 
+void refresh_thread_panel()
+{
+  detsim::ui::NCursesUI *ui = get_ncurses_ui();
+  if (!ui)
+    return;
+
+  int process = ptmc_state.cursor;
+  if (process < 0 || process >= NP)
+  {
+    process = -1;
+    for (int i = 0; i < NP; ++i)
+      if (!DISDEAD(ptmc_state.status[i])) { process = i; break; }
+  }
+  if (process < 0)
+  {
+    ui->set_status_line(7, "Threads: no live process");
+    ui->set_status_line(8, "");
+    return;
+  }
+
+  const auto &child = ptmc_state.running_state.child[process];
+  char line[512];
+  snprintf(line, sizeof(line), "Process %d/%d pid=%d current=%d %s",
+           process, NP, ptmc_state.pids[process],
+           ptmc_state.current_thread_idx[process],
+           is_auto_mode() ? "auto" : "manual");
+  ui->set_status_line(7, line);
+
+  std::string summary;
+  if (child.threads.empty())
+  {
+    summary = "main runnable (single thread)";
+  }
+  else
+  {
+    int shown = 0;
+    for (size_t i = 0; i < child.threads.size(); ++i)
+    {
+      const auto &thread = child.threads[i];
+      const char *state = !thread.alive ? "dead" :
+          !thread.pending_syscall ? "run" :
+          thread.pending_syscall->phase == PendingPhase::Waiting ? "wait" :
+          thread.pending_syscall->phase == PendingPhase::Ready ? "ready" : "retry";
+      if (shown++) summary += " | ";
+      summary += "T" + std::to_string(i) + ":" + state;
+      if (thread.alive && thread.pending_syscall)
+      {
+        const auto &pending = *thread.pending_syscall;
+        summary += pending.reason == PendingReason::Futex ? ":futex" :
+                   pending.reason == PendingReason::Io ? ":io" : ":timer";
+        if (pending.deadline)
+          summary += "@" + std::to_string(pending.deadline->sec);
+      }
+      if (shown == 4 && child.threads.size() > 4)
+      {
+        summary += " | ...";
+        break;
+      }
+    }
+  }
+  ui->set_status_line(8, summary);
+}
+
 /* External batch file from config */
 extern char *batch_file;
 
@@ -148,6 +211,7 @@ void ui_mainloop()
   /* Manual UI: start with process 0 selected so thread/si work immediately. */
   if (ptmc_state.cursor < 0 && NP > 0)
     ptmc_state.cursor = 0;
+  refresh_thread_panel();
 
   /* If UI is available, use it */
   if (ui)

@@ -1327,6 +1327,9 @@ New CLI surface:
   dynamically sized so inspect/history/long diagnostics are complete.
 - `thread` includes the pending call, reason, phase and deadline instead of only
   `state=waiting`.
+- TUI status rows 7/8 are a live panel for the selected process: current slot/TID,
+  per-thread `run/wait/ready/retry/dead`, pending reason and deadline. It refreshes
+  after every command and during automatic-search status polling.
 - A blocked `si` now points to `pending`, `thread N` and `si timeout` instead of
   only saying "Cannot step".
 
@@ -1351,5 +1354,4 @@ to 8x20, `help/pending/inspect/thread/q` and clean exit; 33 native scenarios
 the inspect JSON and checks pending reason/registers); 28 native actor rows;
 `make check`; and the production NP1 build. The TUI test checks safety/command
 parity, not colors or layout. `diff` remains a placeholder. Automatic time
-advance, wake injection, blocking vector/partial pipe writes, and a live per-
-thread TUI panel beyond the summary line remain open.
+advance, wake injection, and blocking vector/partial pipe writes remain open.

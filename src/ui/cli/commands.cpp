@@ -192,7 +192,9 @@ int execute_command_line(char *cmd_line) {
         if (*args == '\0') args = nullptr;
     }
 
-    return entry->handler(args);
+    const int result = entry->handler(args);
+    refresh_thread_panel();
+    return result;
 }
 
 /* ======================================================================

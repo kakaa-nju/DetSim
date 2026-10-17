@@ -85,6 +85,7 @@ struct PTMC_STATE
 };
 
 int is_auto_mode();
+void refresh_thread_panel();
 void cleanup_readline();
 
 extern PTMC_STATE ptmc_state;
