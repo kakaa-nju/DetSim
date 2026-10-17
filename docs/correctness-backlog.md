@@ -10,7 +10,7 @@ relationship to the native-binary model-checking goal.
 | --- | --- | --- | --- |
 | C01 | Fixed (unchanged live thread set) | Futex queues are branch-owned, captured and archived; restore reconstructs blocked state, including same-hash restores. | `check-futex-snapshot` exercises capture/copy/assignment/archive, persisted reload and repeated ptrace restore/wake. Raw lifecycle/carrier restore has separate C02 tests; combined lifecycle and futex waiting still needs wider coverage. |
 | C02 | P0 / partial | Capture preserves virtual slots and creation records; raw clone/exit now restore logical contexts over retained carriers; unexpected physical death or untracked creation rejects. Physical TIDs now stay in transient bindings; explicit liveness and logical parent IDs enter archives. Guest-visible physical IDs in register/memory contents are not normalized. | Create A/B, exit A, create C, repeatedly restore with correct logical identity and TLS/stop phases. `check-thread-lifecycle` now covers that sequence, TLS, persisted replay, main-first exit and actual carrier reuse. TID writeback/clear-tid now have join and replay coverage; ordinary pthread TLS/join/condition and non-PI robust owner-death have scoped coverage; full pthread, PI and rseq critical sections remain unsupported. |
-| C03 | Partial: actual CLI actors fixed | Actual CLI BFS and iterative DFS enumerate saved runnable/Ready/Retry threads and each eligible finite timeout, with explicit post-restore actors and per-action choices. Iterative DFS now reopens a hash when a later command has more remaining depth and reports depth/budget cuts instead of claiming completion. RAND, the unused scheduler path and cross-command BFS frontier recovery are not covered. | Native actor gate:28 full/pages rows,76 direct root actions,228 same-source replays and actual BFS terminal projections; pure saved-policy/readiness tests, DFS residency and a depth-reopen regression pass. Consolidation and complete outcome/atom coverage remain open. |
+| C03 | Partial: actual CLI actors fixed | Actual CLI BFS and iterative DFS enumerate saved runnable/Ready/Retry threads and each eligible finite timeout, with explicit post-restore actors and per-action choices. Iterative DFS now reopens a hash when a later command has more remaining depth and reports depth/budget cuts instead of claiming completion; a following BFS enqueues known finite frontiers. RAND and the unused scheduler path are not covered. | Native actor gate:28 full/pages rows,76 direct root actions,228 same-source replays and actual BFS terminal projections; pure saved-policy/readiness tests, DFS residency, depth-reopen and DFS-then-BFS recovery regressions pass. Consolidation and complete outcome/atom coverage remain open. |
 | C04 | Partial | Ordered system metadata identity includes status/budget; storage now compares duplicate bytes in cache, packed records and metadata instead of trusting hashes alone. | Identity and all storage gates cover ordering and duplicate conflicts. Logical thread identity and equivalence of differently encoded semantic states remain open. |
 | C05 | Fixed (scoped) | Removed filename heuristics; corrected libelf string-table index in Go-section detection. | Native `test_probe` starts at the same boundary as `probe`; ordinary/Go-section ELF fixtures and two existing gc Go binaries classified correctly. gccgo and actual Go runtime execution remain unverified. |
 | C06 | Fixed (framework boundary) | Removed Raft fields, implicit role pruning, message inference and example parser from the production link. Versioned plugins inspect explicit snapshots; branch-owned opaque monitors enter product identity before successor publication. | `check-state-view`, `check-plugins`, `check-identity` and native counter-plugin restore/violation scenarios cover readonly inspection, ABI failures, history isolation, terminal witnesses and decoder noninterference. Raft examples have separate projection/history contracts; this does not certify every Raft property. |
@@ -30,7 +30,7 @@ relationship to the native-binary model-checking goal.
 | C22 | Fixed (snapshot I/O) | Exact read/write counts and archive bounds required; failures propagate, without zero-fill or live fallback. | `check-state-io` fault-injects short/failed process_vm I/O and corrupt/missing/old archives. Failed restore is fatal; no successor may execute afterward. |
 | C23 | P0 / partial | TCP source ports now derive from saved socket state, independent of search RNG; clocks/getrandom now use saved virtual state; per-task masks now persist; custom signal delivery and asynchronous kernel inputs remain unsupported. | `check-port` covers replay, RNG independence, source addresses, uniqueness and exhaustion. Closed syscall policy and process-model regressions cover rejection, deterministic replay and archives; this does not close general asynchronous inputs. |
 | C24 | Fixed | Populate current syscall number/arguments before the entry handler. | `check-exec` exercises real ptrace FUTEX_WAKE suppression using current arguments. |
-| C25 | P0 / partial | Auto execution returns after each syscall boundary or explicit pending completion, including CKPT_NO. Actual CLI BFS/iterative DFS now enumerate supported saved actors/timeouts and distinguish depth/budget-bounded returns; all futex/message outcomes, instruction-level shared-memory interleavings and bounded native execution remain unproven. | `check-exec`, native actor/timeout and pending gates cover those scoped actions. Pure user loops, blocking native calls, cross-command BFS frontier recovery and instruction atoms still need separate evidence. |
+| C25 | P0 / partial | Auto execution returns after each syscall boundary or explicit pending completion, including CKPT_NO. Actual CLI BFS/iterative DFS now enumerate supported saved actors/timeouts, distinguish depth/budget-bounded returns and recover a recorded DFS frontier in a following BFS; all futex/message outcomes, instruction-level shared-memory interleavings and bounded native execution remain unproven. | `check-exec`, native actor/timeout and pending gates cover those scoped actions. Pure user loops, blocking native calls, unexpanded-frontier reporting and instruction atoms still need separate evidence. |
 | C26 | Fixed | Pending accounting covers queued and executing work; completion waits and synchronizes packed data/index. Async and sync errors poison subsequent operations. | `check-store-cache` holds a worker at compression, proves barrier stays blocked, then opens a fresh read-only process while writer remains alive. Sync failure and shutdown/reinit also covered. |
 
 | C27 | Fixed | Non-owning shared cache buffers and eviction mutations caused wrong bytes and crashes under pressure. Immutable owned buffers replace mutable cross-thread entries; cache and pending budgets are explicit. | `check-store-cache` covers pointer lifetime, zero/tiny caches, concurrent dedup, multiworker and prefetch. Fixed-data constrained-cache benchmark passes every byte comparison. |
@@ -1195,8 +1195,10 @@ RED: on a native fixture whose root needs three transitions, `dfs 1` printed
 `Complete explore all 3 sys_states (new: 3), total unique: 2` even though the
 discovered successor still had legal actions. After `load <root>`, `dfs 4`
 printed `new: 1, total unique: 2` and executed no transition: the hash-only
-visited set treated the root as fully explored at the smaller budget. Both full
-and pages reproduced this.
+visited set treated the root as fully explored at the smaller budget. A following
+`bfs` from the same root loaded only the root, reported `Search coverage
+incomplete`, and never expanded the discovered successor. Both full and pages
+reproduced this.
 
 GREEN: iterative DFS keeps a process-local map from saved hash to the largest
 remaining depth for which every supported actor/action was expanded. Discovery
@@ -1205,11 +1207,14 @@ remaining depth reopens the identity; an equal or smaller budget reuses the
 earlier expansion. A depth-zero frontier with legal actors reports
 `Depth limit reached; Searched for ...`, and a model-budget cut reports
 `Model budget exhausted; Searched for ...`. BFS records unbounded expansions and
-reports `Search coverage incomplete; Searched for ...` when a previously
-discovered hash was never fully expanded. SIGINT clears discovery and expansion
-bookkeeping together. DFS searched/new counters now count the root once instead
-of twice. The map is search bookkeeping only: it is not archived, does not enter
-state identity, and does not change snapshot or kernel-model formats.
+enqueues a known identity whose recorded expansion was bounded; a per-search
+queued set avoids duplicate entries and a stale entry that became fully expanded
+while the search was running is skipped. A frontier that remains unexpanded still
+reports `Search coverage incomplete; Searched for ...`. SIGINT clears discovery
+and expansion bookkeeping together. DFS searched/new counters now count the root
+once instead of twice. The map is search bookkeeping only: it is not archived,
+does not enter state identity, and does not change snapshot or kernel-model
+formats.
 
 The case helper now distinguishes complete, depth-limited, model-budget and
 unexpanded-frontier results. It still requires a property violation for a seeded
@@ -1220,15 +1225,16 @@ budget while the old runner required `Complete explore all`; it now records
 
 Evidence: the native reopen regression passes in full/pages (first search reports
 the depth bound, a reload with `dfs 4` reaches `SEARCH_EXITED` and more unique
-states); all31 native scenarios;28 native actor rows (the DFS1 row now asserts
-the depth-bound message);8 DFS-residency searches;24 history/violation/interrupt
-searches;2 guided-search rows;26 session/protocol tests including completion
-classification and bounded-replay cases; and `make check` (9 component,14
-build-contract and5 layout tests). Actual NP3 Willemt full/pages healthy/mutant
-rows pass; the healthy rows report49 searched states with
-`search_completion=model_budget`. The RedisLabs library full/pages rows also
-pass; their healthy searches report109 states with the same budget reason.
-This closes the depth-sensitive DFS bookkeeping defect, not C03/C25: RAND and
-the unused scheduler path keep their old behavior,
-BFS-after-DFS frontier recovery is reported as incomplete rather than repaired,
-and futex/message outcomes plus instruction atoms remain open.
+states); a native DFS-then-BFS regression recovers the recorded frontier and
+reaches `Complete explore all` with `SEARCH_EXITED`; all32 native scenarios;28
+native actor rows (the DFS1 row now asserts the depth-bound message);8
+DFS-residency searches;24 history/violation/interrupt searches;2 guided-search
+rows;26 session/protocol tests including completion classification and
+bounded-replay cases; and `make check` (9 component,14 build-contract and5 layout
+tests). Actual NP3 Willemt full/pages healthy/mutant rows pass; the healthy rows
+report49 searched states with `search_completion=model_budget`. The RedisLabs
+library full/pages rows also pass; their healthy searches report109 states with
+the same budget reason. This closes the depth-sensitive DFS bookkeeping defect,
+not C03/C25: RAND and the unused scheduler path keep their old behavior, a
+frontier left by an abnormal stop is still reported as incomplete rather than
+solved, and futex/message outcomes plus instruction atoms remain open.

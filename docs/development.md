@@ -231,10 +231,13 @@ Discovery and expansion are distinct. Iterative DFS records the largest remainin
 depth for which every supported actor/action was expanded; a later command
 reopens the same saved identity when it has a larger remaining depth, while an
 equal-or-smaller budget reuses the earlier expansion. BFS records unbounded
-expansions. A zero-budget frontier with legal actions prints
-`Depth limit reached; Searched for ...`; model-budget truncation and a BFS that
-faces a previously discovered but unexpanded frontier are reported explicitly
-instead of `Complete explore all`. These messages describe the covered bound and
+expansions and enqueues a known identity whose earlier expansion was bounded, so
+a following BFS can recover a DFS frontier; an identity already fully expanded
+is not repeated. A zero-budget frontier with legal actions prints
+`Depth limit reached; Searched for ...`; model-budget truncation is reported
+explicitly instead of `Complete explore all`, and a frontier that remains
+unexpanded (for example after an abnormal stop) is reported as
+`Search coverage incomplete`. These messages describe the covered bound and
 do not prove coverage of omitted outcomes or instruction atoms. This bookkeeping
 is process-local and does not enter snapshot identity.
 
@@ -249,9 +252,8 @@ python3 tests/case_session_test.py
 The finite actor gate verifies actual callbacks from the search response before
 manual reference edges are created. It covers two actors, multiple deadlines,
 choice cardinality and pending completion. It does not use old TSS edges as
-proof of this search. A native reopen test covers depth-sensitive DFS expansion;
-cross-command BFS frontier recovery, remaining futex/message outcomes and
-instruction atoms are still open.
+proof of this search. Native tests cover depth-sensitive DFS expansion and a DFS-then-BFS frontier
+recovery; remaining futex/message outcomes and instruction atoms are still open.
 
 ## Framework and plugin boundary
 

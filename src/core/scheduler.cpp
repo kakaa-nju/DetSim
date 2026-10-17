@@ -710,6 +710,8 @@ int exec_bfs()
   g_queue_size = 0;
 
   sys_state s = ptmc_state.running_state;
+  std::unordered_set<hash_type> queued;
+  queued.insert(s.ss_hash);
   StateStore::instance().queue_clear();
   state_queue_append(ptmc_state.running_state);
 
@@ -749,6 +751,10 @@ int exec_bfs()
                 states_searched_this_run);
       break;
     }
+    // A duplicate queue entry (for example a self-loop) is already covered by
+    // an expansion recorded while this search was running.
+    if (expanded_budget(state_fetched->ss_hash) == kExpandedUnbounded)
+      continue;
     const auto actions=enabled_actor_actions(state_fetched.value());
     bool state_complete = true;
     for (const auto& actor:actions)
@@ -803,14 +809,19 @@ int exec_bfs()
         }
         else
         {
-          bool is_new = !state_set.count(result.new_state.ss_hash);
+          const hash_type successor = result.new_state.ss_hash;
+          bool is_new = !state_set.count(successor);
           if (is_new)
           {
-            if (check_result == 0)
-              state_queue_append(result.new_state);
-            state_set.emplace(result.new_state.ss_hash);
+            state_set.emplace(successor);
             states_new_this_run++;
           }
+          // A DFS or random walk may have discovered this identity without
+          // expanding it. Enqueue it even when it is not new to state_set.
+          if (check_result == 0 &&
+              expanded_budget(successor) != kExpandedUnbounded &&
+              queued.insert(successor).second)
+            state_queue_append(result.new_state);
         }
       }
 

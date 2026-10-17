@@ -1081,7 +1081,7 @@ int main(void) {
         self.assertNotIn("Complete explore all", output)
         self.assertEqual(code, 0, output)
 
-    def test_depth_bounded_dfs_reopens_with_more_remaining_depth(self):
+    def build_depth_reopen_probe(self):
         source = self.root / "depth_reopen.c"
         source.write_text(
             "#include <sys/syscall.h>\n"
@@ -1100,6 +1100,9 @@ int main(void) {
         native = subprocess.run([str(self.root / "probe")], check=True,
                                 stdout=subprocess.PIPE, timeout=5)
         self.assertEqual(native.stdout, b"DEPTH_OK\n")
+
+    def test_depth_bounded_dfs_reopens_with_more_remaining_depth(self):
+        self.build_depth_reopen_probe()
 
         def scenario(send):
             send("sw 0")
@@ -1131,6 +1134,36 @@ int main(void) {
             with self.subTest(backend=backend):
                 code, output = self.run_tracer(
                     scenario, name="depth_reopen_" + backend, tracee_args=(),
+                    extra_env={"DETSIM_SNAPSHOT_BACKEND": backend})
+                self.assertEqual(code, 0, output)
+
+    def test_bfs_recovers_a_depth_bounded_dfs_frontier(self):
+        self.build_depth_reopen_probe()
+
+        def scenario(send):
+            send("sw 0")
+            root = re.search(
+                r"Current state ([0-9a-f]{16}) \(no predecessor\)",
+                send("info current")).group(1)
+            self.assertIn("Loaded state", send("load " + root))
+            first = send("dfs 1 --quiet")
+            self.assertIn("Depth limit reached", first)
+            self.assertNotIn("SEARCH_EXITED", first)
+            first_unique = int(re.search(r"total unique: (\d+)", first).group(1))
+
+            # BFS must enqueue the discovered successor left unexpanded by the
+            # bounded DFS instead of treating every known hash as visited.
+            self.assertIn("Loaded state", send("load " + root))
+            bfs = send("bfs --quiet")
+            self.assertIn("Complete explore all", bfs)
+            self.assertIn("SEARCH_EXITED", bfs)
+            bfs_unique = int(re.search(r"total unique: (\d+)", bfs).group(1))
+            self.assertGreater(bfs_unique, first_unique)
+
+        for backend in ("full", "pages"):
+            with self.subTest(backend=backend):
+                code, output = self.run_tracer(
+                    scenario, name="bfs_frontier_" + backend, tracee_args=(),
                     extra_env={"DETSIM_SNAPSHOT_BACKEND": backend})
                 self.assertEqual(code, 0, output)
 
