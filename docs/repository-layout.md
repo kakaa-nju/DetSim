@@ -82,9 +82,11 @@ checkout、拉取或修改任何子模块，也没有更改本地排除规则来
 ### 额外发现：旧perf基准尚不能作为验证入口
 
 真实构建 `make NP=1 benchmark` 暴露了既有问题，不能用fake compiler契约测试
-代替实际编译。`xxh_bench` 缺少 `-lxxhash` 已以独立修复补上，但
-`perf/xxhash_benchmark.cpp` 给512KiB输入缓冲区读取1MiB，仍有越界风险，未运行
-它生成任何性能结论。旧store benchmark也有链接时缺少 `get_ncurses_ui`、
+代替实际编译。`xxh_bench` 缺少 `-lxxhash` 已以独立修复补上。后续修复了
+`perf/xxhash_benchmark.cpp` 的越界：原输入缓冲区只有512KiB，却测试1MiB长度；
+现在按最大测试尺寸分配。ASan 对旧版本报告 `READ of size 1048576` 的
+heap-buffer-overflow，修复版在 ASan/UBSan 下完整运行通过，并只作为离线
+microbenchmark 使用。旧store benchmark仍有链接时缺少 `get_ncurses_ui`、
 `sysstate_store_benchmark.cpp` 缺少cstring头、调用已变更的hash签名等问题；
 后者还有detached监控线程与主线程共享vector、同key保存不同字节的旧假设。
 这些需要单独的行为回归及修复，不能通过目录搬迁或仅修到能编译就宣称可用。

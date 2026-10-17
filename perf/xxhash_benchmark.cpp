@@ -1,5 +1,5 @@
 /*
- * xxhash_benchmark.cpp - Benchmark XXH64 vs XXH32 throughput
+ * xxhash_benchmark.cpp - Benchmark XXH3-64 throughput over state-sized inputs
  */
 
 #include <cstdint>
@@ -10,6 +10,7 @@
 #include <vector>
 #include <random>
 #include <algorithm>
+#include <string>
 #include <xxhash.h>
 
 static inline uint64_t get_time_ns() {
@@ -41,16 +42,17 @@ int main() {
     std::vector<size_t> sizes = {64, 256, 512, 1024, 4096, 65536, 524288, 1048576};
     // Scale iterations inversely with size
     std::vector<int> iterations_list = {5000000, 2000000, 1000000, 500000, 100000, 10000, 2000, 2000};
+    const size_t max_size = *std::max_element(sizes.begin(), sizes.end());
     
     // Random data generator
     std::mt19937 rng(42);
     std::uniform_int_distribution<int> dist(0, 255);
     
-    std::vector<uint8_t> max_data(524288);
+    std::vector<uint8_t> max_data(max_size);
     for (auto& b : max_data) b = (uint8_t)dist(rng);
     
     printf("%-10s %-15s %-20s\n", 
-           "Size", "Iterations", "XXH64");
+           "Size", "Iterations", "XXH3-64");
     printf("%-10s %-15s %-20s\n", 
            "==========", "===============", "====================");
     
@@ -66,7 +68,7 @@ int main() {
             hash64 = XXH3_64bits(data.data(), size);
         }
         
-        // Benchmark XXH64
+        // Benchmark XXH3-64
         uint64_t start = get_time_ns();
         for (int i = 0; i < iterations; i++) {
             hash64 = XXH3_64bits(data.data(), size);
@@ -89,7 +91,7 @@ int main() {
     
     printf("\n=== Summary ===\n");
     printf("\nFor StateStore use case (512KB states):\n");
-    printf("- XXH64 provides better hash quality (64-bit space)\n");
+    printf("- XXH3-64 provides 64-bit hashes\n");
     
     return 0;
 }
