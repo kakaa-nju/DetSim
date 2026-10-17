@@ -33,6 +33,7 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 | `thread [N]` | 列出线程，或切换到线程 N |
 | `pending [PROCESS]` | 列出所有阻塞/可完成 syscall、原因、deadline 和 runnable actor |
 | `inspect [PROCESS]` | 输出保存状态的 schema1 JSON（线程/寄存器/pending/futex/描述符/文件/socket） |
+| `plugins` | 列出已加载插件、ABI/monitor schema、time-choice 和当前 monitor 字节 |
 | `load HASH` | 按 hash 前缀加载保存状态 |
 | `info` / `info current` | 系统调用历史 / 当前边的单行摘要 |
 | `info sock` | 当前模拟 socket |
@@ -53,6 +54,9 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 信号掩码、robust/clear-tid 注册、描述符、文件、socket、pipe 和虚拟映射。
 它只读保存状态，不回退到 live memory；不可观察时打印 `inspect unavailable:`。
 输出不受旧的 4 KiB `ui_printf` 限制，TUI 内容窗口可直接滚动查看。
+
+`plugins` 显示已加载模块 ID、ABI、monitor schema、是否为 time-choice，以及当前
+保存状态中每个 monitor key 的字节数；无插件时明确显示 `No plugins loaded`。
 
 ## 阻塞 syscall 的行为
 

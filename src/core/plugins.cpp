@@ -154,6 +154,22 @@ std::string context_key() {
   for (const auto &m : modules) if (semantic(*m)) out += std::to_string(m->key.size()) + ":" + m->key;
   return out;
 }
+
+std::string describe_modules() {
+  if (modules.empty()) return "No plugins loaded\n";
+  std::string out;
+  for (const auto &m : modules) {
+    out += "- " + std::string(m->api->id);
+    out += " abi=" + std::to_string(m->api->abi_version);
+    out += " schema=" + std::to_string(m->api->monitor_schema);
+    if (m->api->choose_time) out += " time-choice";
+    if (m->api->init_monitor) out += " monitor";
+    out += "\n";
+  }
+  out += std::string("Time choice: ") + (has_time_choice() ? "yes" : "no") + "\n";
+  out += "Context: " + context_key() + "\n";
+  return out;
+}
 bool check_initial(sys_state &state) {
   if (state.property_failed) return true;
   bool violation = false;

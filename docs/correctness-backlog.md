@@ -1330,6 +1330,9 @@ New CLI surface:
 - TUI status rows 7/8 are a live panel for the selected process: current slot/TID,
   per-thread `run/wait/ready/retry/dead`, pending reason and deadline. It refreshes
   after every command and during automatic-search status polling.
+- `plugins` lists loaded module IDs, ABI/monitor schema, time-choice presence and
+  the current saved monitor-state keys/sizes; it does not expose opaque monitor
+  payload semantics.
 - A blocked `si` now points to `pending`, `thread N` and `si timeout` instead of
   only saying "Cannot step".
 

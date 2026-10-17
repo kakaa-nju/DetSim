@@ -1324,6 +1324,11 @@ int main(void) {
 
         def scenario(send):
             send("sw 0")
+            plugins_view = send("plugins")
+            self.assertIn("test.native-counter", plugins_view)
+            self.assertIn("schema=1", plugins_view)
+            self.assertIn("monitor", plugins_view)
+            self.assertIn("Current monitor states: 1", plugins_view)
             self.assertNotIn("illegal state", send("si"))
             saved = re.findall(r"=> ([0-9a-f]{16})", send("info"))[-1]
             self.assertIn("Reach illegal state", send("si"))

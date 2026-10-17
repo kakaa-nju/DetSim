@@ -14,6 +14,8 @@ bool check_transition(const sys_state &before, sys_state &after,
 detsim_time_choice_v2 choose_time(const StateView &view, unsigned node,
                                  int choice, timeval now, unsigned budget);
 std::string describe_bytes(const void *data, size_t length);
+/* Human-readable loaded module/monitor summary for the CLI/TUI. */
+std::string describe_modules();
 /* Fingerprint is persisted even for stateless semantic plugins: incompatible checkers,
  * model policies or configuration cannot silently reuse a search state. */
 std::string context_key();

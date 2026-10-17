@@ -105,12 +105,13 @@ class TuiSmokeTest(unittest.TestCase):
                 process.wait()
 
     def test_help_pending_thread_and_quit(self):
-        output = self.run_tui(24, 80, ("help", "pending", "inspect", "thread", "q"))
+        output = self.run_tui(24, 80, ("help", "pending", "inspect", "plugins", "thread", "q"))
         text = output.decode("utf-8", "replace")
         self.assertIn("pending - List blocked/ready syscalls", text)
         self.assertIn("Runnable actors:", text)
         self.assertIn("Process 0/1", text)
         self.assertIn("T0:run", text)
+        self.assertIn("No plugins loaded", text)
         self.assertNotIn("Unknown command 'pending'", text)
         self.assertNotIn("Unknown command 'inspect'", text)
 

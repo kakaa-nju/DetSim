@@ -903,6 +903,8 @@ TUI 看不到；`pending` 等新命令只存在于一侧。现在 readline、bat
 - TUI 状态区第7/8行是选中 process 的 live thread panel：当前 slot/TID、
   `run/wait/ready/retry/dead`、pending reason/deadline；每个命令后和自动搜索
   轮询时刷新。
+- `plugins`：列出加载模块的 ID/ABI/monitor schema、time-choice 标记，以及
+  当前保存状态的 monitor key/字节数；不解释不透明 monitor payload。
 - 阻塞 `si` 提示 `pending`/`thread N`/`si timeout`。旧的固定4KiB
   `ui_printf` 会把真实4,247字节的 inspect 输出截断；格式化现在按需扩容。
 

@@ -14,6 +14,7 @@
 #include "state/state_view.h"
 #include "state/state_store.h"
 #include "state/sysstate_store.h"
+#include "core/plugins.h"
 #include "monitor.h"
 #include "guest.h"
 #include "fs/fsstate.h"
@@ -107,6 +108,7 @@ static CommandEntry cmd_table[] = {
     {"thread", "Switch to thread N in current process (thread to list)", cmd_thread},
     {"pending", "List blocked/ready syscalls, deadlines and runnable actors", cmd_pending},
     {"inspect", "Print saved process/thread/resource JSON (inspect [PROCESS])", cmd_inspect},
+    {"plugins", "List loaded plugins, monitor schemas and current monitor bytes", cmd_plugins},
     {"load", "Load state of given StateHash", cmd_load},
     {"info", "Display state history (info current: scalar current edge only)", cmd_info},
     {"batch", "Read command list from file", cmd_batch},
@@ -433,6 +435,16 @@ int cmd_inspect(char *args) {
     } catch (const std::exception &error) {
         detsim::ui::ui_printf("inspect unavailable: %s\n", error.what());
     }
+    return 0;
+}
+
+int cmd_plugins(char *args) {
+    (void)args;
+    detsim::ui::ui_printf("%s", detsim::plugins::describe_modules().c_str());
+    detsim::ui::ui_printf("Current monitor states: %zu\n",
+                          ptmc_state.running_state.monitor_states.size());
+    for (const auto &[key, bytes] : ptmc_state.running_state.monitor_states)
+        detsim::ui::ui_printf("  %s (%zu bytes)\n", key.c_str(), bytes.size());
     return 0;
 }
 
