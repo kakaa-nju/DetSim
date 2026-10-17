@@ -1238,3 +1238,48 @@ the same budget reason. This closes the depth-sensitive DFS bookkeeping defect,
 not C03/C25: RAND keeps its old behavior, a
 frontier left by an abnormal stop is still reported as incomplete rather than
 solved, and futex/message outcomes plus instruction atoms remain open.
+
+### Case-side exploration debt and built-in-first policy (2026-10-17)
+
+User direction: actual exploration must prefer the built-in CLI BFS/DFS/RAND.
+Python case drivers may prepare inputs, write configuration, launch the tracer,
+read saved state and replay/validate edges, but must not implement a parallel
+sibling/beam/layer search. Manual `si` is allowed only for deterministic scenario
+setup or a documented unsupported boundary, and is never built-in exploration
+coverage. The rule is recorded in `AGENTS.md`, development guidance and the example
+index.
+
+Current inventory:
+
+| Entry | Role | Status |
+| --- | --- | --- |
+| `examples/raft/run.py`, `examples/redisraft/run.py` | 131/33-step controlled prefix, then built-in `dfs <depth> --quiet` | Setup only; suffix is built-in. Do not add a Python search loop. |
+| `examples/redisraft/search.py::search_siblings` | beam-1 manual `si` sibling enumeration used by quorum/repair/full-module cases | Case-side search debt; do not extend. Replace when built-in DFS can produce the same property/witness/replay evidence. |
+| `examples/redisraft_module/run.py` | manual thread/actor layer controller and beam-1 search for the full module | Debt; full-module results remain non-green/historical. |
+| `examples/_support/session.py::search` | launches built-in `bfs`/`dfs`, parses bounds and replays edges | Orchestration only; correct direction. |
+| `tests/guided_search_integration.py` | verifies a case enumerator against manual successors | Host regression, not product exploration; never cite as built-in coverage. |
+
+The Raft-library controlled prefix is not a hidden search. Starting from the
+mutant cold-start config and running built-in DFS alone at depths3/5/8/10/12
+produced 31/106/421/1000/2275 searched states (20/56/201/457/992 unique) in
+0.22/0.63/2.37/6.76/14.59s; every run ended with `Depth limit reached` and no
+violation. The injected dual-leader scenario needs the controlled 33-step election
+prefix; after that root, the case's suffix exploration is already built-in DFS.
+Removing the prefix would require a deeper built-in search over startup
+interleavings or a generic checkpoint/target predicate; neither is implemented.
+
+Acceptance for retiring a Python search strategy:
+
+1. Run the same healthy/mutant case from a saved root through actual CLI BFS/DFS
+   with explicit actor/action choices and built-in completion/bounded reporting.
+2. Preserve the exact property diagnostic, witness state, actor/choice and
+   threefold predecessor/successor replay in full and pages.
+3. Show the built-in run reaches the property without manual sibling selection;
+   keep the old case-side result as historical, not as equivalent coverage.
+4. For the full Redis module, built-in coverage also requires the relevant
+   syscall/actor path to be supported; until then its result stays explicitly
+   non-green rather than being promoted by the Python beam.
+
+New cases must not add a Python search loop. If a case cannot yet use built-in
+exploration, record the concrete unsupported boundary and removal target here
+before adding any workaround.

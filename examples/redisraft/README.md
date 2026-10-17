@@ -16,7 +16,10 @@ Each controlled entrypoint requires NP=3 and also supports `--native-only`.
 `run.py`, `quorum.py` and `repair.py` own their election, replication-quorum and
 log-repair configuration/acceptance policy. `search.py` holds this case's fixed
 three-node sibling search, Raft log observation, ledger and replay validation;
-its bounded beam policy is not native exhaustive BFS/DFS.
+its bounded beam policy is not native exhaustive BFS/DFS. It is case-side debt:
+do not extend it; new exploration should use the built-in CLI DFS, and the
+sibling search should be replaced when the built-in actor/outcome/property path
+can produce the same exact witness and replay evidence.
 
 Each session writes its exact `<session>/config.json`; source and tool hashes,
 native oracles, observations, transcripts and three-replay evidence go beneath

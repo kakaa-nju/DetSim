@@ -732,6 +732,13 @@ owns its target/library, driver, plugins, configuration policy and launch script
 Exact generated configurations are stored with each run's output; there is no
 separate source corpus under `examples/cases/`. Shared host execution/session
 helpers live in `examples/_support/`; target-specific search stays in its case.
+Actual exploration must use the built-in CLI BFS/DFS/RAND. Case drivers may prepare
+inputs, write configuration, launch the tracer, read saved state and replay/validate
+edges, but they must not implement a parallel sibling/beam/layer search. Manual
+stepping is reserved for deterministic scenario setup (for example a controlled
+Raft election prefix) or a documented unsupported boundary; it is not built-in
+exploration coverage. Remaining case-side search strategies are recorded as debt in
+the backlog and must not grow.
 Feature additions
 should name a failing case, its expected native behavior and the property or
 admission boundary they enable. Healthy/mutant pairs and counterexample replay

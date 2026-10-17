@@ -4,6 +4,11 @@
 选择点/性质插件、运行配置及说明；目标和驱动可以合为同一个程序。宿主侧的
 编译、控制执行、搜索和验收脚本也属于案例，放在这里。
 
+实际状态探索优先使用内建 CLI BFS/DFS/RAND。案例 `run.py` 只负责准备输入、
+生成配置、启动 tracer、观察保存状态和重放验收；手工 `si` 只用于确定性场景
+构造或明确的 unsupported 边界，不能替代内建探索覆盖。案例内已有的 Python
+beam/sibling/layer 搜索是待移除的债务，不得继续扩展。
+
 | 案例 | 目标与驱动 | 插件、配置与入口 |
 | --- | --- | --- |
 | [two_debits](two_debits/README.md) | C/C++两次扣款，正常/注错版本 | `input_checker.cpp`；`run.py`枚举输入并执行原生CLI搜索 |
@@ -34,7 +39,8 @@ Paxos适配源码已提交到其fork；构建方式和未验证边界见[Paxos�
 
 唯一非案例目录是 [`_support/`](_support/README.md)：复用会话控制、配置写出、
 保存状态上的转换重放及编译/文件捕获工具。它不拥有目标程序、专用状态解码
-或搜索策略；Raft的专用搜索属于 `redisraft/search.py`，不混进共享层。
+或搜索策略；实际探索由内建 CLI 完成。`redisraft/search.py` 中仍保留的
+beam-1 sibling 搜索是待替换的案例侧 workaround，不是推荐的搜索入口。
 
 原 `examples/cases/` 源码已拆入上述案例。当前工作区可暂时存在一个忽略的旧路径
 符号链接，仅供迁移前已启动的三个长实验读取冻结源码，待这些任务结束后回收。

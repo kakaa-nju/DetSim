@@ -138,6 +138,7 @@ def expected_mutant_violation(reply, nodes, receipt):
 def model_case(tracer, binary, checker, choose, directory, backend, variant, timeout, depth, *, prefix_hook=None, prepare_leader=None):
     row = {"target": "redisraft-library", "variant": variant, "backend": backend, "NP": 3,
            "artifacts": str(directory), "scope": "controlled real pre-vote/election prefix and bounded suffix",
+           "search_engine": "builtin_cli_dfs", "search_prefix": "manual_scenario_setup",
            "expected_denials": {"0": "A voted for itself", "2": "C already voted for A"}}
     session = common.Session(tracer, [str(binary)], [checker, choose], directory, backend, timeout,
         tracees=[[str(binary), str(i)] for i in range(3)],

@@ -35,6 +35,12 @@ Use source call sites and repeatable tests to settle contradictions.
 ## Work loop
 
 - Choose one bounded defect or behavior. State the invariant and acceptance test.
+- Prefer the built-in CLI BFS/DFS/RAND for actual state exploration. Python case
+  drivers may prepare inputs, write configuration, launch the tracer, observe saved
+  state and replay/validate edges; they must not implement a parallel sibling,
+  beam or layer search. Deterministic manual stepping is scenario setup or an
+  explicit unsupported boundary, never a substitute for built-in exploration
+  coverage; record the gap and removal target in the backlog.
 - For cleanup, write the deletion/simplification plan before editing; lock behavior
   with regression tests first. Avoid bundling semantic fixes with restructuring.
 - Prefer removal and existing utilities. No new dependencies without a request.
@@ -58,7 +64,9 @@ Use source call sites and repeatable tests to settle contradictions.
   or library, driver, choice/property plugins, configuration and launch scripts.
   Do not collect them into `examples/cases/` or split them into test fixture and
   integration directories. Only generic host helpers belong in `examples/_support/`;
-  target-specific decoding/search and benchmarks stay with their case.
+  target-specific decoding/search and benchmarks stay with their case. Case-side
+  search strategies are debt: do not extend them, and replace them with built-in CLI
+  exploration once the actor/outcome/property path supports the same evidence.
 - No workload-specific names or invariants in generic scheduling or persistence.
   Existing Raft coupling is debt, not a pattern to copy.
 - Serialize semantic state. Host PIDs/TIDs, cache state, UI selection, statistics,

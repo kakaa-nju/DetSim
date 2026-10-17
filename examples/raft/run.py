@@ -136,7 +136,8 @@ def saved_budget(directory, state_hash):
 
 def model_case(tracer, binary, checker, choose, directory, backend, variant, timeout, depth):
     row = {"target": "willemt-raft", "variant": variant, "backend": backend, "NP": 3,
-           "artifacts": str(directory), "scope": "controlled election prefix and bounded suffix"}
+           "artifacts": str(directory), "scope": "controlled election prefix and bounded suffix",
+           "search_engine": "builtin_cli_dfs", "search_prefix": "manual_scenario_setup"}
     session = common.Session(tracer, [str(binary)], [checker, choose], directory, backend, timeout,
         tracees=[[str(binary), str(i)] for i in range(3)],
         addresses=["192.168.0.1", "192.168.0.2", "192.168.0.3"],

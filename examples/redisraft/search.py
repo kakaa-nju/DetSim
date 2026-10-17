@@ -1,6 +1,9 @@
 """Shared three-process Raft case ledger, pruned sibling search and replay.
 
 Workload helper only: manual actor/preset coverage, not builtin DFS semantics.
+This is case-side debt. Do not extend it. New exploration must use the built-in
+CLI DFS; replace the beam search when the built-in actor/outcome/property path
+can produce the same exact witness and replay evidence.
 """
 import re
 import json
@@ -41,6 +44,8 @@ def search_siblings(session, row, root, variant, depth, *, observe, outcome, clo
     retained = []
     terminal_edge = None
     row['budget_policy'] = 'manual si siblings; no builtin DFS budget cutoff; timeout plugin still enforces its budget'
+    row['search_engine'] = 'case_side_manual_beam1'
+    row['search_engine_debt'] = True
     row['search_initial_budget'] = adapter.saved_budget(session.directory, root)
     aliases = 0
     counters = dict(attempted_actions=0, completed_layers=0, depth_cutoff=True, partial_layer=True, beam_width=1)

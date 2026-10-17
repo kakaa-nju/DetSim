@@ -15,5 +15,8 @@ python3 examples/raft/run.py --native-only
 The controlled runner requires NP=3. `run.py` defines the three tracees,
 addresses, startup profile, choice configuration and bounded search/replay policy;
 the exact generated configuration is `<session>/config.json`, with reports and
-hashes beneath `--output` (default `build/raft-cases`). Native-only success is not
-model-check success; bounded results do not establish exhaustive interleavings.
+hashes beneath `--output` (default `build/raft-cases`). The 131-step controlled
+prefix is deterministic scenario setup, not search; the suffix exploration is the
+built-in CLI `dfs <depth> --quiet`. Do not add a Python sibling/beam search loop to
+this case. Native-only success is not model-check success; bounded results do not
+establish exhaustive interleavings.
