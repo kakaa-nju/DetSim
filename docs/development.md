@@ -104,7 +104,10 @@ live in `build/release/npN/bin/` (or `build/debug/npN/bin/` when selecting `debu
 For example, use `build/release/np1/bin/sstate_query --help` after `make NP=1 tools`.
 The former `make ss_bench` and `make tools/sstate_query` targets remain build aliases,
 but no longer create executables at the old root/source paths. Storage tool sources
-are under `tools/storage/`. See [directory boundaries and submodule audit](repository-layout.md).
+are under `tools/storage/`. The xxhash microbenchmark now allocates its largest
+declared input and is ASan/UBSan-clean; the old `perf/` store benchmarks still do
+not build and are not evidence. See
+[directory boundaries and submodule audit](repository-layout.md).
 
 ## Active code paths
 

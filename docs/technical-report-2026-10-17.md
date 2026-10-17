@@ -2,6 +2,8 @@
 
 案例源码已按[案例索引](../examples/README.md)重新归属到各个 `examples/<case>/`。
 本文保留的旧 `examples/cases/` 路径用于历史执行归属；当前命令和目录以索引为准。
+第1–12节保留报告收尾时的测量和工具版本；后续搜索记账、死代码清理与基准越界修复
+见第13节。
 
 本报告同时回答两个问题：现在实际测通了哪些案例，以及当前保存、恢复与执行控制到底实现到了什么程度。核心源码基线为 `17ef7fc`；实验分别注明实际使用的不可变 tracer，不能把旧二进制的结果统称为最新版结果。文中的“通过”始终受具体目标、运行时、模型、搜索策略和资源边界约束。
 
@@ -717,3 +719,85 @@ cleanup通过不等于模型检验通过。其余三组24实验仍运行，原�
 最终回归状态库的保留，另回收约21.64 GiB，`build/`降至约3.4 GiB。结果、
 日志、反例路径、配置与版本归属仍保留；这些已结束案例的镜像不再可直接读取，
 需要重跑。外置盘在途实验及共享模块未清理，能力claim没有因此扩大或缩减。
+
+## 13. 2026-10-17 后续：搜索记账、死代码清理与基准越界修复
+
+本节记录报告收尾后的代码与文档改动。第1–12节的测量、路径、tracer版本和历史
+结论保持原样，不用新结果回写。代码提交依次为：
+
+| 提交 | 内容 |
+| --- | --- |
+| `3026487` | 有界DFS的深度感知重新展开、诚实的深度/预算完成报告、BFS记录无界展开 |
+| `71feb3d` | 删除无调用者的递归DFS |
+| `6438225` | 后续BFS恢复已记录的有限frontier |
+| `cfb0215` | 删除未使用的第二份搜索实现`core/scheduler/exploration.cpp` |
+| `6b87e59` | 修复xxhash microbenchmark的输入缓冲区越界 |
+
+### 13.1 搜索记账
+
+原实现把“发现过哈希”当成“已完整展开”。在native三转换fixture上，旧版
+`dfs 1`打印`Complete explore all 3 sys_states (new: 3), total unique: 2`，
+实际上后继仍有合法动作；重新`load`根状态后执行`dfs 4`只报告`new: 1,
+total unique: 2`，没有执行转换。之后从同一根执行`bfs`也只看到根，报告
+`Search coverage incomplete`，没有展开已发现的后继。full/pages均可复现。
+
+新实现为每个保存哈希记录“已完整展开的最大剩余深度”，仅属于搜索簿记，不进入
+快照归档、状态身份或kernel model。后续命令预算更大时重新打开同一保存状态；
+预算相等或更小时复用先前展开。深度为0且仍有合法actor时报告
+`Depth limit reached; Searched for ...`，模型预算耗尽报告
+`Model budget exhausted; Searched for ...`。BFS记录无界展开，并把已发现但
+只做过有限展开的状态重新入队；per-search queued集合抑制重复项，入队后在本次
+搜索中转为无界展开的陈旧项会跳过。SIGINT同时清空发现集合和展开记录。DFS的
+searched/new计数不再把根状态统计两次。
+
+修复后，同一fixture的`dfs 1`报告深度截断（unique 2），重新加载根后的
+`dfs 4`完整到达`SEARCH_EXITED`（unique 4）；在`dfs 1`之后直接执行BFS也能
+恢复该frontier并到达`Complete explore all`和`SEARCH_EXITED`。两个回归都在
+full/pages下通过。
+
+案例侧新增统一的`search_completion`分类：`complete`、`depth_limit`、
+`model_budget`、`unexpanded_frontier`。案例行记录实际原因，seed bug搜索仍必须
+找到violation；bounded返回不再被当成穷尽。实际Willemt healthy suffix原先
+要求`Complete explore all`，但真实情况是模型预算耗尽；现在记录为
+`search_completion=model_budget`。RedisLabs库案例同样记录该原因。
+
+### 13.2 死代码清理
+
+递归`do_dfs`只有自递归、没有调用者，CLI的`exec_dfs`使用
+`do_dfs_iterative`；已删除。另一份`core/scheduler/exploration.cpp`及私有头文件
+也不在调用链中，`scheduler_exec_*`从未被执行；连同Makefile条目和未使用的
+include一起删除。现在`core/scheduler.cpp`是唯一编译的搜索实现，避免对未执行
+路径产生覆盖claim。删除不改变快照格式、kernel model或协议。
+
+### 13.3 基准越界
+
+`perf/xxhash_benchmark.cpp`声明了1MiB测试长度，却只分配512KiB输入缓冲区，
+随后从该缓冲区复制完整长度。现在按最大声明尺寸分配并显式包含`<string>`。
+ASan对旧分配报告`heap-buffer-overflow ... READ of size 1048576`；修复版在
+ASan/UBSan下完整运行、无诊断，普通`make NP=1 xxh_bench`运行exit0。
+旧`perf/` store benchmark仍不能构建，不能作为当前存储格式或性能证据。
+
+### 13.4 验证与边界
+
+本轮实际运行：
+
+- `make check`：9项组件、14项构建契约、5项目录/布局检查通过。
+- 32项native场景通过，包括新增的depth-reopen和DFS-then-BFS恢复；28行
+  native actor、8个DFS residency搜索、24个history/violation/interrupt搜索、
+  2个guided-search行、26项session/protocol测试通过。
+- NP1与清理后源码的NP3生产构建通过；最终NP3 SHA256
+  `0462c696106e2421ef8f4fb9a982be43d605086d33137ddb4392478800af6fa1`。
+- `make NP=1 check-cases`通过；two_debits BFS和lost_notification DFS的
+  full/pages矩阵保持绿色。
+- 最终NP3 full-only复跑：Willemt healthy/mutant各1行通过，healthy以49个
+  searched状态记录`model_budget`；RedisLabs库healthy/mutant各1行通过，
+  healthy以109个状态记录同一原因。此前的full/pages矩阵也通过；之后的改动是
+  BFS簿记、删除未执行代码和xxhash修复，不改变这些DFS案例的语义。
+
+仍不能扩张claim：这不是通用Linux语义的soundness/completeness证明，C03/C25
+仍为部分完成；RAND保持原状，futex/message全部结果和指令级共享内存交织仍未
+建模，异常中止遗留的未展开frontier只被诚实报告为incomplete，不会被自动补全。
+快照格式和kernel model没有变化。三组迁移前启动的真实RedisRaft长任务仍使用
+忽略的`examples/cases`兼容路径和原不可变tracer；本轮没有重启、修改或验收它们，
+其结果继续单独记录。xxhash修复只针对离线microbenchmark，不构成存储或Redis
+性能claim。
