@@ -1320,6 +1320,11 @@ New CLI surface:
 
 - `pending [PROCESS]` lists each logical thread, its pending syscall/arguments,
   reason/phase, deadline/result, the next legal action, and all runnable actors.
+- `inspect [PROCESS]` prints the schema1 `StateView` JSON: per-thread registers,
+  pending/deadline, futex queues, signal/robust/clear-tid state, descriptors,
+  files, sockets, pipes and virtual mappings. The old fixed 4 KiB `ui_printf`
+  truncated this (a real inspect reply was 4,247 bytes); formatting is now
+  dynamically sized so inspect/history/long diagnostics are complete.
 - `thread` includes the pending call, reason, phase and deadline instead of only
   `state=waiting`.
 - A blocked `si` now points to `pending`, `thread N` and `si timeout` instead of
@@ -1341,8 +1346,9 @@ Verified blocking behavior with native fixtures:
   explicit `si timeout` is still required.
 
 Evidence: three PTY TUI tests (`make NP=1 check-tui`) cover 24x80, 10x40, resize
-to 8x20, `help/pending/thread/q` and clean exit; 33 native scenarios (including
-the new futex UX test and the extended pending listing); 28 native actor rows;
+to 8x20, `help/pending/inspect/thread/q` and clean exit; 33 native scenarios
+(including the new futex UX test and the extended pending listing, which parses
+the inspect JSON and checks pending reason/registers); 28 native actor rows;
 `make check`; and the production NP1 build. The TUI test checks safety/command
 parity, not colors or layout. `diff` remains a placeholder. Automatic time
 advance, wake injection, blocking vector/partial pipe writes, and a live per-

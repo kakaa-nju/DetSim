@@ -30,6 +30,7 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 | `sw N` | 切换进程焦点（0-indexed） |
 | `thread [N]` | 列出线程，或切换到线程 N |
 | `pending [PROCESS]` | 列出所有阻塞/可完成 syscall、原因、deadline 和 runnable actor |
+| `inspect [PROCESS]` | 输出保存状态的 schema1 JSON（线程/寄存器/pending/futex/描述符/文件/socket） |
 | `load HASH` | 按 hash 前缀加载保存状态 |
 | `info` / `info current` | 系统调用历史 / 当前边的单行摘要 |
 | `info sock` | 当前模拟 socket |
@@ -42,6 +43,14 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 
 `diff` 目前只是占位，会明确打印 not implemented；不要参考历史文档里的 diff
 选项把它当成已实现功能。
+
+## 状态观察
+
+`pending` 是阻塞态的摘要；`inspect [PROCESS]` 输出完整的保存状态 JSON，
+包括每个逻辑线程的寄存器、pending syscall/phase/deadline、futex 等待队列、
+信号掩码、robust/clear-tid 注册、描述符、文件、socket、pipe 和虚拟映射。
+它只读保存状态，不回退到 live memory；不可观察时打印 `inspect unavailable:`。
+输出不受旧的 4 KiB `ui_printf` 限制，TUI 内容窗口可直接滚动查看。
 
 ## 阻塞 syscall 的行为
 

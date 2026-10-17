@@ -11,6 +11,7 @@
 #include <string_view>
 #include <cctype>
 #include "state/state.h"
+#include "state/state_view.h"
 #include "state/state_store.h"
 #include "state/sysstate_store.h"
 #include "monitor.h"
@@ -20,6 +21,7 @@
 #include "log_wrapper.h"
 #include "ncurses_ui.h"
 #include "utils.h"
+#include <nlohmann/json.hpp>
 #include <readline/readline.h>
 #include <readline/history.h>
 #include <cstring>
@@ -104,6 +106,7 @@ static CommandEntry cmd_table[] = {
     {"sw", "Switch control focus on the n-th process", cmd_sw},
     {"thread", "Switch to thread N in current process (thread to list)", cmd_thread},
     {"pending", "List blocked/ready syscalls, deadlines and runnable actors", cmd_pending},
+    {"inspect", "Print saved process/thread/resource JSON (inspect [PROCESS])", cmd_inspect},
     {"load", "Load state of given StateHash", cmd_load},
     {"info", "Display state history (info current: scalar current edge only)", cmd_info},
     {"batch", "Read command list from file", cmd_batch},
@@ -400,6 +403,33 @@ int cmd_pending(char *args) {
     } else if (pending_count) {
         detsim::ui::ui_printf(
             "No runnable actor; a deadline or peer I/O is still required.\n");
+    }
+    return 0;
+}
+
+int cmd_inspect(char *args) {
+    int process = ptmc_state.cursor;
+    if (args && *args) {
+        char *end = nullptr;
+        long value = strtol(args, &end, 10);
+        while (end && *end && std::isspace(static_cast<unsigned char>(*end))) ++end;
+        if (!end || *end || value < 0 || value >= NP) {
+            detsim::ui::ui_printf("Usage: inspect [PROCESS]\n");
+            return 0;
+        }
+        process = static_cast<int>(value);
+    }
+    if (process < 0 || process >= NP) {
+        detsim::ui::ui_printf("Usage: inspect [PROCESS] (no process selected)\n");
+        return 0;
+    }
+    try {
+        detsim::StateView view(ptmc_state.running_state);
+        const auto text = view.inspect_json(static_cast<size_t>(process));
+        const auto json = nlohmann::json::parse(text);
+        detsim::ui::ui_printf("%s\n", json.dump(2).c_str());
+    } catch (const std::exception &error) {
+        detsim::ui::ui_printf("inspect unavailable: %s\n", error.what());
     }
     return 0;
 }
