@@ -1,6 +1,5 @@
 #include "scheduler.h"
 #include "api/plugin.h"
-#include "scheduler/scheduler.h"
 #include "debug.h"
 #include "net/emu.h"
 #include "expr_eval.hpp"

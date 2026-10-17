@@ -66,9 +66,9 @@ checkout、拉取或修改任何子模块，也没有更改本地排除规则来
 1. **案例依赖与构建配方分离。** 逐案例将外部项目固定版本、patch和manifest
    建立明确入口，在 `build/workloads/` 构建；先解决Paxos不可复现适配，再讨论
    统一 `workloads/` 命名。不要移动当前三个在途RedisRaft任务的任何依赖。
-2. **一个活跃搜索入口。** `src/core/scheduler.cpp` 与
-   `src/core/scheduler/exploration.cpp` 同时编译，但CLI走前者。目录合并必须伴随
-   successor-set与性质观察等价测试，不能把搬文件当作解决重复实现。
+2. **一个活跃搜索入口。** `src/core/scheduler.cpp` 是唯一编译的搜索实现；
+   另一份无调用者、未覆盖CLI的 `src/core/scheduler/exploration.cpp` 实验已删除。
+   后续合并仍需 successor-set与性质观察等价测试，不能把搬文件当作解决重复实现。
 3. **状态层按职责拆分。** `core/state/` 同时拥有语义状态、捕获恢复、reader和
    物理存储；先梳理依赖和恢复次序，再分 `snapshot` 与 `storage`。保持一种行为
    的唯一实现，避免再造仅转发的抽象层。

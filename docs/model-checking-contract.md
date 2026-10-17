@@ -93,7 +93,8 @@ handler 因而可能读到上一条 syscall 的参数。
 
 ### 当前实际定义
 
-活动 CLI 使用 `core/scheduler.cpp`，不是另一套 `scheduler/exploration.cpp`。
+活动 CLI 使用 `core/scheduler.cpp`；另一份无调用者的 `scheduler/exploration.cpp`
+实验已删除。
 它在 :702-724 枚举进程，调用 `state_transition(S, process)`。
 
 手动模式一次执行一个 syscall；自动模式在 `exec_engine.cpp:229-243` 对

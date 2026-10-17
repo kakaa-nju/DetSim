@@ -43,7 +43,6 @@ LDLIBS = -ldwarf -lreadline -ldw -lzstd -lxxhash -lunwind-ptrace -lunwind-x86_64
 
 SRCS = src/main.cpp\
        src/core/scheduler.cpp src/core/guest.cpp src/core/monitor.cpp src/core/config.cpp src/core/syscall_fmt.cpp src/core/resolve.cpp \
-       src/core/scheduler/exploration.cpp \
        src/core/dwarf.cpp src/core/plugins.cpp src/core/runtime_profile.cpp src/core/state/state_view.cpp \
        src/core/state/state.cpp src/core/state/page_snapshot.cpp src/core/state/page_capture.cpp src/core/state/xstate.cpp src/core/state/state_store.cpp src/core/state/state_store_packed.cpp src/core/state/sysstate_store.cpp src/core/state/state_transition.cpp src/core/state/serialize.cpp \
        src/core/engine/pending_syscall.cpp src/core/engine/thread_manager.cpp src/core/engine/thread_control.cpp src/core/engine/thread_carrier.cpp src/core/engine/thread_pool.cpp src/core/engine/signal_handler.cpp src/core/engine/exec_engine.cpp \

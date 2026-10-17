@@ -120,10 +120,10 @@ are under `tools/storage/`. See [directory boundaries and submodule audit](repos
 | Emulated resources | `subsys/fs`, `subsys/net`, `subsys/sync` |
 | Inspection | `core/dwarf.cpp`, `utils/expr*`, `core/syscall_fmt.cpp` |
 
-`core/scheduler/exploration.cpp` is a second, compiled exploration implementation
-with `scheduler_exec_*` entry points. Current CLI calls the older `exec_*` entry
-points. Do not assume changes to the new implementation affect normal CLI runs.
-Consolidation requires equivalence tests; see the backlog.
+`core/scheduler.cpp` is the only compiled exploration implementation. The
+unused `core/scheduler/exploration.cpp` experiment with `scheduler_exec_*` entry
+points was removed after confirming it had no callers; it never affected CLI
+runs. Search-side changes should be evaluated against the actual `exec_*` path.
 
 ## Verification levels
 
@@ -176,8 +176,7 @@ control. Actual CLI BFS and iterative DFS also enumerate each eligible finite
 timeout alongside all saved runnable/Ready/Retry logical threads. Each action
 selects its actor after restore and owns its syscall-choice enumeration. This
 does not certify all futex/message outcomes or instruction-level interleavings.
-RAND and the unused scheduler path do not
-have this coverage guarantee.
+RAND does not have this coverage guarantee.
 
 Run the NP=1 and NP=2 gates in separate make invocations. The Redis gate requires
 the existing `examples/redis/redis/src/redis-server`; it downloads nothing and
