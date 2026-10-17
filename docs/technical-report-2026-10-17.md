@@ -878,3 +878,37 @@ healthy reference是`leaders:1`/`NATIVE_OK`。因此这是原生程序确实出�
 这证明案例能稳定发现这处**注入的**Raft安全违反并保存可重放反例；它不证明
 发现了未知的真实RedisRaft缺陷，也不等于完整module验收。未运行更深的mutant
 全矩阵；depth10的healthy超时属于有界压力测试的负面结果，单独记录。
+
+## 13.7 TUI/CLI 命令与阻塞展示（2026-10-17 晚）
+
+TUI 之前仍使用 `monitor.cpp` 里的旧命令表，CLI 的 `commands.cpp` 已经扩展但
+TUI 看不到；`pending` 等新命令只存在于一侧。现在 readline、batch 和 TUI 都走
+`execute_command_line`/`find_command`，手动 UI 默认选中 process 0，状态栏
+显示真实命令和 runnable/waiting/ready/retry 计数。
+
+10x40 PTY 可复现 TUI 启动卡死：固定 11 行状态区导致负内容高度和空 ncurses
+窗口。现在初始化/缩放会收缩状态区、拒绝不可用尺寸、检查
+`newwin/wresize/mvwin`，并保护零宽渲染；关闭时关闭 mouse reporting，UI
+入口与 shutdown 串行化。`make NP=1 check-tui` 用 PTY 覆盖 24x80、10x40、
+缩放到8x20，以及 `help/pending/inspect/thread/q` 和干净退出；它验证安全与
+命令可达，不验证颜色/布局。
+
+新增展示：
+
+- `pending [PROCESS]`：pending syscall、参数、reason/phase、deadline/result、
+  下一步动作和所有 runnable actor。
+- `thread`：附加 pending syscall/reason/phase/deadline。
+- `inspect [PROCESS]`：`StateView` schema1 JSON，包含寄存器、线程、pending、
+  futex 队列、信号/robust/clear-tid、描述符、文件、socket、pipe 和虚拟映射。
+- 阻塞 `si` 提示 `pending`/`thread N`/`si timeout`。旧的固定4KiB
+  `ui_printf` 会把真实4,247字节的 inspect 输出截断；格式化现在按需扩容。
+
+阻塞语义用原生 fixture 验证：futex WAIT 或 pipe read 进入 `Waiting` 后，
+该 actor 自己的 `si` 不推进且保留源状态；其他 runnable actor 可执行；
+peer write/futex WAKE 或显式 `si timeout` 使其 `Ready`，再 `si 0` 完成。
+超大 pipe write 需要部分进展时明确报 unsupported，不会被伪装成 pending。
+没有自动时间推进或 `wake` 命令；无 deadline 的 futex 必须由另一个 actor
+唤醒。`diff` 仍是 placeholder，TUI 还没有 live per-thread 面板。
+
+证据：3项PTY TUI、33项native场景（含futex跨actor回归和inspect JSON解析）、
+28行native actor、27项session测试、`make check`和NP1生产构建。
