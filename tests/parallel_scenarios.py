@@ -41,7 +41,7 @@ class ParallelScenarios(unittest.TestCase):
 
     def run_parallel(self, fixed):
         commands = self.root / "commands"
-        commands.write_text("sw 0\nparallel 2 2\nq\n")
+        commands.write_text("sw 0\nparallel 2 4 --split-depth 2\nq\n")
         argv = [str(TRACER), "-n", "-c", str(self.config), "-b", str(commands)]
         if fixed:
             argv = ["/usr/bin/setarch", "x86_64", "-R"] + argv
@@ -51,8 +51,11 @@ class ParallelScenarios(unittest.TestCase):
     def test_two_workers_partition_and_run_distinct_branches(self):
         result = self.run_parallel(fixed=True)
         self.assertEqual(result.returncode, 0, result.stdout)
-        self.assertIn("Parallel exploration: 2 workers, 2 branches, depth 2",
-                      result.stdout)
+        header = re.search(
+            r"Parallel exploration: 2 workers, (\d+) frontier branches, depth 4, split 2",
+            result.stdout)
+        self.assertIsNotNone(header, result.stdout)
+        self.assertGreaterEqual(int(header.group(1)), 2)
         merged = re.search(
             r"Merged: (\d+) unique states, (\d+) unique edges", result.stdout)
         self.assertIsNotNone(merged, result.stdout)
@@ -71,10 +74,10 @@ class ParallelScenarios(unittest.TestCase):
             self.assertNotIn("DetSim state/execution error:", text)
             self.assertIn("adopted cross-process bindings", text)
             self.assertIn("EDGE ", text)
-            match = re.search(r"Loaded state ([0-9a-f]{16})", text)
-            self.assertIsNotNone(match, text[-2000:])
-            loaded.append(match.group(1))
-        self.assertEqual(len(set(loaded)), 2, loaded)
+            matches = re.findall(r"Loaded state ([0-9a-f]{16})", text)
+            self.assertTrue(matches, text[-2000:])
+            loaded.extend(matches)
+        self.assertGreaterEqual(len(set(loaded)), 2, loaded)
 
     def test_normal_aslr_is_rejected_before_spawning(self):
         aslr = Path("/proc/sys/kernel/randomize_va_space")

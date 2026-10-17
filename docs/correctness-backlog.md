@@ -1382,12 +1382,16 @@ Two workers loading the same checkpoint and executing the same `si` produced the
 same successor hash (test `test_adopted_seed_snapshot_is_identical_across_workers`).
 The same test also verifies that a normal-ASLR worker is rejected before restore.
 
-`parallel N DEPTH` now adds a branch-partitioned coordinator: it enumerates unique
-one-step successors of the current state (actors plus discovered choices), copies
-the store to per-worker directories, spawns fixed-layout workers with
-`posix_spawn`, and each worker `load --adopt`s its assigned successor and runs the
-built-in `dfs`. The NP=2 gate starts two workers on distinct root branches and
-checks both adopted/search outputs. Artifacts are retained under
+`parallel N DEPTH [--split-depth=D]` now adds a branch-partitioned coordinator:
+it expands D frontier levels (default 1; actors plus discovered choices, capped at
+512), copies the store to per-worker directories, spawns fixed-layout workers with
+`posix_spawn`, and each worker `load --adopt`s assigned frontier states and runs
+the built-in `dfs` for the remaining depth. The NP=2 gate starts two workers on a depth-2 frontier
+(three branches) and checks adopted/search outputs plus the merged union. A worker
+that loads several frontier states also exposed a `cmd_load` bug: after
+`recover_running_state()` it overwrote the resolved state with the unbound loaded
+copy, so the second adoption failed with "Logical thread has no unique owned
+carrier binding". The overwrite is removed; NP1 load/replay tests still pass. Artifacts are retained under
 `.parallel-<pid>-<time>/`.
 
 After the workers exit, the coordinator inspects each worker `SysStateStore` for

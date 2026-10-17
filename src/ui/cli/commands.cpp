@@ -15,6 +15,7 @@
 #include <spawn.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <set>
 #include <unordered_set>
 #include <string_view>
 #include <cctype>
@@ -573,11 +574,39 @@ int cmd_parallel(char *args) {
     std::istringstream input(args ? args : "");
     int workers = 0;
     int depth = 0;
-    std::string extra;
+    int split_depth = 1;
+    std::string option;
     if (!(input >> workers >> depth) || workers < 1 || workers > 32 ||
-        depth < 1 || (input >> extra)) {
-        detsim::ui::ui_printf("Usage: parallel <workers 1..32> <depth>\n");
+        depth < 1) {
+        detsim::ui::ui_printf(
+            "Usage: parallel <workers 1..32> <depth> [--split-depth=N]\n");
         return 1;
+    }
+    while (input >> option) {
+        std::string value;
+        if (option == "--split-depth") {
+            if (!(input >> value)) {
+                detsim::ui::ui_printf(
+                    "parallel: --split-depth must be 1..depth\n");
+                return 1;
+            }
+        } else if (option.rfind("--split-depth=", 0) == 0) {
+            value = option.substr(14);
+        } else {
+            detsim::ui::ui_printf(
+                "Usage: parallel <workers 1..32> <depth> [--split-depth=N]\n");
+            return 1;
+        }
+        size_t parsed = 0;
+        const auto result = std::from_chars(value.data(),
+            value.data() + value.size(), parsed);
+        if (value.empty() || result.ec != std::errc{} ||
+            result.ptr != value.data() + value.size() ||
+            parsed < 1 || parsed > static_cast<size_t>(depth)) {
+            detsim::ui::ui_printf("parallel: --split-depth must be 1..depth\n");
+            return 1;
+        }
+        split_depth = static_cast<int>(parsed);
     }
     for (int i = 0; i < NP; ++i) {
         if (!fixed_layout(ptmc_state.pids[i])) {
@@ -587,9 +616,29 @@ int cmd_parallel(char *args) {
         }
     }
 
-    std::vector<hash_type> branches;
+    const hash_type original_hash = ptmc_state.running_state.ss_hash;
+    std::vector<hash_type> branches{original_hash};
+    std::set<hash_type> seen{original_hash};
     try {
-        branches = enumerate_successors(ptmc_state.running_state);
+        for (int level = 0; level < split_depth; ++level) {
+            std::vector<hash_type> next;
+            for (hash_type hash : branches) {
+                load(hash);
+                for (hash_type successor : enumerate_successors(ptmc_state.running_state)) {
+                    if (successor && seen.insert(successor).second)
+                        next.push_back(successor);
+                }
+            }
+            if (next.empty()) break;
+            if (next.size() > 512) {
+                detsim::ui::ui_printf(
+                    "parallel: frontier capped at 512 branches (was %zu)\n",
+                    next.size());
+                next.resize(512);
+            }
+            branches.swap(next);
+        }
+        load(original_hash);
     } catch (const std::exception &error) {
         detsim::ui::ui_printf("parallel branch enumeration failed: %s\n", error.what());
         return 1;
@@ -673,8 +722,8 @@ int cmd_parallel(char *args) {
             script << "load --adopt " << branch_hash << "\n";
             worker.assigned.push_back(branches[branch]);
             ++worker.branch_count;
-            if (depth > 1)
-                script << "dfs " << (depth - 1) << " --quiet\n";
+            if (depth > split_depth)
+                script << "dfs " << (depth - split_depth) << " --quiet\n";
         }
         script << "tree\nq\n";
         script.close();
@@ -706,8 +755,9 @@ int cmd_parallel(char *args) {
         started.push_back(std::move(worker));
     }
 
-    detsim::ui::ui_printf("Parallel exploration: %d workers, %zu branches, depth %d\n",
-                          workers, branches.size(), depth);
+    detsim::ui::ui_printf(
+        "Parallel exploration: %d workers, %zu frontier branches, depth %d, split %d\n",
+        workers, branches.size(), depth, split_depth);
     detsim::ui::ui_printf("Artifacts: %s\n", base.c_str());
     bool failed = false;
     std::unordered_set<hash_type> merged_states;
@@ -838,7 +888,6 @@ int cmd_load(char *args) {
                 adopt_snapshot_bindings(i, state.ts_hash[i], state.child[i]);
         }
         state.recover_running_state();
-        ptmc_state.running_state = state;
         detsim::ui::ui_printf("Loaded state %016lx%s\n", matches[0],
                               adopt ? " (adopted cross-process bindings)" : "");
     } else if (matches.size() == 0) {

@@ -936,10 +936,14 @@ checkpoint `load --adopt` 后执行同一 `si`，得到相同 successor hash；�
 `test_adopted_seed_snapshot_is_identical_across_workers` 覆盖 full/pages；普通
 ASLR worker 在 restore 前被明确拒绝。
 
-随后加入 `parallel N DEPTH`：从当前状态枚举 actor/choice 后继，复制 store，
-用 `posix_spawn` 起 N 个 fixed-layout worker；每个 worker `load --adopt` 一个分支并
-跑内建 `dfs`。NP=2 门禁实际起了两个 worker，root successor 不同且两边都完成
-DFS。artifacts 保留在 `.parallel-<pid>-<time>/`。
+随后加入 `parallel N DEPTH [--split-depth=D]`：默认展开一层，D>1 时在 seed 内
+逐层展开 frontier（上限512），再复制 store，用 `posix_spawn` 起 N 个 fixed-layout
+worker；每个 worker `load --adopt` 分到的 frontier 状态并跑内建 `dfs`。NP=2 门禁
+在 depth-2 frontier 上起两个 worker，三个分支都被分配且两边完成 DFS；artifacts
+保留在 `.parallel-<pid>-<time>/`。一个 worker 连续 load 多个 frontier 状态时暴露了
+`cmd_load` 在 `recover_running_state()` 后又用未绑定 state 覆盖全局状态的问题
+（第二次 adopt 报 "Logical thread has no unique owned carrier binding"），该覆盖已
+删除；NP1 load/replay 仍通过。
 
 worker 退出后，coordinator 读取每个 worker 的 `SysStateStore` visited hash，并解析
 worker `tree` 输出的 `EDGE` 行，打印 post-hoc union `Merged: ...`。这仍不是完整

@@ -34,7 +34,7 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 | `pending [PROCESS]` | 列出所有阻塞/可完成 syscall、原因、deadline 和 runnable actor |
 | `inspect [PROCESS]` | 输出保存状态的 schema1 JSON（线程/寄存器/pending/futex/描述符/文件/socket） |
 | `plugins` | 列出已加载插件、ABI/monitor schema、time-choice 和当前 monitor 字节 |
-| `parallel N DEPTH` | 从当前状态枚举后继，起 N 个 fixed-layout tracer worker 各搜一个分支，并汇总 visited/edges |
+| `parallel N DEPTH [--split-depth=D]` | 展开 D 层 frontier，起 N 个 fixed-layout worker 分工搜索，并汇总 visited/edges |
 | `tree` | 打印已记录的搜索边（source target process choice thread） |
 | `load [--adopt] HASH` | 按 hash 前缀加载保存状态；`--adopt` 允许匹配 layout 的新进程接管 seed snapshot |
 | `info` / `info current` | 系统调用历史 / 当前边的单行摘要 |
@@ -81,10 +81,11 @@ snapshot 绑定到本地 carrier。它要求：
 已经有 full/pages 回归：同一 seed checkpoint 启动两个 worker，`load --adopt` 后执行
 同一 `si`，得到相同 successor hash。
 
-`parallel N DEPTH` 现在把这一步接成可执行的 coordinator：从当前状态用
-`enumerate_successors` 枚举 actor/choice 后继，复制 store 到 worker 目录，用
-`posix_spawn` 起 N 个 fixed-layout worker；每个 worker `load --adopt` 自己的分支后
-跑内建 `dfs DEPTH-1`，最后执行 `tree` 输出边。父进程汇总每个 worker 的
+`parallel N DEPTH [--split-depth=D]` 现在把这一步接成可执行的 coordinator：
+默认 D=1，从当前状态枚举 actor/choice 后继；D>1 时在 seed 内逐层展开 frontier，
+再把 frontier 状态分给 worker。复制 store 到 worker 目录后，用 `posix_spawn` 起
+N 个 fixed-layout worker；每个 worker `load --adopt` 自己的分支后跑内建
+`dfs DEPTH-D`，最后执行 `tree` 输出边。父进程汇总每个 worker 的
 `SysStateStore` visited hash 和 `EDGE` 行，打印 `Merged: N unique states, M unique
 edges`。worker 输出/artifacts 保留在 `.parallel-<pid>-<time>/`。
 
