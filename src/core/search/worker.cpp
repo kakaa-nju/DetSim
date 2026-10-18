@@ -49,6 +49,9 @@ int worker_loop(int fd, wire::Limits limits, int blob_fd) {
         auto& store = StateStore::instance();
         if (!worker_shared_pool_path.empty()) store.attach_shared_pool(worker_shared_pool_path, true);
         const auto pool = worker_shared_pool_path.empty() ? nullptr : store.shared_pool();
+        // Publisher proofs belong to this immutable pool instance, never a
+        // pathname. Declaration order keeps the pool alive through destruction.
+        const auto publisher = pool ? std::make_unique<snapshot::SharedPublisher>(*pool) : nullptr;
         detsim::resident::Scope resident_scope;
         channel.send(wire::Hello{ptmc_state.model_identity, compatibility_manifest()});
         for (;;) {
@@ -92,7 +95,7 @@ int worker_loop(int fd, wire::Limits limits, int blob_fd) {
                     edge.actor = actor; edge.choice = choice; edge.choice_count = static_cast<uint32_t>(count);
                     edge.property_violation = result.property_violation || result.new_state.property_failed;
                     edge.result_code = result.code;
-                    edge.bundle = pool ? snapshot::export_shared_bundle(edge.target, *pool)
+                    edge.bundle = publisher ? publisher->export_bundle(edge.target)
                                        : snapshot::export_bundle(edge.target);
                     channel.send(std::move(edge));
                 });

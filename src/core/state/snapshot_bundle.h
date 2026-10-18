@@ -1,6 +1,8 @@
 #pragma once
 #include "state.h"
 #include "state_transition.h"
+#include <list>
+#include <unordered_map>
 #include <string>
 #include <vector>
 
@@ -22,6 +24,24 @@ struct Bundle {
     hash_type system_key = 0;
     std::vector<uint8_t> metadata;
     std::vector<Blob> blobs;
+};
+// One worker-loop publication context. The caller must keep this exact pool
+// instance alive until the publisher is destroyed. Published pool objects must
+// remain immutable. Proof eviction drops only an optimization, never objects.
+class SharedPublisher final {
+public:
+    explicit SharedPublisher(SharedObjectPool& pool, size_t root_capacity = 1024);
+    SharedPublisher(const SharedPublisher&) = delete;
+    SharedPublisher& operator=(const SharedPublisher&) = delete;
+    SharedPublisher(SharedPublisher&&) = delete;
+    SharedPublisher& operator=(SharedPublisher&&) = delete;
+    Bundle export_bundle(hash_type system_key);
+private:
+    void remember(const hash_type (&roots)[NP]);
+    SharedObjectPool& pool_;
+    size_t capacity_;
+    std::list<hash_type> recent_;
+    std::unordered_map<hash_type, std::list<hash_type>::iterator> proven_;
 };
 // Complete immutable closure only: no physical bindings or live-process access.
 Bundle export_bundle(hash_type system_key);

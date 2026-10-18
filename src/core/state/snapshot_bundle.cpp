@@ -30,23 +30,25 @@ sys_state decode(const Bundle& bundle) {
 }
 // Loads only saved bytes using the normal validators. The visitor enforces
 // supplied-closure membership on import, independently of destination caches.
-template<class Visit> void validate_closure(sys_state& state, Visit visit) {
-    for (int node = 0; node < NP; ++node) {
-        const auto root = state.ts_hash[node];
-        visit(root);
-        const auto view = SnapshotView::open(root);
-        for (auto key : view->referenced_blob_keys()) visit(key);
-        // Manifest validation is lazy for page payloads; force every page and
-        // its declared size before publication, including unobserved regions.
-        for (size_t region = 0; region < view->regions().size(); ++region)
-            for (size_t page = 0; page < view->page_count(region); ++page)
-                (void)view->page(region, page);
-        state.child[node] = tracee_state(root);
-        for (const auto& [path, file] : state.child[node].fs_state.filesystem) {
-            (void)path;
-            if (auto key = file.content.saved_blob_key()) visit(key);
-        }
+template<class Visit> tracee_state validate_root(hash_type root, Visit& visit) {
+    visit(root);
+    const auto view = SnapshotView::open(root);
+    for (auto key : view->referenced_blob_keys()) visit(key);
+    // Manifest validation is lazy for page payloads; force every page and
+    // its declared size before publication, including unobserved regions.
+    for (size_t region = 0; region < view->regions().size(); ++region)
+        for (size_t page = 0; page < view->page_count(region); ++page)
+            (void)view->page(region, page);
+    tracee_state child(root);
+    for (const auto& [path, file] : child.fs_state.filesystem) {
+        (void)path;
+        if (auto key = file.content.saved_blob_key()) visit(key);
     }
+    return child;
+}
+template<class Visit> void validate_closure(sys_state& state, Visit visit) {
+    for (int node = 0; node < NP; ++node)
+        state.child[node] = validate_root(state.ts_hash[node], visit);
 }
 }
 Bundle export_bundle(hash_type system_key) {
@@ -165,29 +167,67 @@ std::vector<uint8_t> encode_ready(const Bundle& bundle, const std::vector<ActorA
     return bytes;
 }
 }
-void publish_shared_state(hash_type key, SharedObjectPool& pool) {
+namespace {
+template<class Proven, class Commit>
+Bundle publish_reference(hash_type key, SharedObjectPool& pool, Proven proven, Commit commit) {
     Bundle bundle; bundle.system_key = key;
     require(SysStateStore::instance().load(key, bundle.metadata), "Missing shared system metadata");
     auto state = decode(bundle);
     require(!state.model_identity.empty(), "Empty shared snapshot execution model");
+    // This also checks pool poison before any context proof can be used.
     if (const auto existing = pool.load_ready(key)) {
         const auto saved = decode_ready(key, *existing, state.model_identity);
         require(saved.metadata == bundle.metadata, "Conflicting shared ready metadata");
-        return; // Immutable ready certificate is valid throughout this pool generation.
+        bundle.version = 2;
+        return bundle; // Whole-system certificate; do not seed local root proofs.
     }
     std::set<hash_type> seen;
-    validate_closure(state, [&](hash_type blob_key) {
+    auto publish = [&](hash_type blob_key) {
         if (!seen.insert(blob_key).second) return;
         const auto bytes = StateStore::instance().load_shared(blob_key);
         require(bytes && !bytes->empty(), "Missing shared snapshot dependency");
-        // publish validates existing-key equality or atomically installs missing
-        // bytes. A private hot cache cannot substitute for pool publication.
         pool.publish_blob(blob_key, bytes->data(), bytes->size());
-    });
+    };
+    for (int node = 0; node < NP; ++node) {
+        const auto root = state.ts_hash[node];
+        // A root proof certifies only its immutable closure in this pool.
+        // Decode metadata again: actors depend on this system's status/property.
+        state.child[node] = proven(root) ? tracee_state(root) : validate_root(root, publish);
+    }
     const auto actors = enabled_actor_actions(state);
     const auto record = encode_ready(bundle, actors);
     (void)decode_ready(key, record, state.model_identity);
-    pool.publish_ready(key, record); // Last: all referenced objects were validated and published.
+    pool.publish_ready(key, record);
+    commit(state.ts_hash); // No proof or LRU change before successful Ready publication.
+    bundle.version = 2;
+    return bundle;
+}
+}
+void publish_shared_state(hash_type key, SharedObjectPool& pool) {
+    (void)publish_reference(key, pool, [](hash_type) { return false; }, [](const auto&) {});
+}
+SharedPublisher::SharedPublisher(SharedObjectPool& pool, size_t root_capacity)
+    : pool_(pool), capacity_(root_capacity) {}
+void SharedPublisher::remember(const hash_type (&roots)[NP]) {
+    if (!capacity_) return;
+    for (const auto root : roots) {
+        if (const auto found = proven_.find(root); found != proven_.end()) {
+            recent_.splice(recent_.begin(), recent_, found->second);
+            continue;
+        }
+        recent_.push_front(root);
+        try { proven_.emplace(root, recent_.begin()); }
+        catch (...) { recent_.pop_front(); throw; }
+        if (proven_.size() > capacity_) {
+            proven_.erase(recent_.back());
+            recent_.pop_back();
+        }
+    }
+}
+Bundle SharedPublisher::export_bundle(hash_type key) {
+    return publish_reference(key, pool_,
+        [&](hash_type root) { return proven_.contains(root); },
+        [&](const auto& roots) { remember(roots); });
 }
 ReadyState load_shared_state(hash_type key, const std::string& expected, SharedObjectPool& pool) {
     const auto record = pool.load_ready(key);
@@ -195,10 +235,7 @@ ReadyState load_shared_state(hash_type key, const std::string& expected, SharedO
     return decode_ready(key, *record, expected).ready;
 }
 Bundle export_shared_bundle(hash_type key, SharedObjectPool& pool) {
-    publish_shared_state(key, pool);
-    Bundle result; result.version = 2; result.system_key = key;
-    require(SysStateStore::instance().load(key, result.metadata), "Missing shared system metadata");
-    return result;
+    return publish_reference(key, pool, [](hash_type) { return false; }, [](const auto&) {});
 }
 ReadyState import_shared_bundle(const Bundle& bundle, const std::string& expected,
                                SharedObjectPool& pool, bool materialize_child) {

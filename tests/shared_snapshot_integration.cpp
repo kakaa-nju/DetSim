@@ -1,6 +1,8 @@
 #include "snapshot_bundle.h"
 #include "shared_object_pool.h"
 #include <sys/syscall.h>
+#include <type_traits>
+#include "proc_status.h"
 #include "page_snapshot.h"
 #include "sysstate_store.h"
 #include "utils.h"
@@ -24,6 +26,36 @@ extern "C" int __wrap_fsync(int fd) {
     if (fail_sync.load()) { errno = EIO; return -1; }
     return __real_fsync(fd);
 }
+// Linker wrappers count the actual calls, including warm-cache publication.
+static std::atomic<size_t> page_calls{0}, blob_publications{0};
+static std::atomic<bool> fail_ready_publication{false};
+extern "C" SnapshotView::OwnedSpan real_snapshot_page(const SnapshotView*, size_t, size_t)
+    asm("__real__ZNK12SnapshotView4pageEmm");
+extern "C" SnapshotView::OwnedSpan wrapped_snapshot_page(const SnapshotView*, size_t, size_t)
+    asm("__wrap__ZNK12SnapshotView4pageEmm");
+extern "C" SnapshotView::OwnedSpan wrapped_snapshot_page(const SnapshotView* view, size_t region, size_t page) {
+    ++page_calls;
+    return real_snapshot_page(view, region, page);
+}
+extern "C" void real_publish_blob(SharedObjectPool*, hash_type, const void*, size_t)
+    asm("__real__ZN6detsim8snapshot16SharedObjectPool12publish_blobEmPKvm");
+extern "C" void wrapped_publish_blob(SharedObjectPool*, hash_type, const void*, size_t)
+    asm("__wrap__ZN6detsim8snapshot16SharedObjectPool12publish_blobEmPKvm");
+extern "C" void wrapped_publish_blob(SharedObjectPool* pool, hash_type key, const void* bytes, size_t size) {
+    ++blob_publications;
+    real_publish_blob(pool, key, bytes, size);
+}
+extern "C" void real_publish_ready(SharedObjectPool*, hash_type, const std::vector<uint8_t>&)
+    asm("__real__ZN6detsim8snapshot16SharedObjectPool13publish_readyEmRKSt6vectorIhSaIhEE");
+extern "C" void wrapped_publish_ready(SharedObjectPool*, hash_type, const std::vector<uint8_t>&)
+    asm("__wrap__ZN6detsim8snapshot16SharedObjectPool13publish_readyEmRKSt6vectorIhSaIhEE");
+extern "C" void wrapped_publish_ready(SharedObjectPool* pool, hash_type key, const std::vector<uint8_t>& bytes) {
+    if (fail_ready_publication.exchange(false))
+        throw std::runtime_error("Injected failure at Ready publication boundary");
+    real_publish_ready(pool, key, bytes);
+}
+static_assert(!std::is_copy_constructible_v<SharedPublisher> && !std::is_move_constructible_v<SharedPublisher>);
+static_assert(!std::is_copy_assignable_v<SharedPublisher> && !std::is_move_assignable_v<SharedPublisher>);
 static void require(bool value, const char* text) { if (!value) throw std::runtime_error(text); }
 template<class F> static void rejects(F action) {
     bool rejected = false;
@@ -47,7 +79,7 @@ template<class T> static std::vector<uint8_t> encode(const T& object) {
     { cereal::BinaryOutputArchive archive(out); archive(object); }
     const auto bytes = out.str(); return {bytes.begin(), bytes.end()};
 }
-static hash_type make_root(bool pages) {
+static hash_type make_root(bool pages, char memory_value = 'm') {
     tracee_state saved;
     saved.threads.resize(2);
     for (int slot=0; slot<2; ++slot) {
@@ -64,7 +96,7 @@ static hash_type make_root(bool pages) {
     { FileContentSnapshotScope scope; metadata = encode(saved); }
     RegionInfo region{}; region.start = 0x1000; region.end = 0x2000; region.prot = PROT_READ;
     memcpy(region.flags, "r--p", 5);
-    std::vector<uint8_t> memory(4096, 'm'); user_regs_struct regs{};
+    std::vector<uint8_t> memory(4096, memory_value); user_regs_struct regs{};
     std::vector<uint8_t> root;
     auto& store = StateStore::instance();
     if (pages) {
@@ -117,6 +149,110 @@ static void check_actors(const ReadyState& ready) {
                 "Canonical process/thread/action order preserved");
     }
 }
+static hash_type new_system(hash_type root, bool failed = false, bool first_dead = false,
+                            hash_type last_root = 0) {
+    static uint64_t nonce = 0;
+    sys_state state;
+    for (auto& key : state.ts_hash) key = root;
+    if (last_root) state.ts_hash[NP - 1] = last_root;
+    state.model_identity = "bundle-fixture/model1";
+    state.monitor_states["property"] = {1,2,3};
+    state.monitor_states["nonce"] = encode(++nonce);
+    state.property_failed = failed;
+    if (first_dead) state.status[0] = DIFEXITED;
+    state.ss_hash = state.identity_hash();
+    state.save_metadata();
+    return state.ss_hash;
+}
+static void reset_calls() { page_calls = 0; blob_publications = 0; }
+static void full_calls() {
+    require(page_calls.load() > 0 && blob_publications.load() > 0,
+            "Cold proof must perform actual page validation and blob publication");
+}
+static void hit_calls() {
+    require(page_calls.load() == 0 && blob_publications.load() == 0,
+            "Root proof hit must skip page access and blob publication");
+}
+static void publisher_proofs(bool pages, const std::filesystem::path& directory) {
+    const auto a = make_root(pages), b = make_root(pages, 'n'), c = make_root(pages, 'o');
+    SharedObjectPool pool(directory.string());
+    SharedPublisher publisher(pool);
+    const auto first = new_system(a);
+    reset_calls(); publisher.export_bundle(first); full_calls();
+    const auto second = new_system(a);
+    require(first != second, "Use fresh system keys, not whole-system ready hits");
+    reset_calls(); const auto cached = publisher.export_bundle(second); hit_calls();
+    check_actors(load_shared_state(cached.system_key, "bundle-fixture/model1", pool));
+    // Global admission still comes from this system, not a cached actor list.
+    reset_calls(); const auto failed = publisher.export_bundle(new_system(a, true)); hit_calls();
+    require(load_shared_state(failed.system_key, "bundle-fixture/model1", pool).actors.empty(),
+            "Property failure must suppress actors despite root proof hit");
+    reset_calls(); const auto exited = publisher.export_bundle(new_system(a, false, true)); hit_calls();
+    const auto admitted = load_shared_state(exited.system_key, "bundle-fixture/model1", pool);
+    require(admitted.actors.size() == 2 * (NP - 1), "Status must filter cached-root actors");
+    for (const auto& actor : admitted.actors) require(actor.process != 0, "Exited process admitted");
+
+    // cap=0 and the free function remain independent complete-validation paths.
+    SharedPublisher uncached(pool, 0);
+    for (int i = 0; i < 2; ++i) {
+        reset_calls(); uncached.export_bundle(new_system(a)); full_calls();
+    }
+    reset_calls(); export_shared_bundle(new_system(a), pool); full_calls();
+    SharedObjectPool reference((directory.string() + "-reference"));
+    const auto expected = export_shared_bundle(second, reference);
+    require(expected.metadata == cached.metadata && *reference.load_ready(second) == *pool.load_ready(second),
+            "Memoized and stateless paths must publish identical ready bytes");
+
+    // Changing just one process must validate that root without rewalking a.
+    publisher.export_bundle(new_system(a, false, false, b));
+    const auto mixed_key = new_system(a, false, false, c);
+    reset_calls(); const auto mixed = publisher.export_bundle(mixed_key); full_calls();
+    const auto mixed_pages = page_calls.load(), mixed_blobs = blob_publications.load();
+    reset_calls(); const auto mixed_reference = export_shared_bundle(mixed_key, reference); full_calls();
+    require(mixed_pages < page_calls.load() && mixed_blobs < blob_publications.load(),
+            "Mixed-root proof must avoid validating the unchanged process");
+    require(mixed.metadata == mixed_reference.metadata &&
+            *pool.load_ready(mixed_key) == *reference.load_ready(mixed_key),
+            "Mixed-root publication must match independent stateless validation");
+    reset_calls(); publisher.export_bundle(new_system(a, false, false, c)); hit_calls();
+
+    SharedPublisher tiny(pool, 1);
+    reset_calls(); tiny.export_bundle(new_system(a)); full_calls();
+    reset_calls(); tiny.export_bundle(new_system(b)); full_calls();
+    reset_calls(); tiny.export_bundle(new_system(a)); full_calls(); // a was evicted.
+    reset_calls(); tiny.export_bundle(new_system(a)); hit_calls();
+
+    // The first root's objects can be published while Ready itself fails. That
+    // failure must not install b's proof or evict the existing a proof.
+    const auto rejected = new_system(b);
+    fail_ready_publication = true;
+    reset_calls(); rejects([&] { tiny.export_bundle(rejected); }); full_calls();
+    require(!pool.load_ready(rejected), "Failed publication must not expose Ready");
+    reset_calls(); tiny.export_bundle(new_system(a)); hit_calls();
+    reset_calls(); tiny.export_bundle(rejected); full_calls();
+    reset_calls(); tiny.export_bundle(new_system(b)); hit_calls();
+
+    // A failed cache hit must not promote LRU ordering either.
+    SharedPublisher ordering(pool, 2);
+    ordering.export_bundle(new_system(a)); ordering.export_bundle(new_system(b));
+    fail_ready_publication = true;
+    reset_calls(); rejects([&] { ordering.export_bundle(new_system(a)); }); hit_calls();
+    ordering.export_bundle(new_system(c)); // Evicts a, not b.
+    reset_calls(); ordering.export_bundle(new_system(b)); hit_calls();
+    reset_calls(); ordering.export_bundle(new_system(a)); full_calls();
+
+    // No static registry can carry proofs into a new context or pool instance.
+    SharedPublisher fresh_context(pool);
+    reset_calls(); fresh_context.export_bundle(new_system(a)); full_calls();
+    SharedObjectPool same_path(directory.string(), false);
+    SharedPublisher other_instance(same_path);
+    reset_calls(); other_instance.export_bundle(new_system(a)); full_calls();
+    pool.flush();
+    fail_sync = true;
+    rejects([&] { pool.flush(); });
+    fail_sync = false;
+    reset_calls(); rejects([&] { publisher.export_bundle(new_system(a)); }); hit_calls();
+}
 int main(int argc,char** argv) {
     try {
         if(argc==5 && !strcmp(argv[1],"--cold")) {
@@ -144,6 +280,7 @@ int main(int argc,char** argv) {
             start(source,1<<20);const auto bundle=fixture(pages);
             SharedObjectPool pool(pool_path.string());
             rejects([&]{load_shared_state(bundle.system_key,"bundle-fixture/model1",pool);});
+            publisher_proofs(pages, base/(suffix+"-publisher-pool"));
             const auto ref=export_shared_bundle(bundle.system_key,pool);
             require(ref.version==2 && ref.blobs.empty() && ref.metadata==bundle.metadata,"Reference carries metadata only");
             const auto before=StateStore::instance().get_stats().load_requests;

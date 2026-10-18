@@ -72,6 +72,16 @@ Linux >=5.8 才提供所依赖的 writeback 错误报告。
 正常关闭后池继续保留；worker 私有存储删除不能让已发布反例消失。
 这不是协调器崩溃恢复或分布式远程共享存储协议。
 
+每个 worker loop 还持有一个绑定当前 Pool 实例的 `SharedPublisher`，最多保留
+1024 个 tracee-root 的完整闭包证明。新系统状态引用已证明的 root 时，跳过其页读取
+和依赖发布，但仍重新解码 tracee metadata，结合本系统 metadata 的 property/status
+重新计算 actors。
+只有完整 Ready 发布成功后才更新证明和 LRU；miss/eviction 回到完整验证。
+新上下文或新 Pool（即使路径相同）不继承证明，pool poison 仍拒绝命中路径。
+这些是宿主优化缓存，不进入状态身份或持久化格式。
+它不同于 resident-memory 对运行中进程字节的证明：只依赖池中对象的私有不可变生命周期，
+不增加对 live memory 的省略或新脏页假设。stateless 发布与完整 Bundle 路径仍保留全量校验。
+
 `--storage durable` 保留完整 SnapshotBundle 路径，包含原始系统 metadata、
 所有节点 root、page 对象及外置 VFS 内容。
 引用必须在包中声明，即使目的端缓存已有对应对象。先检查 hash/重复冲突，保存并验证

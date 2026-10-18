@@ -1484,3 +1484,15 @@ checks, but no same-size worker-count speedup measurement exists yet. Small-grap
 8-worker speedup is 4.52x search-only, 3.65x including finalization; near-linear
 scaling is not established. See the [scale report](shared-pool-scaling-2026-10-19.md).
 None of this closes general snapshot/atom coverage or runtime admission gaps.
+
+Follow-up v3 adds a worker-local SharedPublisher root-proof LRU bound to one
+Pool instance. Only successful Ready publication updates it; hits still decode
+metadata and derive actors, and poison/miss/eviction retain explicit checks.
+Component wrappers verify actual skipped page/blob calls for fresh system keys,
+mixed-root equivalence, failed publication/LRU behavior, fresh pool/context and
+warm-poison rejection. NP2 15 native scenarios, NP1 actor/adoption gates, strict
+v1 bundles, make check and production builds pass. Cold 1/2/4/6/8 pilots retain
+the same complete labeled graph. Absolute throughput improves at every count,
+but 8-worker whole-chain speedup falls to 3.98x because the 1-worker path benefits
+more. This is not near-linear scaling; further work remains. These proof caches
+are host optimization state, excluded from semantic identity and persistence.

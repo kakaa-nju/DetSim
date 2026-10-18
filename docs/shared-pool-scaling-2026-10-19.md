@@ -153,6 +153,69 @@ PDEATHSIG/EXITKILL 保证未改变。这里没有承诺任意无保护宿主进�
 `np2-phase-inventory-gates.log`，保留的辅助进程证据在 `late-helper-evidence/`。
 独立性能对照仍在进行。
 
+## v2：批量同步＋移除热路径进程扫描
+
+提交 `8db95db`；冻结 tracer SHA256
+`2f4cc9fe7fe94f02d43627cfc2d46beeb89cc064e86fc53eaae3b5cb8dffc8ec`。
+depth12、BFS、全新 Session、无 profiler/资源采样；每配置单次。
+首个 1-worker 会话做本地串行核对，其余会话复用该已验证参考并比较**完整带标签图**，
+避免每次重复独立串行验证。所有行保留 10,457 状态／18,266 边、零重试，
+规范图摘要与 v1 相同。来源：`build/shared-parallel/pilot-v2/summary.json`。
+
+| workers | 搜索命令秒 | 正常关闭秒 | 搜索＋关闭秒 | 含关闭加速 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 43.926 | 0.114 | 44.040 | 1.000× |
+| 2 | 22.700 | 0.164 | 22.864 | 1.926× |
+| 4 | 13.631 | 0.214 | 13.845 | 3.181× |
+| 6 | 11.028 | 0.214 | 11.242 | 3.918× |
+| 8 | 9.376 | 0.214 | 9.590 | 4.592× |
+
+持久化屏障没有删除或变成异步退出；关闭耗时下降来自去除逐文件同步循环。
+但搜索本身的 8-worker 单次仅从 10.012 到 9.376 秒，说明删除扫描虽有效，
+也没有解决所有扩展性损失。全链路 4-worker 效率约 79.5%、8-worker 约 57.4%，
+尚不支持接近线性扩展到 8 worker 的结论；6 物理核及宿主其它负载也需要控制。
+未重复测量，且参考核对方式不同，暂不把完整 Session 总耗时做前后速度比。
+
+## v3：有界 tracee-root 闭包证明
+
+`SharedPublisher` 绑定具体共享 Pool 实例，worker loop 保活 Pool，并且不可复制/移动。
+最多缓存 1024 个已经完整验证、发布的 tracee-root key，不缓存可变 child/actor 图。
+新系统状态的命中 root 仍重新解码 metadata、计算 actor；只省去完整页/依赖遍历。
+证明与 LRU 只在 Ready 成功发布后更新；cap0/stateless 和 miss/eviction 是完整路径。
+该优化不改进程内存捕获、不增加脏页追踪，也不弱化 v1 Bundle 成员检查或持久化屏障。
+
+实际 linker wrapper 测试确认命中新 system key 时页访问/blob 发布均为零，避免误测
+已有 whole-system Ready 的捷径；冷 miss、cap1 淘汰、发布失败不 seed/promote、新上下文/
+同路径新 Pool、性质/退出状态重新推导 actors 全通过。另验证混合 `[A,B]→[A,C]`
+比 stateless 少实际调用且 Ready bytes 相同，暖 proof 遇到 pool poison 必须拒绝。
+NP2 15 原生并行场景、NP1 actual actors/adoption、严格 v1 Bundle、`make check` 和
+NP1/2/3 生产构建通过；独立源码审查未发现 P0/P1。
+日志：`publisher-components.log`、`publisher-review-gates.log`、
+`publisher-native-np{1,2}.log`、`publisher-make-check.log`，均在 `build/shared-parallel/`。
+独立五行 pilot 已完成，冻结 tracer SHA256：
+`8ff9c82eb9c34f9b5f7886c43169be629df75a95cc96d124add9a2d155834b18`。
+与 v2 相同冷启动/参考方式，均为同一规范图、10,457 状态／18,266 条边、零重试。
+来源：`build/shared-parallel/pilot-v3/summary.json`。
+
+| workers | 搜索命令秒 | 正常关闭秒 | 搜索＋关闭秒 | 含关闭加速 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 31.085 | 0.064 | 31.149 | 1.000× |
+| 2 | 17.338 | 0.214 | 17.553 | 1.775× |
+| 4 | 10.756 | 0.264 | 11.020 | 2.827× |
+| 6 | 8.874 | 0.214 | 9.089 | 3.427× |
+| 8 | 7.555 | 0.264 | 7.820 | 3.983× |
+
+各 worker 数的绝对速度都提高，但 1-worker 获益更多，因而相对并行加速比反而下降。
+不能通过改用 v2 的较慢 1-worker 分母把这个结果包装成接近线性。
+这仍是单次 pilot；后续应交错重复测量，且要在大图上复核。
+
+离线读取该 case 的系统 metadata（含前缀/后置核对，共 10,755 个唯一记录），
+三个进程分别只有 2,951／368／1 个不同 tracee root，共 3,320 个。
+这说明不同系统状态确实大量复用 root，也说明每 worker 的 1,024 项缓存仍可能
+淘汰和重复验证。尚不能据此量化跨 worker 重复验证的因果比例。
+下一步研究导入 Task 的 Ready 是否可以直接为本 worker 建立相同根的闭包证明，
+以复用已经完成的全局验证，而非盲目扩大缓存或减慢单 worker 基线。
+
 ## 尚需完成
 
 1. 批量同步和移除扫描的同规模性能测量。
