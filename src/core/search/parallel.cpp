@@ -3,12 +3,14 @@
 #endif
 #include "parallel.h"
 #include "protocol.h"
+#include "object_transport.h"
 #include "compatibility.h"
 #include "config.h"
 #include "monitor.h"
 #include "runtime_profile.h"
 #include "state/sysstate_store.h"
 #include <nlohmann/json.hpp>
+#include <algorithm>
 #include <chrono>
 #include <cerrno>
 #include <csignal>
@@ -163,14 +165,18 @@ public:
     }
 };
 void spawn(Worker& worker, const fs::path& base, const fs::path& executable,
-           const fs::path& configuration, int timeout_ms, Journal& journal) {
+           const fs::path& configuration, int timeout_ms, Journal& journal, const std::shared_ptr<wire::ObjectCache>& cache) {
     const auto directory = base / ("worker-" + std::to_string(worker.id) + "-" + std::to_string(++worker.incarnation));
     fs::create_directory(directory);
     int sockets[2];
     if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sockets)) throw std::runtime_error("Worker socketpair failed");
     Fd original_parent(sockets[0]), original_child(sockets[1]);
-    Fd parent(fcntl(sockets[0], F_DUPFD_CLOEXEC, 4)), child(fcntl(sockets[1], F_DUPFD_CLOEXEC, 4));
-    require(parent.value >= 0 && child.value >= 0, "Worker socket duplication failed");
+    Fd parent(fcntl(sockets[0], F_DUPFD_CLOEXEC, 5)), child(fcntl(sockets[1], F_DUPFD_CLOEXEC, 5));
+    int objects[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, objects)) throw std::runtime_error("Worker object socketpair failed");
+    Fd object_parent(objects[0]), original_object_child(objects[1]);
+    Fd object_child(fcntl(objects[1], F_DUPFD_CLOEXEC, 5));
+    require(parent.value >= 0 && child.value >= 0 && object_child.value >= 0, "Worker socket duplication failed");
     posix_spawn_file_actions_t actions;
     checked(posix_spawn_file_actions_init(&actions), "spawn actions init");
     posix_spawnattr_t attrs;
@@ -183,12 +189,14 @@ void spawn(Worker& worker, const fs::path& base, const fs::path& executable,
         checked(posix_spawn_file_actions_addopen(&actions, STDOUT_FILENO, log.c_str(), O_WRONLY|O_CREAT|O_TRUNC, 0600), "spawn stdout");
         checked(posix_spawn_file_actions_adddup2(&actions, STDOUT_FILENO, STDERR_FILENO), "spawn stderr");
         checked(posix_spawn_file_actions_adddup2(&actions, child.value, 3), "spawn socket");
-        checked(posix_spawn_file_actions_addclosefrom_np(&actions, 4), "spawn close inherited fds");
+        checked(posix_spawn_file_actions_adddup2(&actions, object_child.value, 4), "spawn object socket");
+        checked(posix_spawn_file_actions_addclosefrom_np(&actions, 5), "spawn close inherited fds");
         checked(posix_spawnattr_setflags(&attrs, POSIX_SPAWN_SETPGROUP), "spawn flags");
         checked(posix_spawnattr_setpgroup(&attrs, 0), "spawn group");
         std::string exe = executable.string(), config = configuration.string(), target_cwd = tracee_native_cwd.empty() ? fs::current_path().string() : tracee_native_cwd;
         std::string io_timeout = std::to_string(timeout_ms);
         char* args[] = {exe.data(), const_cast<char*>("--worker-fd"), const_cast<char*>("3"),
+                        const_cast<char*>("--worker-blob-fd"), const_cast<char*>("4"),
                         const_cast<char*>("-n"), const_cast<char*>("-c"), config.data(),
                         const_cast<char*>("--target-cwd"), target_cwd.data(),
                         const_cast<char*>("--worker-io-timeout-ms"), io_timeout.data(), nullptr};
@@ -201,9 +209,23 @@ void spawn(Worker& worker, const fs::path& base, const fs::path& executable,
     }
     posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attrs);
     wire::Limits limits; limits.io_timeout_ms = timeout_ms;
-    worker.channel = std::make_unique<wire::Channel>(parent.release(), limits);
+    worker.channel = std::make_unique<wire::Channel>(parent.release(), limits, object_parent.release(), cache);
     worker.hello = false; worker.deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
     journal.write({{"event","worker_spawn"},{"worker",worker.id},{"pid",worker.pid},{"incarnation",worker.incarnation},{"directory",directory.string()}});
+}
+void transport_report(Worker& worker, Journal& journal) {
+    if (!worker.channel) return;
+    const auto wire = worker.channel->counters();
+    const auto objects = worker.channel->object_statistics();
+    journal.write({{"event","transport"},{"worker",worker.id},{"incarnation",worker.incarnation},
+        {"stream_send_calls",wire.send_calls},{"stream_recv_calls",wire.recv_calls},{"stream_poll_calls",wire.poll_calls},
+        {"stream_bytes_sent",wire.bytes_sent},{"stream_bytes_received",wire.bytes_received},
+        {"shared_frames",wire.shared_frames},{"raw_fallback_frames",wire.raw_fallback_frames},{"raw_fallback_bytes",wire.raw_fallback_bytes},
+        {"object_send_calls",objects.send_calls},{"object_recv_calls",objects.recv_calls},{"object_poll_calls",objects.poll_calls},
+        {"memfds_created",objects.memfds_created},{"memfd_bytes_created",objects.memfd_bytes_created},
+        {"segments_received",objects.segments_received},{"reference_bytes",objects.reference_bytes},{"missing_bytes",objects.missing_bytes},
+        {"peak_inflight_bytes",objects.peak_inflight_bytes},{"cache_bytes",objects.cache_bytes},
+        {"cache_segments",objects.cache_segments},{"peak_cache_bytes",objects.peak_cache_bytes}});
 }
 const char* phase_name(NodePhase phase) {
     switch (phase) {
@@ -220,6 +242,7 @@ Report run_parallel(const sys_state& root, const Options& options) {
     const auto started = Clock::now();
     std::unique_ptr<Frontier> frontier;
     std::unique_ptr<Journal> journal;
+    auto object_cache = std::make_shared<wire::ObjectCache>();
     try {
         check_interrupted();
         require(options.workers > 0 && options.workers <= 32 && options.timeout_ms > 0, "Invalid parallel worker count or timeout");
@@ -264,6 +287,7 @@ Report run_parallel(const sys_state& root, const Options& options) {
                 if (exhausted) frontier->commit(*worker.ticket, {ResultKind::Failure,{},reason});
                 else frontier->worker_lost(worker.id);
             } else exhausted = ++worker.startup_failures > options.retries;
+            transport_report(worker, *journal);
             worker.terminate(); worker.clear_job();
             if (exhausted) throw std::runtime_error("Parallel retry budget exhausted: " + reason);
             ++report.retries;
@@ -275,7 +299,7 @@ Report run_parallel(const sys_state& root, const Options& options) {
                 Worker& worker = *owned;
                 check_interrupted();
                 if (!worker.channel) {
-                    try { spawn(worker, base, executable, configuration, options.timeout_ms, *journal); }
+                    try { spawn(worker, base, executable, configuration, options.timeout_ms, *journal, object_cache); }
                     catch (const std::exception& error) { lost(worker,error.what()); continue; }
                 }
                 worker.observe_descendants();
@@ -303,7 +327,9 @@ Report run_parallel(const sys_state& root, const Options& options) {
             for (auto& worker : workers) if (worker->channel) {
                 fds.push_back({worker->channel->fd(), POLLIN, 0}); active.push_back(worker.get());
             }
-            const int ready = poll(fds.data(), fds.size(), 20);
+            const bool buffered = std::any_of(active.begin(), active.end(),
+                [](const Worker* worker) { return worker->channel->has_buffered_input(); });
+            const int ready = poll(fds.data(), fds.size(), buffered ? 0 : 20);
             check_interrupted();
             if (ready < 0 && errno != EINTR) throw std::runtime_error("Parallel coordinator poll failed");
             for (size_t index = 0; index < active.size() && !violation; ++index) {
@@ -311,7 +337,7 @@ Report run_parallel(const sys_state& root, const Options& options) {
                 if ((!worker.hello || worker.ticket) && Clock::now() >= worker.deadline) {
                     lost(worker, "Worker startup/task deadline exceeded"); continue;
                 }
-                if (!fds[index].revents) continue;
+                if (!fds[index].revents && !worker.channel->has_buffered_input()) continue;
                 std::optional<wire::Message> message;
                 check_interrupted();
                 try { message = worker.channel->receive(); }
@@ -359,6 +385,7 @@ Report run_parallel(const sys_state& root, const Options& options) {
                             "Nondeterministic transition: same source/action/choice produced a different result");
                     const auto target = snapshot::import_bundle(edge->bundle, root.model_identity);
                     require(edge->property_violation == target.property_failed, "Worker property result differs from saved state");
+                    worker.channel->confirm_objects();
                     if (edge->property_violation) worker.violation = edge->target;
                     worker.successors.push_back(edge->target); ++report.attempted_edges;
                     if (verified_edges.emplace(edge_key,std::make_tuple(edge->target,int(edge->result_code),edge->choice_count)).second) ++report.edges;
@@ -426,6 +453,7 @@ Report run_parallel(const sys_state& root, const Options& options) {
         // Worker destruction kills/reaps only owned process incarnations; the
         // coordinator's running tracees and selected saved state remain intact.
         if (violation) for (const auto& worker : workers) frontier->worker_lost(worker->id);
+        for (const auto& worker : workers) transport_report(*worker, *journal);
         workers.clear();
         subreaper.cleanup();
         check_interrupted();

@@ -39,7 +39,7 @@ static int run_tracer(int argc, char *argv[])
 
   /* 先解析参数（设置 loglevel, use_ui, batch_file） */
   parse_args(argc, argv);
-  if (worker_control_fd >= 0) detsim::search::prepare_worker_process(worker_control_fd);
+  if (worker_control_fd >= 0) detsim::search::prepare_worker_process(worker_control_fd, worker_blob_fd);
 
   /* 检查是否有 --force */
   bool force_lock = false;
@@ -118,8 +118,9 @@ static int run_tracer(int argc, char *argv[])
   if (worker_control_fd >= 0) {
     detsim::search::wire::Limits limits;
     limits.io_timeout_ms = worker_io_timeout_ms;
-    result = detsim::search::worker_loop(worker_control_fd, limits);
+    result = detsim::search::worker_loop(worker_control_fd, limits, worker_blob_fd);
   } else ui_mainloop();
+  worker_blob_fd = -1;
   worker_control_fd = -1; // worker_loop owns and closes its Channel descriptor.
   UI_LOG_DEBUG("ui_mainloop returned");
 

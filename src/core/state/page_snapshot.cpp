@@ -314,6 +314,13 @@ void SnapshotView::read_into(uint64_t address, void* destination, size_t length)
   }
 }
 
+std::span<const PageRef> SnapshotView::page_references() const {
+  check_generation();
+  if (header_.version != PAGE_SNAPSHOT_VERSION)
+    throw std::runtime_error("Flat snapshots have no external page references");
+  return pages_;
+}
+
 std::vector<hash_type> SnapshotView::referenced_blob_keys() const {
   check_generation();
   std::vector<hash_type> result;

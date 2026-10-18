@@ -45,7 +45,7 @@ class TracerScenarios(unittest.TestCase):
 
     def run_tracer(self, commands, *, name="probe", batch=False, sibling=False,
                    terminate=False, assertions=(), verify_failure_cleanup=False,
-                   fail_storage_sync=False, extra_env=None, plugins=(), tracee_args=("0",), runtime_profile=None, fsmap=()):
+                   fail_storage_sync=False, extra_env=None, plugins=(), tracee_args=("0",), runtime_profile=None, fsmap=(), choose_points=()):
         work = self.root / (name + ("-batch" if batch else "-interactive"))
         work.mkdir()
         binary = work / name
@@ -59,6 +59,7 @@ class TracerScenarios(unittest.TestCase):
             "Plugins": list(plugins),
             "RuntimeProfile": runtime_profile or {},
             "FSMap": list(fsmap),
+            "ChoosePoint": list(choose_points),
         }))
         args = [str(TRACER), "-n", "-c", str(config)]
         if PROFILE:
@@ -1188,6 +1189,14 @@ int main(void) {
             self.assertNotIn("SEARCH_EXITED", first)
             first_unique = int(re.search(r"total unique: (\d+)", first).group(1))
 
+            # Repeating the exact bounded query must replay its cutoff, even
+            # when all its work can be served by completed expansion records.
+            self.assertIn("Loaded state", send("load " + root))
+            repeated = send("dfs 1 --quiet")
+            self.assertIn("Depth limit reached", repeated)
+            self.assertNotIn("Complete explore all", repeated)
+            self.assertEqual(json.loads(re.search(r"SEARCH_WORK (\{[^\n]+\})", repeated).group(1))["transitions"], 0)
+
             # Reopening the same saved identity with a larger remaining budget
             # must expand the frontier left by the previous command instead of
             # treating the hash as fully visited.
@@ -1198,12 +1207,165 @@ int main(void) {
             self.assertIn("SEARCH_EXITED", second)
             second_unique = int(re.search(r"total unique: (\d+)", second).group(1))
             self.assertGreater(second_unique, first_unique)
+            # This time the entire closure really was covered. That proof can
+            # serve a shallower query without rerunning already covered actions.
+            self.assertIn("Loaded state", send("load " + root))
+            covered = send("dfs 1 --quiet")
+            self.assertIn("Complete explore all", covered)
+            self.assertNotIn("Depth limit reached", covered)
+            self.assertEqual(json.loads(re.search(r"SEARCH_WORK (\{[^\n]+\})", covered).group(1))["transitions"], 0)
 
         for backend in ("full", "pages"):
             with self.subTest(backend=backend):
                 code, output = self.run_tracer(
                     scenario, name="depth_reopen_" + backend, tracee_args=(),
                     extra_env={"DETSIM_SNAPSHOT_BACKEND": backend})
+                self.assertEqual(code, 0, output)
+
+    def build_coverage_choice_plugin(self, exhaust_budget=False):
+        source = self.root / "coverage_plugin.cpp"
+        source.write_text(
+            '#include "api/plugin.h"\n#include <unistd.h>\n#include <signal.h>\n'
+            'static detsim_verdict edge(const detsim_host_v2*,const detsim_state_view*,'
+            'const detsim_state_view*,const detsim_event_v2*,detsim_diagnostic) {'
+            'if(access("interrupt-once",F_OK)==0) { unlink("interrupt-once"); kill(getpid(),SIGINT); } return DETSIM_PASS; }\n'
+            'static detsim_verdict choose(const detsim_host_v2*,const detsim_state_view*,uint32_t,'
+            'int32_t option,detsim_time now,uint32_t budget,detsim_time_choice_v2* out,detsim_diagnostic) {'
+            + ('(void)option; *out={now,budget};' if exhaust_budget else
+               '(void)budget; now.microseconds=option; *out={now,0};')
+            + ' return DETSIM_PASS; }\n'
+            'static const detsim_plugin_v2 descriptor={DETSIM_PLUGIN_ABI_V2,sizeof(detsim_plugin_v2),'
+            '"test.search-coverage",1,nullptr,edge,nullptr,nullptr,choose,nullptr};\n'
+            'extern "C" const detsim_plugin_v2* detsim_plugin_entry_v2(){return &descriptor;}\n')
+        plugin = self.root / "coverage.so"
+        subprocess.run(shlex.split(os.environ.get("CXX", "/usr/bin/g++")) +
+                       ["-std=gnu++20", "-shared", "-fPIC", "-Wall", "-Wextra", "-Werror",
+                        "-I" + str(ROOT / "src"), str(source), "-o", str(plugin)], check=True)
+        return str(plugin)
+
+    def test_dfs_repeats_direct_and_indirect_budget_cutoffs(self):
+        source = self.root / "budget.c"
+        source.write_text('#include <sys/syscall.h>\n#include <sys/time.h>\n#include <unistd.h>\n'
+                          'int main(int argc,char**argv){(void)argv; struct timeval tv;'
+                          'if(argc>1) syscall(SYS_getpid); syscall(SYS_gettimeofday,&tv,0);'
+                          'write(1,"BUDGET_EXIT",11);return 0;}\n')
+        subprocess.run(shlex.split(os.environ.get("CC", "/usr/bin/gcc")) +
+                       ["-O0", "-g", "-gdwarf-4", "-fno-pie", "-no-pie", str(source),
+                        "-o", str(self.root / "probe")], check=True)
+        plugin = self.build_coverage_choice_plugin(exhaust_budget=True)
+        def scenario(send):
+            send("sw 0")
+            root = re.findall(r"(?:Current state |=> )([0-9a-f]{16})", send("info current"))[-1]
+            for attempt in range(2):
+                self.assertIn("Loaded state", send("load " + root))
+                reply = send("dfs 8 --quiet")
+                self.assertIn("Model budget exhausted", reply)
+                self.assertNotIn("Complete explore all", reply)
+                work = json.loads(re.search(r"SEARCH_WORK (\{[^\n]+\})", reply).group(1))["transitions"]
+                if attempt:
+                    self.assertEqual(work, 0)
+                else:
+                    self.assertGreater(work, 0)
+                    exhausted = re.findall(r"(?:Current state |=> )([0-9a-f]{16})", send("info current"))[-1]
+                    self.assertNotEqual(exhausted, root)
+                    # The saved destination already has zero model budget.
+                    # Loading it must not execute another guest action.
+                    for command in ("dfs 8 --quiet", "bfs --quiet"):
+                        self.assertIn("Loaded state", send("load " + exhausted))
+                        bounded = send(command)
+                        self.assertIn("Model budget exhausted", bounded)
+                        self.assertNotIn("SEARCH_EXITED", bounded)
+                        self.assertEqual(json.loads(re.search(r"SEARCH_WORK (\{[^\n]+\})", bounded).group(1))["transitions"], 0)
+            self.assertIn("Loaded state", send("load " + root))
+            self.assertIn("Model budget exhausted", send("dfs 9 --quiet"))
+            self.assertIn("Loaded state", send("load " + root))
+            self.assertIn("Model budget exhausted", send("bfs --quiet"))
+            self.assertIn("Loaded state", send("load " + root))
+            self.assertIn("Model budget exhausted", send("dfs 10 --quiet"))
+        for backend in ("full", "pages"):
+            for indirect in (False, True):
+                with self.subTest(backend=backend, indirect=indirect):
+                    code, output = self.run_tracer(scenario, name=f"budget_{backend}_{indirect}",
+                        tracee_args=("indirect",) if indirect else (), plugins=[plugin],
+                        choose_points=[{"syscall":96,"choose":1}],
+                        extra_env={"DETSIM_SNAPSHOT_BACKEND":backend})
+                    self.assertEqual(code, 0, output)
+
+    def test_dfs_cycle_preserves_exit_and_property_branches(self):
+        source = self.root / "cycle.c"
+        source.write_text('#include <sys/syscall.h>\n#include <sys/time.h>\n#include <unistd.h>\n'
+                          'volatile int done=0; int main(void){struct timeval tv; for(;;){'
+                          'syscall(SYS_gettimeofday,&tv,0); if(tv.tv_usec){done=1;'
+                          'write(1,"CYCLE_EXIT",10);return 0;}}}\n')
+        subprocess.run(shlex.split(os.environ.get("CC", "/usr/bin/gcc")) +
+                       ["-O0", "-g", "-gdwarf-4", "-fno-pie", "-no-pie", str(source),
+                        "-o", str(self.root / "probe")], check=True)
+        plugin = self.build_coverage_choice_plugin()
+        for backend in ("full", "pages"):
+            for violation in (False, True):
+                def scenario(send):
+                    send("sw 0")
+                    seen = set()
+                    for _ in range(8):
+                        send("si 0")
+                        root = re.findall(r"(?:Current state |=> )([0-9a-f]{16})", send("info current"))[-1]
+                        if root in seen:
+                            break
+                        seen.add(root)
+                    else:
+                        self.fail("choice-zero fixture did not reach an actual repeated identity")
+                    self.assertIn("Loaded state", send("load " + root))
+                    if violation:
+                        self.assertIn("Stopped for illegal state", send("bfs --quiet"))
+                        self.assertIn("Loaded state", send("load " + root))
+                    reply = send("dfs 5 --quiet")
+                    if violation:
+                        self.assertIn("Stopped for illegal state", reply)
+                        bad = re.findall(r"(?:Current state |=> )([0-9a-f]{16})", send("info current"))[-1]
+                        for command in ("dfs 1 --quiet", "bfs --quiet"):
+                            self.assertIn("Loaded state", send("load " + bad))
+                            stopped = send(command)
+                            self.assertIn("Stopped for illegal state", stopped)
+                            self.assertNotIn("Complete explore all", stopped)
+                        self.assertIn("Loaded state", send("load " + root))
+                        # An interrupted-by-violation enumeration cannot poison
+                        # a later query with a complete root cache entry.
+                        self.assertIn("Stopped for illegal state", send("dfs 5 --quiet"))
+                    else:
+                        self.assertIn("Depth limit reached", reply)
+                        self.assertIn("SEARCH_EXITED", reply)
+                        self.assertIn("Loaded state", send("load " + root))
+                        again = send("dfs 5 --quiet")
+                        self.assertIn("Depth limit reached", again)
+                        self.assertNotIn("Complete explore all", again)
+                with self.subTest(backend=backend, violation=violation):
+                    code, output = self.run_tracer(scenario, name=f"cycle_{backend}_{violation}",
+                        tracee_args=(), plugins=[plugin], choose_points=[{"syscall":96,"choose":2}],
+                        assertions=["tracee0(done < 1)"] if violation else [],
+                        extra_env={"DETSIM_SNAPSHOT_BACKEND":backend})
+                    self.assertEqual(code, 0, output)
+
+    def test_dfs_interrupt_does_not_publish_partial_coverage(self):
+        self.build_depth_reopen_probe()
+        plugin = self.build_coverage_choice_plugin()
+        for backend in ("full", "pages"):
+            def scenario(send):
+                send("sw 0")
+                root = re.findall(r"(?:Current state |=> )([0-9a-f]{16})", send("info current"))[-1]
+                work = self.root / ("coverage_interrupt_" + backend + "-interactive")
+                (work / "interrupt-once").touch()
+                interrupted = send("dfs 4 --quiet")
+                self.assertIn("Program received signal SIGINT", interrupted)
+                self.assertNotIn("Complete explore all", interrupted)
+                self.assertFalse((work / "interrupt-once").exists())
+                self.assertIn("Loaded state", send("load " + root))
+                completed = send("dfs 4 --quiet")
+                self.assertIn("Complete explore all", completed)
+                self.assertIn("SEARCH_EXITED", completed)
+                self.assertGreater(json.loads(re.search(r"SEARCH_WORK (\{[^\n]+\})", completed).group(1))["transitions"], 0)
+            with self.subTest(backend=backend):
+                code, output = self.run_tracer(scenario, name="coverage_interrupt_" + backend,
+                    tracee_args=(), plugins=[plugin], extra_env={"DETSIM_SNAPSHOT_BACKEND":backend})
                 self.assertEqual(code, 0, output)
 
     def test_bfs_recovers_a_depth_bounded_dfs_frontier(self):
@@ -1228,6 +1390,14 @@ int main(void) {
             self.assertIn("SEARCH_EXITED", bfs)
             bfs_unique = int(re.search(r"total unique: (\d+)", bfs).group(1))
             self.assertGreater(bfs_unique, first_unique)
+            # Successful BFS publishes a transitive proof, not merely a record
+            # that the root's immediate actions ran.
+            for depth in (1, 2):
+                self.assertIn("Loaded state", send("load " + root))
+                covered = send(f"dfs {depth} --quiet")
+                self.assertIn("Complete explore all", covered)
+                self.assertNotIn("Depth limit reached", covered)
+                self.assertEqual(json.loads(re.search(r"SEARCH_WORK (\{[^\n]+\})", covered).group(1))["transitions"], 0)
 
         for backend in ("full", "pages"):
             with self.subTest(backend=backend):
@@ -1410,6 +1580,27 @@ int main(void) {
 
         code, output = self.run_tracer(scenario)
         self.assertEqual(code, 0, output)
+
+    def test_same_hash_load_restores_debugger_memory_edit(self):
+        def scenario(send):
+            send("sw 0")
+            send("si")
+            self.assertIn("counter = 1", send("p counter"))
+            saved = re.findall(r"=> ([0-9a-f]{16})", send("info current"))[-1]
+            for _ in range(3):
+                send("p counter = 77")
+                self.assertIn("counter = 77", send("p counter"))
+                self.assertEqual(
+                    re.findall(r"=> ([0-9a-f]{16})", send("info current"))[-1], saved)
+                self.assertIn("Loaded state", send("load " + saved))
+                self.assertIn("counter = 1", send("p counter"))
+
+        for backend in ("full", "pages"):
+            with self.subTest(backend=backend):
+                code, output = self.run_tracer(
+                    scenario, name="same-hash-edit-" + backend,
+                    extra_env={"DETSIM_SNAPSHOT_BACKEND": backend})
+                self.assertEqual(code, 0, output)
 
     def test_writev_completion_restores_saved_vectors_and_output(self):
         source = self.root / "vector_probe.c"

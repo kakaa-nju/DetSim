@@ -552,6 +552,7 @@ void SyscallDispatcher::handle_clone3_enter(pid_t pid, syscall_info& info)
     uint64_t flags = ptrace(PTRACE_PEEKDATA, pid, args_ptr, NULL);
     // Add CLONE_PTRACE flag
     flags |= CLONE_PTRACE;
+    detsim::resident::writing(pid, args_ptr, sizeof(flags));
     ptrace(PTRACE_POKEDATA, pid, args_ptr, flags);
     LOG_INFO("Modified clone3 flags at %p to add CLONE_PTRACE", (void*)args_ptr);
 }

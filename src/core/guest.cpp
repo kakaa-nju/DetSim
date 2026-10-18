@@ -11,7 +11,9 @@
  */
 
 #include "guest.h"
+#include "state/resident_memory.h"
 #include <climits>
+#include <linux/prctl.h>
 #include <stdexcept>
 #include "monitor.h"
 #include "dwarf_info.h"
@@ -131,6 +133,7 @@ void remove_vdso(int pid)
     auto type = read_word(pos);
     if (type == AT_NULL) return; // A static executable need not expose a vDSO.
     if (type == AT_SYSINFO_EHDR) {
+      detsim::resident::writing(pid, pos, sizeof(long));
       if (ptrace(PTRACE_POKEDATA, pid, pos, AT_IGNORE) < 0)
         throw std::runtime_error("Cannot disable initial stack vDSO entry");
       return;
@@ -176,6 +179,7 @@ static bool guest_transfer_exact(bool write, pid_t pid, void* guest,
   const auto address = reinterpret_cast<uintptr_t>(guest);
   if (pid <= 0 || !guest || !host || size > size_t(SSIZE_MAX) ||
       size > UINTPTR_MAX - address) return false;
+  if (write) detsim::resident::writing(pid, address, size);
   iovec local{host, size}, remote{guest, size};
   ssize_t transferred;
   do {
@@ -196,6 +200,7 @@ bool guest_write_exact(pid_t pid, void* guest, const void* host, size_t size)
 
 void tracee_write_mem(int pid, void *addr, const void *data, int len)
 {
+  detsim::resident::writing(pid, reinterpret_cast<uintptr_t>(addr), len > 0 ? size_t(len) : 0);
   struct iovec local = make_iovec((void *)data, len);
   struct iovec remote = make_iovec(addr, len);
 
@@ -288,6 +293,7 @@ void show_regs(struct user_regs_struct *regs)
 uint64_t tracee_do_syscall_in_place(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
                            uint64_t rdx, uint64_t r10, uint64_t r8, uint64_t r9)
 {
+  detsim::resident::invalidate(pid);
   /* after last syscall exits */
   /* I don't care */
   /* scanf("%*c"); */
@@ -341,6 +347,13 @@ uint64_t tracee_do_syscall_in_place(int pid, int SYS_which, uint64_t rdi, uint64
 uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
                            uint64_t rdx, uint64_t r10, uint64_t r8, uint64_t r9)
 {
+  // Only these injections preserve captured bytes and mappings. Scratch is
+  // reserved, excluded from snapshots, and the original registers are restored.
+  const bool read_only = (SYS_which == SYS_brk && rdi == 0) ||
+      (SYS_which == SYS_prctl && rdi == PR_GET_TID_ADDRESS &&
+       rsi >= scratch_page && rsi <= scratch_page + PAGE_SIZE - sizeof(uintptr_t));
+  detsim::resident::ReadOnlyInjection injection(read_only);
+  if (!read_only) detsim::resident::invalidate(pid);
   /* after last syscall exits */
   /* I don't care */
   /* scanf("%*c"); */

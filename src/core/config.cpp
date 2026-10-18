@@ -43,6 +43,7 @@ int auto_mode = 0;
 int use_ui = 1; // Default to using UI
 char *batch_file = NULL;
 int worker_control_fd = -1;
+int worker_blob_fd = -1;
 std::string tracee_native_cwd;
 int worker_io_timeout_ms = 30000;
 
@@ -388,6 +389,7 @@ void parse_args(int argc, char *argv[])
       {"help", no_argument, nullptr, 'h'},
       {"cfg", required_argument, nullptr, 'c'},
       {"worker-fd", required_argument, nullptr, 1000},
+      {"worker-blob-fd", required_argument, nullptr, 1003},
       {"target-cwd", required_argument, nullptr, 1001},
       {"worker-io-timeout-ms", required_argument, nullptr, 1002},
       {0, 0, nullptr, 0},
@@ -411,16 +413,18 @@ void parse_args(int argc, char *argv[])
         worker_io_timeout_ms = static_cast<int>(timeout);
         break;
       }
+      case 1003:
       case 1000: {
+        int& selected_fd = o == 1000 ? worker_control_fd : worker_blob_fd;
         char* end = nullptr;
         errno = 0;
         const long descriptor = std::strtol(optarg, &end, 10);
-        if (errno || !end || *end || end == optarg || descriptor < 3 || descriptor > INT_MAX || worker_control_fd >= 0)
+        if (errno || !end || *end || end == optarg || descriptor < 3 || descriptor > INT_MAX || selected_fd >= 0)
           throw std::runtime_error("Invalid internal worker descriptor");
         const int flags = fcntl(static_cast<int>(descriptor), F_GETFD);
         if (flags < 0 || fcntl(static_cast<int>(descriptor), F_SETFD, flags | FD_CLOEXEC) < 0)
           throw std::runtime_error("Cannot protect worker control descriptor from tracee exec");
-        worker_control_fd = static_cast<int>(descriptor);
+        selected_fd = static_cast<int>(descriptor);
         break;
       }
       case 'a':
@@ -450,6 +454,8 @@ void parse_args(int argc, char *argv[])
         exit(0);
     }
   }
+  if (worker_blob_fd >= 0 && (worker_control_fd < 0 || worker_control_fd == worker_blob_fd))
+    throw std::runtime_error("Internal object descriptor requires a distinct worker control descriptor");
   if (worker_control_fd >= 0) {
     if (auto_mode || batch_file)
       throw std::runtime_error("Internal worker mode cannot run auto/batch commands");

@@ -7,6 +7,7 @@
 #include "dispatcher.h"
 #include "proc_status.h"
 #include "page_snapshot.h"
+#include "resident_memory.h"
 #include "engine/exec_engine.h"
 #include "engine/thread_pool.h"
 #include "state_transition.h"
@@ -23,6 +24,7 @@
 #include <sys/syscall.h>
 
 static long guest_value = 17;
+alignas(4096) static const long readonly_value __attribute__((used)) = 31;
 static_assert(NP == 2, "capture oracle requires two processes");
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui() { return nullptr; }
 static void require(bool ok, const char *why) { if (!ok) throw std::runtime_error(why); }
@@ -280,6 +282,99 @@ int main(int argc, char**)
         sys_state generic(info);
         require(StateStore::instance().get_stats().save_calls == before_generic + NP,
                 "unanchored capture bypassed the ordinary store path");
+        // Closed native execution may reuse memory, never stale model metadata.
+        // The existing full capture oracle remains independent of that proof.
+        source.recover_running_state();
+        setenv("DETSIM_SNAPSHOT_BACKEND", "pages", 1);
+        setenv("DETSIM_RESIDENT_MEMORY", "verify", 1);
+        {
+            detsim::resident::Scope controlled;
+            source.recover_running_state();
+            sys_state page_source(info, &source);
+            ptmc_state.running_state = page_source;
+            require(detsim::resident::get(children[1]).snapshot != nullptr, "missing resident capture proof");
+            const auto ro_view = SnapshotView::open(page_source.ts_hash[1]);
+            size_t ro_region = ro_view->regions().size();
+            for (size_t index = 0; index < ro_view->regions().size(); ++index) {
+                const auto& region = ro_view->regions()[index];
+                if (region.start <= reinterpret_cast<uintptr_t>(&readonly_value) &&
+                    reinterpret_cast<uintptr_t>(&readonly_value) < region.end && !(region.prot & PROT_WRITE))
+                    ro_region = index;
+            }
+            require(ro_region < ro_view->regions().size(), "fixture constant is not file-backed RO");
+            {
+                detsim::resident::ProtectedResume authorized;
+                detsim::resident::resuming(children[1]);
+            }
+            require(!detsim::resident::get(children[1]).snapshot, "RO capability retained full-image authority");
+            const auto& ro = ro_view->regions()[ro_region];
+            require(detsim::resident::get_read_only(children[1]).region(ro_region, ro.start, ro.end, ro.prot),
+                    "protected region proof missing");
+            const long rw_change = 18;
+            require(guest_write_exact(children[1], &guest_value, &rw_change, sizeof rw_change), "RW copyout");
+            require(detsim::resident::get_read_only(children[1]).region(ro_region, ro.start, ro.end, ro.prot),
+                    "RW copyout unnecessarily erased disjoint RO proof");
+            sys_state ro_reused(info, &page_source);
+            compare_full(ro_reused);
+            page_source.recover_running_state();
+            {
+                detsim::resident::ProtectedResume authorized;
+                detsim::resident::resuming(children[1]);
+            }
+            require(tracee_write_word(children[1], const_cast<long*>(&readonly_value), 44) == 0, "force RO write");
+            require(!detsim::resident::get_read_only(children[1]).region(ro_region, ro.start, ro.end, ro.prot),
+                    "POKEDATA retained changed RO proof");
+            sys_state ro_changed(info, &page_source);
+            compare_full(ro_changed);
+            page_source.recover_running_state();
+            long ro_observed = 0;
+            require(guest_read_exact(children[1], &readonly_value, &ro_observed, sizeof ro_observed) && ro_observed == 31,
+                    "RO restore lost original bytes");
+            const uintptr_t ro_page = reinterpret_cast<uintptr_t>(&readonly_value) & ~uintptr_t(4095);
+            require(tracee_do_syscall(children[1], SYS_mprotect, ro_page, 4096, PROT_READ|PROT_WRITE, 0, 0, 0) == 0,
+                    "RO to writable mapping");
+            const long replacement = 52;
+            require(guest_write_exact(children[1], const_cast<long*>(&readonly_value), &replacement, sizeof replacement),
+                    "write newly writable region");
+            require(tracee_do_syscall(children[1], SYS_mprotect, ro_page, 4096, PROT_READ, 0, 0, 0) == 0,
+                    "restore RO mapping");
+            require(!detsim::resident::get_read_only(children[1]).region(ro_region, ro.start, ro.end, ro.prot),
+                    "native mapping change revived old RO proof");
+            sys_state reprotected(info, &page_source);
+            compare_full(reprotected);
+            page_source.recover_running_state();
+            (void)tracee_do_syscall(children[1], SYS_getuid, 0, 0, 0, 0, 0, 0);
+            require(!detsim::resident::get_read_only(children[1]).region(ro_region, ro.start, ro.end, ro.prot) &&
+                    !detsim::resident::get(children[1]).snapshot, "native query preserved unaudited proof");
+            page_source.recover_running_state();
+            ptmc_state.process_states[1].random_state ^= 0x2345;
+            sys_state peer_metadata(info, &page_source);
+            require(peer_metadata.ts_hash[1] != page_source.ts_hash[1], "resident reuse hid peer metadata");
+            compare_full(peer_metadata);
+            page_source.recover_running_state();
+            const long changed_value = 93;
+            require(guest_write_exact(children[1], &guest_value, &changed_value, sizeof changed_value), "tracked guest write");
+            require(!detsim::resident::get(children[1]).snapshot, "guest write retained resident proof");
+            sys_state memory_changed(info, &page_source);
+            compare_full(memory_changed);
+            // Capture can publish a new resident image without selecting it as
+            // the UI/runtime state. Same selected hash is not a restore proof.
+            page_source.recover_running_state();
+            long observed = 0;
+            require(guest_read_exact(children[1], &guest_value, &observed, sizeof observed) && observed == 17,
+                    "resident restore retained changed bytes");
+            const auto mapped = tracee_do_syscall(children[1], SYS_mmap, 0, 4096, PROT_READ|PROT_WRITE,
+                MAP_PRIVATE|MAP_ANONYMOUS, uint64_t(-1), 0);
+            require(mapped && mapped < uint64_t(-4095) && !detsim::resident::get(children[1]).snapshot,
+                    "mapping injection retained resident proof");
+            sys_state mapped_state(info, &page_source);
+            compare_full(mapped_state);
+            ptmc_state.running_state = mapped_state;
+            page_source.recover_running_state();
+        }
+        require(!detsim::resident::get(children[1]).snapshot, "resident proof escaped closed scope");
+        unsetenv("DETSIM_RESIDENT_MEMORY");
+        unsetenv("DETSIM_SNAPSHOT_BACKEND");
         // A virtual exit parks the OS task. Restoring its product-state image
         // must restore memory/resources even while that node cannot execute.
         source.recover_running_state();

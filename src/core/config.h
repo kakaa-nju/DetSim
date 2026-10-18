@@ -41,6 +41,7 @@ extern char *batch_file;
 
 /* Internal native expansion worker socket; -1 for ordinary execution. */
 extern int worker_control_fd;
+extern int worker_blob_fd;
 // Optional absolute native cwd for each tracee, independent of tracer storage.
 extern std::string tracee_native_cwd;
 extern int worker_io_timeout_ms;

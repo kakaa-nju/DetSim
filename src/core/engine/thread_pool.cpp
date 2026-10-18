@@ -610,6 +610,7 @@ void normalize_thread_pool_for_restore(int node)
     if (ptrace(PTRACE_GETREGS, tid, nullptr, &registers) == -1)
       throw std::runtime_error("Cannot inspect pending syscall during snapshot rollback");
     registers.orig_rax = static_cast<unsigned long long>(-1);
+    detsim::resident::invalidate(tid);
     if (ptrace(PTRACE_SETREGS, tid, nullptr, &registers) == -1 ||
         ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr) == -1)
       throw std::runtime_error("Cannot suppress pending syscall during snapshot rollback");

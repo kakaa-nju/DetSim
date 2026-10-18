@@ -52,7 +52,7 @@ def main():
             data = directory / 'perf.data'
             events = ['-e', 'cpu-clock', '-F', str(args.frequency), '--call-graph', 'dwarf,16384']
             if args.syscalls:
-                names = ('sendto', 'recvfrom', 'fsync', 'fdatasync', 'poll', 'process_vm_readv', 'process_vm_writev')
+                names = ('sendto', 'recvfrom', 'sendmsg', 'recvmsg', 'fsync', 'fdatasync', 'poll', 'process_vm_readv', 'process_vm_writev')
                 events = ['-e', ','.join(f'syscalls:sys_{phase}_{name}' for name in names for phase in ('enter', 'exit'))]
                 metadata['scope'] = 'selected syscall counts and elapsed latency; concurrent task durations overlap'
             invocation = prefix + [str(args.perf.resolve()), 'record', *events,

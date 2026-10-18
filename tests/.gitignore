@@ -158,6 +158,10 @@
 !snapshot_bundle_integration.cpp
 !snapshot_bundle.mk
 !parallel_protocol_test.cpp
+!parallel_protocol_benchmark.cpp
+!parallel_protocol_objects.cpp
+!parallel_bundle_integration.cpp
+!parallel_bundle.mk
 !parallel_protocol.mk
 !parallel_actor_scenarios.py
 

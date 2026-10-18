@@ -27,6 +27,8 @@ constexpr auto options = PTRACE_O_TRACECLONE | PTRACE_O_TRACESYSGOOD | PTRACE_O_
 
 long control(enum __ptrace_request request, pid_t tid, void* address, void* data)
 {
+    if (request == PTRACE_SYSCALL || request == PTRACE_CONT || request == PTRACE_SINGLESTEP)
+        detsim::resident::resuming(tid);
     const long result = ptrace(request, tid, address, data);
     if (result == -1) fail("ptrace: " + std::string(std::strerror(errno)));
     return result;

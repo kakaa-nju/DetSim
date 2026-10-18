@@ -692,6 +692,10 @@ int cmd_load(char *args) {
                     adopt_snapshot_bindings(i, state.ts_hash[i], state.child[i]);
             }
         }
+        // Explicit debugger loads observe live state again, including edits
+        // made outside an automatic closed-execution interval.
+        detsim::resident::invalidate_all();
+        for (int node = 0; node < NP; ++node) ptmc_state.tracee_image_dirty[node] = true;
         state.recover_running_state();
         detsim::ui::ui_printf("Loaded state %016lx%s\n", matches[0],
                               adopt_threads ? " (adopted multi-thread cross-process bindings)" :

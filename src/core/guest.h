@@ -42,9 +42,14 @@ uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
                            uint64_t rdx, uint64_t r10, uint64_t r8,
                            uint64_t r9);
 
+#include "state/resident_memory.h"
 __attribute__((unused)) static inline long
 Ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data)
 {
+  if (op == PTRACE_SYSCALL || op == PTRACE_CONT || op == PTRACE_SINGLESTEP)
+    detsim::resident::resuming(pid);
+  if (op == PTRACE_POKEDATA || op == PTRACE_POKETEXT)
+    detsim::resident::writing(pid, reinterpret_cast<uintptr_t>(addr), sizeof(long));
   /* ptrace(2): On success, the PTRACE_PEEK* operations return the requested *
    * data ... and other operations return zero. On error, all operations     *
    * return -1, and errno is set to indicate the error. Since the value      *

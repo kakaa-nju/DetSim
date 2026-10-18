@@ -1386,3 +1386,65 @@ untyped pointers, direct hardware nondeterminism, remote workers, durable
 coordinator restart, and every Linux syscall/thread model remain outside the
 current verified contract. Full-closure transport and metadata durability barriers
 still require performance measurement; parallelism does not imply speedup.
+
+### Search residency and shared transport verification (2026-10-18)
+
+Follow-up C03 regression reproduced on 2026-10-19: from the same saved counter
+state, `dfs 1 --quiet` reports a depth cut; `load <same-root>` followed by the
+same command reports `Complete explore all` with zero transitions, although the
+unexplored suffix still exists. Both full/pages reproduce this in
+`build/search-throughput/repeated-depth-cut-red.json`. The expansion cache stores
+remaining depth but not the bounded outcome. A separate source-supported cost is
+that a frame with a model-budget-cut successor is never cached as enumerated,
+even after processing every actor/choice. These are not closed by the earlier
+depth-increase regressions. A fix must preserve cutoff outcomes across cache
+hits and propagate them from descendants without publishing partial expansions.
+
+The targeted DFS defect is now fixed with exact `(hash, remaining_depth)`
+outcomes and propagated depth/budget cuts. Only a completely enumerated closure
+without cuts is reusable at arbitrary depths; partial BFS expansion records are
+not such a proof. Budget-zero runnable roots execute no transition, failed roots
+stop as violations, and interrupted frames do not publish completion. The five
+targeted old-binary scenarios produced 12 semantic failures; the new NP1 gate
+passes all 40 scenarios, including those cases, plus DFS residency and actual
+parallel actors. NP2 parallel failure/equivalence scenarios and 12 healthy/mutant
+C/C++ and pthread case rows with three replays also pass. Evidence is under
+`build/search-throughput/coverage-*-gates.log` and `coverage-cases/summary.json`.
+This does not close C03 generally: partial BFS-to-BFS queue recovery remains
+incomplete. The DFS cache can grow with the number of distinct remaining-depth
+queries; it is not an adjacency cache or ancestor/SCC pruning algorithm.
+
+Automatic BFS/DFS and worker expansion now own a bounded resident-memory proof.
+Inactive process bytes may be reused; selected regular-file-backed private RO
+regions survive user execution only across audited resume/write boundaries.
+Registers, thread state and modeled kernel metadata are still captured. Native
+syscalls, unknown resumes, mapping changes and intersecting framework writes
+invalidate the relevant proof. This assumes no external memory/backing writers
+or plugins bypassing the framework's write helpers. It is not kernel dirty-page
+tracking. `DETSIM_RESIDENT_MEMORY=off` disables this optimization; `verify` checks
+optimized capture/restore against observed bytes.
+
+A reproduced same-hash bug is covered by `check-capture`: after a helper write
+and capture, restoring the originally selected hash must restore its bytes even
+when the selected UI state has not changed. The fast path now requires the
+resident root and brk to match. Explicit CLI `load` also forces observed restore;
+`test_same_hash_load_restores_debugger_memory_edit` checks three edits/restores in
+both backends. This does not establish arbitrary external-write safety for all
+low-level restore callers outside automatic scopes.
+
+Shared transport uses sealed memfd objects and import-before-confirmation.
+The first real graph run exposed an XXH64/XXH3 mismatch hidden by synthetic test
+keys; transport and fixtures now use the StateStore hash helper. The real
+`check-parallel-bundle` gate covers full/pages export, cold/hot transfer,
+validated import and fresh-process reads including VFS content. All ten native
+parallel scenarios pass, including worker loss, cancellation and violation
+replay. Their journals record 610 shared frames and zero raw fallbacks.
+
+Verification also includes normal/tiny-cache capture byte oracles, 37 native
+scenarios, thread adoption/lifecycle, parallel actors, pending syscalls, mappings,
+XSTATE, page/state I/O, component/build checks and production NP1/2/3 builds.
+The fixed Willemt Raft depth-6 workload retains 1084 visits, 201 new states and
+1463 transitions; three native searches exceed 500 visits/s. Its projected-edge
+multiset matches the baseline, and a separate verify run checks full capture
+bytes. This is scoped evidence, not general full-memory graph equivalence.
+See [measurements and remaining limits](search-throughput-2026-10-18.md).

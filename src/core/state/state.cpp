@@ -13,6 +13,7 @@
 #include "page_capture.h"
 #include "snapshot_memory.h"
 #include "page_restore_stats.h"
+#include "resident_memory.h"
 #include <stdexcept>
 #include <climits>
 #include "cereal/archives/binary.hpp"
@@ -58,6 +59,7 @@ static void checked_memory_io(bool write, pid_t pid, const iovec* local,
     expected += local[i].iov_len;
   }
   if (!expected) return;
+  if (write) detsim::resident::invalidate(pid);
   const ssize_t n = write ? process_vm_writev(pid, local, count, remote, count, 0)
                           : process_vm_readv(pid, local, count, remote, count, 0);
   if (n < 0 || size_t(n) != expected)
@@ -512,6 +514,13 @@ void tracee_state::restore_memory_mappings(
   if (maps_saved.empty())
     throw std::runtime_error("Snapshot contains no memory mappings");
 
+  const auto resident = detsim::resident::get(pid);
+  if (resident.snapshot && resident.brk == brk &&
+      resident.snapshot->maps_text() == snapshot->maps_text()) {
+    maps_out = std::move(maps_saved);
+    return;
+  }
+
   /* Get current mappings */
   std::string maps_path = fmt::format("/proc/{}/maps", pid);
   auto maps_fp = fileutils::open_cfile(maps_path, "r");
@@ -581,6 +590,11 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps,
   require_no_process_rseq(pid);
   const auto snapshot = SnapshotView::open(ts_hash);
   const auto& regions = snapshot->regions();
+  auto resident = detsim::resident::get(pid);
+  if (resident.snapshot && (resident.brk != brk ||
+      resident.snapshot->maps_text() != snapshot->maps_text())) resident = {};
+  const auto target_refs = snapshot->format_version() == PAGE_SNAPSHOT_VERSION ?
+      snapshot->page_references() : std::span<const PageRef>{};
 
   constexpr size_t MAX_IOV_BATCH = 256;
   iovec local_iov[MAX_IOV_BATCH], remote_iov[MAX_IOV_BATCH];
@@ -599,11 +613,14 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps,
   };
 
   std::vector<maps_item> current_maps;
-  auto current_maps_file = fileutils::open_cfile(fmt::format("/proc/{}/maps", pid), "r");
-  if (!current_maps_file) throw std::runtime_error("Cannot inspect restore memory permissions");
-  get_maps_item(current_maps, current_maps_file.get());
-  if (ferror(current_maps_file.get()) || current_maps.empty())
-    throw std::runtime_error("Incomplete current memory mappings for restore");
+  if (resident.snapshot) current_maps = maps;
+  else {
+    auto current_maps_file = fileutils::open_cfile(fmt::format("/proc/{}/maps", pid), "r");
+    if (!current_maps_file) throw std::runtime_error("Cannot inspect restore memory permissions");
+    get_maps_item(current_maps, current_maps_file.get());
+    if (ferror(current_maps_file.get()) || current_maps.empty())
+      throw std::runtime_error("Incomplete current memory mappings for restore");
+  }
   std::vector<size_t> protected_regions;
   std::vector<uint8_t> comparison;
 
@@ -622,7 +639,7 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps,
 
     bool force_guard_write = false;
     constexpr size_t page_size = 4096;
-    if (discard_guards && region.prot == PROT_NONE &&
+    if (!resident.snapshot && discard_guards && region.prot == PROT_NONE &&
         start % page_size == 0 && end % page_size == 0 &&
         private_anonymous_coverage(maps, start, end) &&
         private_anonymous_coverage(current_maps, start, end) &&
@@ -660,8 +677,8 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps,
       readable_end = std::min(end, live.end);
       if (readable_end == end) break;
     }
-    const bool comparable = readable_end == end && !force_guard_write;
-    if (comparable) {
+    const bool comparable = resident.snapshot || (readable_end == end && !force_guard_write);
+    if (comparable && !resident.snapshot) {
       comparison.resize(size);
       iovec local{comparison.data(), size}, remote{reinterpret_cast<void*>(start), size};
       checked_memory_io(false, pid, &local, &remote, 1);
@@ -669,10 +686,24 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps,
     }
 
     bool made_writable = false;
-    for (size_t page_index = 0; page_index < snapshot->page_count(i); ++page_index) {
+    const size_t pages = snapshot->page_count(i);
+    for (size_t page_index = 0; page_index < pages; ++page_index) {
+      if (resident.snapshot && !target_refs.empty()) {
+        const auto& old = resident.page(i, page_index);
+        const auto& target = target_refs[region.offset + page_index];
+        // The resident owner already holds this validated immutable object.
+        // Avoid looking up the same object again through the store's LRU.
+        if (old.key && old.key == target.key && old.address == target.address && old.length == target.length)
+          continue;
+      }
       const auto page = snapshot->page(i, page_index);
-      if (comparable && !memcmp(comparison.data() + (page.address - start), page.data, page.length))
-        continue;
+      if (resident.snapshot) {
+        const auto& previous = resident.page(i, page_index);
+        if (previous.address != page.address || previous.length != page.length)
+          throw std::runtime_error("Resident restore page geometry differs");
+        if (previous.data == page.data || !memcmp(previous.data, page.data, page.length)) continue;
+      } else if (comparable && !memcmp(comparison.data() + (page.address - start), page.data, page.length))
+          continue;
       if (!made_writable) {
         // Applying the saved writable protection also repairs a split RO branch.
         if (!original_permissions || !comparable || !(region.prot & PROT_WRITE)) {
@@ -698,6 +729,21 @@ void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps,
 
   for (size_t i : protected_regions)
     restore_protection(pid, regions[i].start, regions[i].end, regions[i].prot);
+
+  if (resident.snapshot && detsim::resident::verify()) {
+    detsim::GuardMemoryReader guard(pid);
+    std::vector<uint8_t> actual, expected;
+    for (const auto& region : regions) {
+      actual.resize(region.end - region.start); expected.resize(actual.size());
+      if (region.prot == PROT_NONE) guard.read(region.start, actual.data(), actual.size());
+      else {
+        iovec local{actual.data(), actual.size()}, remote{reinterpret_cast<void*>(region.start), actual.size()};
+        checked_memory_io(false, pid, &local, &remote, 1);
+      }
+      snapshot->read_into(region.start, expected.data(), expected.size());
+      if (actual != expected) throw std::runtime_error("Resident restore disagrees with live full-memory oracle");
+    }
+  }
 
   auto regs = snapshot->main_regs();
   if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) == -1)
@@ -971,7 +1017,9 @@ void tracee_state::recover_stopped(int index, hash_type ts_hash) const
   (void)discard_zero_guards();
   const pid_t main_pid = ptmc_state.pids[index];
   /* Restore the kernel heap extent before reconciling VMAs. */
-  if (tracee_do_syscall(main_pid, SYS_brk, brk, 0, 0, 0, 0, 0) != brk)
+  const auto resident = detsim::resident::get(main_pid);
+  if ((!resident.snapshot || resident.brk != brk) &&
+      tracee_do_syscall(main_pid, SYS_brk, brk, 0, 0, 0, 0, 0) != brk)
     throw std::runtime_error("Cannot restore snapshot brk");
   std::vector<maps_item> maps;
   restore_memory_mappings(ts_hash, main_pid, maps);
@@ -1088,18 +1136,26 @@ hash_type tracee_state::save_full_state_to_state_store(int pid, hash_type compar
 hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
 {
   validate_io_state();
-  std::string maps_path = fmt::format("/proc/{}/maps", pid);
-
-  auto maps_fp = fileutils::open_cfile(maps_path, "r");
-  if (!maps_fp)
-  {
-    throw std::runtime_error("Cannot open tracee memory mappings for capture");
-  }
-
   std::vector<maps_item> parsed_maps;
-  get_maps_item(parsed_maps, maps_fp.get());
-  if (ferror(maps_fp.get()) || parsed_maps.empty())
-    throw std::runtime_error("Failed to read tracee memory mappings");
+  const auto resident = detsim::resident::get(pid);
+  if (resident.snapshot) {
+    std::istringstream input(std::string(resident.snapshot->maps_text()));
+    std::string line;
+    while (std::getline(input, line)) {
+      maps_item item{};
+      if (sscanf(line.c_str(), "%lx-%lx %4s %lx %x:%x %lu %511s",
+                 &item.start, &item.end, item.flags, &item.offset, &item.a, &item.b,
+                 &item.inode, item.name) < 7 || item.end <= item.start)
+        throw std::runtime_error("Invalid resident mapping record");
+      parsed_maps.push_back(item);
+    }
+  } else {
+    auto maps_fp = fileutils::open_cfile(fmt::format("/proc/{}/maps", pid), "r");
+    if (!maps_fp) throw std::runtime_error("Cannot open tracee memory mappings for capture");
+    get_maps_item(parsed_maps, maps_fp.get());
+    if (ferror(maps_fp.get()) || parsed_maps.empty())
+      throw std::runtime_error("Failed to read tracee memory mappings");
+  }
 
   // Kernel VMA partitions can change after mprotect without changing memory
   // semantics. Store one canonical partition for adjacent equivalent ranges.
@@ -1178,6 +1234,7 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
     const auto hash = save_paged_snapshot(pid, regions, tstate_data, maps_text, regs,
                               comparison_hash);
     remember_thread_bindings(pid, hash, *this);
+    detsim::resident::publish(pid, hash, brk);
     return hash;
   }
 
@@ -1284,6 +1341,7 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
             "maps=%zu",
             ts_hash, total_size, regions.size(), tstate_size, maps_size);
   remember_thread_bindings(pid, ts_hash, *this);
+  detsim::resident::publish(pid, ts_hash, brk);
   return ts_hash;
 }
 
@@ -1354,7 +1412,8 @@ hash_type tracee_state::save(int pid, hash_type comparison_hash)
 hash_type tracee_state::save_stopped(pid_t pid, hash_type comparison_hash)
 {
   /* Record brk */
-  brk = tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
+  const auto known = detsim::resident::get(pid);
+  brk = known.snapshot ? known.brk : tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
   LOG_DEBUG("recorded brk = 0x%x", brk);
 
   /* Capture memory state (includes tstate) */
@@ -1545,7 +1604,7 @@ void show_state_stats()
  * Section 11: sys_state Recovery
  * ====================================================================== */
 
-void sys_state::recover_running_state() const
+void sys_state::recover_running_state() const try
 {
   (void)discard_zero_guards();
   if (!ptmc_state.model_identity.empty() && model_identity != ptmc_state.model_identity)
@@ -1556,7 +1615,9 @@ void sys_state::recover_running_state() const
     resolved.child[i].bind_threads_for_restore(i, ts_hash[i]);
   bool restore_image[NP];
   for (int i = 0; i < NP; ++i) {
-    restore_image[i] = ptmc_state.tracee_image_dirty[i] || ts_hash[i] != ptmc_state.running_state.ts_hash[i];
+    const auto known = detsim::resident::get(ptmc_state.pids[i]);
+    restore_image[i] = ptmc_state.tracee_image_dirty[i] || ts_hash[i] != ptmc_state.running_state.ts_hash[i] ||
+        (detsim::resident::enabled() && (!known.snapshot || known.root != ts_hash[i] || known.brk != child[i].brk));
     // A failed restore must not leave its partial writes labelled as the old
     // running snapshot. Retain dirty flags until the whole operation commits.
     ptmc_state.tracee_image_dirty[i] = true;
@@ -1575,8 +1636,11 @@ void sys_state::recover_running_state() const
     resolved.child[i].restore_resources(i);
   }
   ptmc_state.running_state = std::move(resolved);
+  for (int i = 0; i < NP; ++i)
+    detsim::resident::publish(ptmc_state.pids[i], ts_hash[i], child[i].brk);
   for (int i = 0; i < NP; ++i) ptmc_state.tracee_image_dirty[i] = false;
 }
+catch (...) { detsim::resident::invalidate_all(); throw; }
 
 /* ======================================================================
  * Section 13: Global Cleanup
@@ -1584,6 +1648,7 @@ void sys_state::recover_running_state() const
 
 void cleanup_all()
 {
+  detsim::resident::invalidate_all();
   clear_snapshot_thread_bindings();
   for (int i = 0; i < NP; ++i) ptmc_state.tracee_image_dirty[i] = false;
   detsim::ui::ui_printf("[DEBUG] Starting global cleanup...\n");

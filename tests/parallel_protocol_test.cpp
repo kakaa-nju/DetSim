@@ -6,6 +6,7 @@
 #include <csignal>
 #include <cstdio>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdexcept>
 #include <sys/socket.h>
 #include <thread>
@@ -30,6 +31,9 @@ static detsim::snapshot::Bundle bundle() {
 }
 static void round_trip() {
     const auto fds = sockets(); wire::Channel receiver(fds[1]);
+    const int small_buffer = 4096;
+    require(setsockopt(fds[0], SOL_SOCKET, SO_SNDBUF, &small_buffer, sizeof(small_buffer)) == 0,
+            "cannot force partial socket writes");
     std::exception_ptr failure;
     std::thread writer([&] {
         try {
@@ -160,9 +164,42 @@ static void partial_progress_deadline() {
     }
 }
 
+static void coalesced_read_ahead() {
+    const auto fds = sockets();
+    std::array<unsigned char, 48> frames{};
+    for (size_t offset : {size_t(0), size_t(16), size_t(32)}) {
+        frames[offset] = 0x44; frames[offset + 1] = 0x53;
+        frames[offset + 2] = 0x57; frames[offset + 3] = 0x50;
+        frames[offset + 4] = 1; frames[offset + 6] = 6;
+    }
+    require(send(fds[0], frames.data(), frames.size(), MSG_NOSIGNAL) == ssize_t(frames.size()), "coalesced send failed");
+    wire::Channel receiver(fds[1]);
+    auto first = receiver.receive();
+    require(first && std::holds_alternative<wire::Shutdown>(*first), "coalesced first frame failed");
+    require(receiver.has_buffered_input(), "following frames not retained in read-ahead buffer");
+    pollfd descriptor{receiver.fd(), POLLIN, 0};
+    require(poll(&descriptor, 1, 0) == 0, "read-ahead test did not drain kernel socket");
+    wire::Channel moved(std::move(receiver));
+    require(moved.has_buffered_input() && !receiver.has_buffered_input(), "move lost pending read-ahead bytes");
+    for (int i = 0; i < 2; ++i) {
+        auto frame = moved.receive();
+        require(frame && std::holds_alternative<wire::Shutdown>(*frame), "buffered frame was lost");
+    }
+    require(!moved.has_buffered_input(), "read-ahead buffer did not drain");
+    close(fds[0]); require(!moved.receive(), "EOF after buffered frames was lost");
+    const auto counts = moved.counters();
+    require(counts.recv_calls == 2 && counts.poll_calls == 0 && counts.bytes_received == frames.size(),
+            "coalesced input did not use one direct read plus EOF");
+    const auto partial_fds = sockets();
+    require(send(partial_fds[0], frames.data(), 23, MSG_NOSIGNAL) == 23, "partial coalesced send failed");
+    close(partial_fds[0]); wire::Channel partial(partial_fds[1]);
+    require(partial.receive().has_value() && partial.has_buffered_input(), "partial read-ahead missing");
+    rejected([&] { partial.receive(); }, "truncated buffered next header accepted");
+}
+
 int main() {
     try {
-        round_trip(); malformed(); limits_and_timeout(); configured_choice_round_trip(); receive_limits(); partial_progress_deadline();
+        round_trip(); malformed(); limits_and_timeout(); configured_choice_round_trip(); receive_limits(); partial_progress_deadline(); coalesced_read_ahead();
         std::puts("parallel protocol round-trip, bounds, truncation, timeout, RAII: OK"); return 0;
     } catch (const std::exception& error) { std::fprintf(stderr, "%s\n", error.what()); return 1; }
 }

@@ -43,11 +43,11 @@ def summarize_syscalls(metadata, stacks):
                 if value >= 2**63:
                     value -= 2**64
                 row['errors'] += value < 0
-                if name in ('sendto', 'recvfrom', 'process_vm_readv', 'process_vm_writev') and value > 0:
+                if name in ('sendto', 'recvfrom', 'sendmsg', 'recvmsg', 'process_vm_readv', 'process_vm_writev') and value > 0:
                     row['returned_bytes'] += value
     return {'command': metadata['command'], 'window_seconds': metadata['end']-metadata['begin'],
             'syscalls': counts, 'unmatched_entries': len(pending), 'lost_record_lines': lost,
-            'limits': 'Instrumented syscall latency, concurrent durations overlap; not CPU time or uninstrumented throughput.'}
+            'limits': 'Instrumented syscall latency, concurrent durations overlap; not CPU time or uninstrumented throughput. sendmsg/recvmsg return bytes count only their packet payload; SCM_RIGHTS mapped object bytes and requested iov lengths are not present in these tracepoints.'}
 
 
 def summarize(metadata, stacks, worker_pids):

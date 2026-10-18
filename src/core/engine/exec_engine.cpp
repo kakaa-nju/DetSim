@@ -38,6 +38,7 @@ void ExecutionEngine::init_tracee(int tracee_idx)
 
 bool ExecutionEngine::handle_signal(pid_t pid, int wstatus)
 {
+    detsim::resident::invalidate(pid);
     SignalResult result = sig::process(pid, wstatus);
 
     if (sig::should_stop(result)) {
@@ -69,7 +70,10 @@ int ExecutionEngine::do_single_syscall(pid_t pid, syscall_info& info)
         ptmc_state.tracee_image_dirty[ptmc_state.cursor] = true;
     complete_thread_start(ptmc_state.cursor, pid);
     // Entry
-    ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
+    {
+        detsim::resident::ProtectedResume user_instructions;
+        ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
+    }
     waitpid(pid, &wstatus, 0);
 
     // Handle signals
@@ -82,6 +86,7 @@ int ExecutionEngine::do_single_syscall(pid_t pid, syscall_info& info)
     // Get syscall info
     ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void*)sizeof(psi), &psi);
     if (psi.op != PTRACE_SYSCALL_INFO_ENTRY) {
+        detsim::resident::invalidate(pid);
         LOG_ERROR("Expected syscall entry, got op=%d", psi.op);
         return CKPT_STOP;
     }
@@ -104,7 +109,18 @@ int ExecutionEngine::do_single_syscall(pid_t pid, syscall_info& info)
     syscall_dispatch::enter(pid, info.nr, info);
 
     // Execute syscall
-    ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
+    {
+        user_regs_struct selected{};
+        __ptrace_syscall_info phase{};
+        ptrace_right(PTRACE_GETREGS, pid, nullptr, &selected);
+        ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, reinterpret_cast<void*>(sizeof phase), &phase);
+        const bool suppressed = phase.op == PTRACE_SYSCALL_INFO_ENTRY &&
+            selected.orig_rax == static_cast<uint64_t>(-1);
+        // Only an actually suppressed kernel call can preserve the RO proof.
+        // Native calls, even apparently harmless queries, invalidate by default.
+        detsim::resident::ProtectedResume suppressed_kernel(suppressed);
+        ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
+    }
 
     // Normal exit handling
     waitpid(pid, &wstatus, 0);
@@ -116,6 +132,7 @@ int ExecutionEngine::do_single_syscall(pid_t pid, syscall_info& info)
 
     ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void*)sizeof(psi), &psi);
     if (psi.op != PTRACE_SYSCALL_INFO_EXIT) {
+        detsim::resident::invalidate(pid);
         LOG_ERROR("Expected syscall exit, got op=%d", psi.op);
         return CKPT_STOP;
     }

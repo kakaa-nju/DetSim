@@ -4,6 +4,7 @@
 #include "monitor.h"
 #include "state/state.h"
 #include "state/page_snapshot.h"
+#include "state/resident_memory.h"
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -497,6 +498,7 @@ EvalResult PrefixOpNode::eval(int pid, bool &success) const
 
   long new_val = (op_ == PrefixOp::PRE_INC) ? old_val + 1 : old_val - 1;
 
+  detsim::resident::writing(pid, addr, sizeof(new_val));
   if (ptrace(PTRACE_POKEDATA, pid, addr, new_val) < 0)
   {
     success = false;
@@ -528,6 +530,7 @@ EvalResult PostfixOpNode::eval(int pid, bool &success) const
 
   long new_val = (op_ == PostfixOp::POST_INC) ? old_val + 1 : old_val - 1;
 
+  detsim::resident::writing(pid, addr, sizeof(new_val));
   if (ptrace(PTRACE_POKEDATA, pid, addr, new_val) < 0)
   {
     success = false;
@@ -937,6 +940,7 @@ EvalResult AssignNode::eval(int pid, bool &success) const
 
   long val = val_res.as_value();
 
+  detsim::resident::writing(pid, addr, sizeof(val));
   if (ptrace(PTRACE_POKEDATA, pid, addr, val) < 0)
   {
     success = false;

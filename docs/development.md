@@ -6,6 +6,19 @@
 For storage APIs, persistence boundaries and memory limits, see the
 [current storage contract](state_store_full_guide.md).
 
+For native search performance, reproducible Raft benchmarks, resident-memory
+reuse and shared snapshot transport, see the
+[search throughput report](search-throughput-2026-10-18.md).
+`DETSIM_RESIDENT_MEMORY=on` (default) enables reuse within automatic BFS/DFS and
+worker expansion; `off` uses observed memory and `verify` adds full-byte oracle
+checks. Reuse assumes no external writes to target memory/file backing and no
+plugin writes bypassing framework helpers. It does not track arbitrary dirty
+pages. Snapshot backend selection remains `DETSIM_SNAPSHOT_BACKEND=full|pages`.
+Parallel transport defaults to buffered sockets. `DETSIM_SHARED_OBJECTS=on`
+opts into sealed-memfd object transfer; `off` selects the default. The shared
+path retains owning Bundle copies and validation, and was slower in the measured
+Raft workload. It remains an experimental comparison path, not a speed guarantee.
+
 For the project's actual model-checking requirements, start with the
 [state and atom contract assessment](model-checking-contract.md). It includes a
 reproduced SIMD restore failure and distinguishes state closure from schedule
@@ -35,6 +48,7 @@ make check-parallel      # NP=2 shared frontier, equivalence, worker loss, cance
 make check-parallel-actors # NP=1 actual threads/choices/pending/timeouts + replay
 make check-search-frontier # pure policy/lease/depth oracle
 make check-parallel-protocol # typed frames, bounds and absolute timeout
+make check-parallel-bundle # NP=2 real full/pages shared transfer and cold reopen
 make NP=2 check-snapshot-bundle # full/pages closure and metadata publication faults
 make check-adoption      # NP=1 repeated full/pages thread-layout adoption
 make check-fixed-layout  # NP=1 framework controls target layout; host ASLR unchanged
