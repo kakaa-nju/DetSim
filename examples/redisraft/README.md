@@ -31,6 +31,13 @@ separately in `../redisraft_module/`.
 
 ## Profiling and snapshot comparisons
 
+`profile_search.py` wraps the native comparison with perf control-FIFO windows;
+`--syscalls` records syscall enter/exit events instead of CPU call stacks.
+`profile_search_summary.py` separates exclusive phases from overlapping inclusive
+hotspots. Setup and manual prefixes are excluded. See the
+[full-pipeline perf report](../../docs/search-perf-2026-10-18.md) for commands,
+measured IPC/capture costs, and the additional Willemt Raft comparison.
+
 `parallel_benchmark.py` builds the project-owned healthy nonblocking fixture,
 prepares one three-node checkpoint, then runs native DFS and 1/2/4-worker DFS/BFS
 from that checkpoint. It compares full parallel transition graphs, node depths
