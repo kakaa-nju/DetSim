@@ -14,11 +14,15 @@
 #include "types.h"
 #include <sys/types.h>
 #include <vector>
+#include <functional>
+#include <cstdint>
 
 /* Forward declarations */
 struct syscall_info;
 struct sys_state;
 enum class TransitionAction;
+struct ActorAction;
+struct TransitionResult;
 
 /* ========================================================================
  * Initialization
@@ -55,9 +59,14 @@ int exec_rand(int depth);
 /* Load a saved state by hash */
 void load(hash_type hash);
 
-/* Enumerate unique one-step successors of source (actor actions and discovered
- * syscall choices). Restores source before returning; used by parallel workers. */
-std::vector<hash_type> enumerate_successors(const sys_state& source);
+// Streaming single-source expansion for persistent native workers. Every actual
+// actor/choice edge is delivered, including duplicate target hashes. The result
+// and selected choice remain valid for the callback; retain no live references.
+enum class EnumerationKind { Expanded, Terminal, DepthCut, ModelBudget, Violation };
+struct EnumerationSummary { EnumerationKind kind; uint64_t emitted; };
+using EdgeCallback = std::function<void(const ActorAction&, int, int, const TransitionResult&)>;
+EnumerationSummary enumerate_state(const sys_state& source, bool may_expand,
+                                   const EdgeCallback& callback);
 
 /* ========================================================================
  * State Management

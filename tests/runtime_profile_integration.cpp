@@ -226,6 +226,18 @@ int main(int argc, char** argv) {
   detsim::configure_runtime_profile(json::object());
   require(detsim::runtime_profile().startup_syscall == SYS_munmap, "declared dynamic-loader boundary");
   std::string default_identity = detsim::runtime_profile_identity();
+  require(!detsim::runtime_profile().fixed_layout, "default profile inherits target layout");
+  detsim::configure_runtime_profile({{"fixed_layout", true}});
+  require(detsim::runtime_profile().fixed_layout &&
+          detsim::runtime_profile_identity() != default_identity,
+          "managed target layout must enter model identity");
+  require(json::parse(detsim::runtime_profile_identity()).at("address_layout") ==
+          "linux-x86_64-fixed-v1", "fixed-layout identity contract");
+  require(rejected({{"fixed_layout", 1}}), "numeric layout flag rejected");
+  require(rejected({{"fixed_layout", "true"}}), "string layout flag rejected");
+  detsim::configure_runtime_profile({{"fixed_layout", false}});
+  require(detsim::runtime_profile_identity() == default_identity,
+          "explicit inherited layout preserves legacy identity");
   require(json::parse(default_identity).at("rseq")=="unavailable-enosys",
           "runtime identity omits rseq availability contract");
   require(detsim::runtime_profile().initial_time_us == 1000000, "default machine clock origin is nonzero");

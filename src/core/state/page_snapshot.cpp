@@ -313,3 +313,11 @@ void SnapshotView::read_into(uint64_t address, void* destination, size_t length)
     address += count; out += count; length -= count;
   }
 }
+
+std::vector<hash_type> SnapshotView::referenced_blob_keys() const {
+  check_generation();
+  std::vector<hash_type> result;
+  result.reserve(pages_.size());
+  for (const auto& page : pages_) result.push_back(page.key);
+  return result;
+}

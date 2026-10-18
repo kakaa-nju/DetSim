@@ -54,6 +54,8 @@ class FileContent {
   std::vector<uint8_t>& writable();
   void replace(std::vector<uint8_t> bytes);
 public:
+  // Zero for inline/unregistered content; no payload mutation or live fallback.
+  uint64_t saved_blob_key() const;
   size_t size() const { return bytes().size(); }
   bool empty() const { return bytes().empty(); }
   const char* data() const { return empty() ? "" : reinterpret_cast<const char*>(bytes().data()); }

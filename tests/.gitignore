@@ -150,6 +150,16 @@
 !native_search_actors.mk
 !native_search_actors.cpp
 !example_layout_test.py
+!adoption_scenarios.py
+!fixed_layout_scenarios.py
+!adoption_pthread_scenarios.py
+!search_frontier_test.cpp
+!search_frontier.mk
+!snapshot_bundle_integration.cpp
+!snapshot_bundle.mk
+!parallel_protocol_test.cpp
+!parallel_protocol.mk
+!parallel_actor_scenarios.py
 
 !tui_smoke_test.py
 

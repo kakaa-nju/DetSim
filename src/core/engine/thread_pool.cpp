@@ -560,6 +560,17 @@ void ensure_thread_carriers(int node, size_t count)
   auto& pool = pool_for(node);
   if (count > MAX_THREADS_PER_PROCESS)
     throw std::runtime_error("Snapshot needs too many physical thread carriers");
+  // Adoption may grow an already-used pool. Check the entire retained set,
+  // including parked/dead-logical-slot carriers, before any injected clone.
+  verify_thread_pool(node);
+  for (pid_t tid : pool.carriers) {
+    require_thread_capture_boundary(tid);
+    require_no_pending_signals(tid);
+    require_no_rseq(tid);
+    require_no_native_robust_list(tid);
+    if (query_clear_child_tid(tid))
+      throw std::runtime_error("Thread carrier has unadopted inherited clear_child_tid registration");
+  }
   while (pool.carriers.size() < count) {
     const pid_t carrier = create_thread_carrier(pool.anchor);
     if (carrier <= 0)
@@ -567,6 +578,7 @@ void ensure_thread_carriers(int node, size_t count)
     pool.carriers.push_back(carrier);
   }
   std::sort(pool.carriers.begin(), pool.carriers.end());
+  verify_thread_pool(node);
 }
 
 void verify_thread_pool(int node)

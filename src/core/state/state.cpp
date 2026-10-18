@@ -880,24 +880,19 @@ void adopt_snapshot_threads(int index, hash_type hash, const tracee_state& targe
     throw std::runtime_error("Snapshot adoption requires a valid node and identity");
   if (ptmc_state.pids[index] <= 0)
     throw std::runtime_error("Snapshot adoption requires a live owned process");
-  const auto& current = ptmc_state.running_state.child[index];
-  if (current.threads.size() != 1 || !current.threads[0].alive ||
-      !current.threads[0].is_main || current.threads[0].tid != 1)
-    throw std::runtime_error(
-        "Multi-thread adoption requires a fresh single-main process");
-  if (target.threads.empty() || !target.threads[0].alive ||
-      !target.threads[0].is_main || target.threads[0].tid != 1)
+  if (target.threads.empty() || target.threads.size() > MAX_THREADS_PER_PROCESS ||
+      target.main_tid != 1 || !target.threads[0].is_main || target.threads[0].tid != 1)
     throw std::runtime_error("Snapshot has an invalid main-thread layout");
-  size_t alive = 0;
+  // The physical leader remains an owned anchor even when its logical slot has
+  // exited. Non-main live slots each need a distinct non-anchor carrier.
+  size_t carriers = 1;
   for (size_t i = 0; i < target.threads.size(); ++i) {
     const auto& thread = target.threads[i];
-    if (thread.tid != static_cast<pid_t>(i + 1) ||
-        thread.is_main != (i == 0))
+    if (thread.tid != static_cast<pid_t>(i + 1) || thread.is_main != (i == 0))
       throw std::runtime_error("Snapshot has an invalid logical thread layout");
-    if (thread.alive) ++alive;
+    if (thread.alive && !thread.is_main) ++carriers;
   }
-  if (!alive)
-    throw std::runtime_error("Snapshot has no live logical threads");
+  verify_thread_pool(index);
 
   const auto key = std::make_pair(index, hash);
   if (const auto existing = snapshot_thread_bindings.find(key);
@@ -907,7 +902,7 @@ void adopt_snapshot_threads(int index, hash_type hash, const tracee_state& targe
     return;
   }
 
-  ensure_thread_carriers(index, alive);
+  ensure_thread_carriers(index, carriers);
   const pid_t pid = ptmc_state.pids[index];
   auto owner = process_owners[pid].lock();
   if (!owner) {

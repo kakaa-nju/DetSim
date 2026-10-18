@@ -1,4 +1,6 @@
 #include "state_transition.h"
+#include "config.h"
+#include "search/compatibility.h"
 #include <algorithm>
 #include "state_view.h"
 #include "plugins.h"
@@ -30,6 +32,7 @@
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/prctl.h>
+#include <sys/personality.h>
 #include <sys/syscall.h>
 #include <sys/user.h>
 #include <sys/wait.h>
@@ -567,6 +570,8 @@ static void init_tracee_state(int index)
   ptrace_right(PTRACE_SYSCALL, pid, 0, 0);
   if (waitpid(pid, &wstatus, 0) != pid || !WIFSTOPPED(wstatus) || WSTOPSIG(wstatus) != SIGTRAP)
     throw std::runtime_error("Tracee failed to exec before configured RuntimeProfile startup boundary");
+  if (profile.fixed_layout && !detsim::tracee_has_fixed_layout(pid))
+    throw std::runtime_error("RuntimeProfile fixed_layout was not preserved across tracee exec");
 
   // exec replaced the old user image; adopt its inherited task mask before
   // executing the loader prelude through the same rt_sigprocmask model.
@@ -596,6 +601,24 @@ static void init_tracee_state(int index)
 /* prepare tracee for ptrace, and execve */
 static void start_tracee(int id)
 {
+  if (!tracee_native_cwd.empty() && chdir(tracee_native_cwd.c_str()) != 0) {
+    static constexpr char message[] = "Cannot establish native tracee cwd before exec\n";
+    (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+    _exit(125);
+  }
+  if (detsim::runtime_profile().fixed_layout) {
+    // Change only the forked tracee before exec. No parent personality or host
+    // ASLR sysctl change; fail closed if the kernel refuses this profile.
+    const long flags = syscall(SYS_personality, 0xffffffffUL);
+    const long applied = flags < 0 ? -1 :
+        syscall(SYS_personality, static_cast<unsigned long>(flags) | ADDR_NO_RANDOMIZE);
+    const long verified = applied < 0 ? -1 : syscall(SYS_personality, 0xffffffffUL);
+    if (verified < 0 || !(verified & ADDR_NO_RANDOMIZE)) {
+      static constexpr char message[] = "Cannot establish RuntimeProfile fixed_layout before exec\n";
+      (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+      _exit(125);
+    }
+  }
   signal(SIGINT, SIG_IGN);
   ptrace_right(PTRACE_TRACEME, 0, NULL, NULL);
   // detsim::ui::ui_printf("Will start executable %s\n",
@@ -682,6 +705,8 @@ int state_initialization()
 
   sys_state first_state(syscall_info, nullptr, false);
   first_state.model_identity = ptmc_state.model_identity;
+  detsim::search::initialize_compatibility_manifest(first_state);
+  first_state.ss_hash = first_state.identity_hash();
   bool violation = detsim::plugins::check_initial(first_state);
   violation |= check_assertions(first_state, 0);
   first_state.property_failed = violation;

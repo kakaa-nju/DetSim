@@ -46,6 +46,8 @@ class SnapshotView {
   const user_regs_struct& main_regs() const { check_generation(); return regs_; }
   uint32_t version() const { check_generation(); return header_.version; }
   uint32_t format_version() const { check_generation(); return header_.version; }
+  // Saved page object dependencies; flat snapshots have no external pages.
+  std::vector<hash_type> referenced_blob_keys() const;
   size_t page_count(size_t region) const;
   OwnedSpan page(size_t region, size_t index) const;
   void read_into(uint64_t address, void* destination, size_t length) const;

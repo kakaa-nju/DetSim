@@ -31,6 +31,25 @@ separately in `../redisraft_module/`.
 
 ## Profiling and snapshot comparisons
 
+`parallel_benchmark.py` builds the project-owned healthy nonblocking fixture,
+prepares one three-node checkpoint, then runs native DFS and 1/2/4-worker DFS/BFS
+from that checkpoint. It compares full parallel transition graphs, node depths
+and phases, plus the serial search's newly discovered nodes and available
+first-parent witnesses. A first-parent tree is not a complete serial edge oracle.
+
+```sh
+make benchmark-redisraft-parallel CC=/usr/bin/gcc CXX=/usr/bin/g++
+make benchmark-redisraft-parallel REDISRAFT_PARALLEL_ARGS='--backend full --depth 4'
+```
+
+Search throughput uses the native command's own timer. Build, prefix, loading,
+inspection and command wall time are recorded separately. The target remains
+the Raft C library, not a Redis consensus module. See the
+[parallel execution report](../../docs/parallel-exploration.md) for results and
+limits. The legacy library driver used below can reach an untimed all-waiting
+state because its `recvfrom` assumes nonblocking behavior; the new comparison
+rejects that as a throughput workload instead of weakening pending syscall rules.
+
 `benchmark.py` controls the existing three-node library driver and measures its
 manual prefix followed by native DFS. `seed.c` supplies the optional benchmark
 seed interposer; it is not part of ordinary case semantics. The

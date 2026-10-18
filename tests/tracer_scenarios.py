@@ -1260,23 +1260,15 @@ int main(void) {
         code, output = self.run_tracer(scenario, name="diff_stateview")
         self.assertEqual(code, 0, output)
 
-    def test_parallel_detects_unadoptable_multithread_workers(self):
-        setarch = shutil.which("setarch")
-        if not setarch:
-            self.skipTest("parallel fixed-layout check requires setarch")
+    def test_parallel_adopts_multithread_frontier(self):
         binary = self.root / "actors"
         subprocess.run(
             shlex.split(os.environ.get("CC", "/usr/bin/gcc"))
             + ["-O0", "-g", "-gdwarf-4", "-fno-pie", "-no-pie", "-pthread",
                str(ROOT / "tests/native_search_actors.c"), "-o", str(binary)],
             check=True)
-        wrapper = self.root / "fixed-tracer"
-        wrapper.write_text(
-            "#!/bin/sh\nexec " + shlex.quote(setarch) +
-            " x86_64 -R " + shlex.quote(str(TRACER)) + ' "$@"\n')
-        wrapper.chmod(0o755)
-        session = Session(str(wrapper), [str(binary), "w"], [], self.root / "run",
-                          "full", 60, choices=False)
+        session = Session(TRACER, [str(binary), "w"], [], self.root / "run",
+                          "full", 60, runtime_profile={"fixed_layout": True})
         try:
             session.send()
             session.send("sw 0")
@@ -1286,26 +1278,19 @@ int main(void) {
                 session.send("si 0")
             else:
                 self.fail("worker thread did not become runnable")
-            output = session.send("parallel 2 1")
-            self.assertIn("Parallel exploration:", output)
-            self.assertIn("Load --adopt rejected: process 0 thread layout differs",
-                          output)
-            self.assertIn("worker loaded 0 of 1 assigned branches", output)
-            self.assertIn("status=FAILED", output)
-            self.assertIn("retry1", output)
-            self.assertIn("attempt 2", output)
-
-            threaded = session.send("parallel 2 2 --threads")
-            self.assertIn("status=ok", threaded)
-            self.assertIn("Merged:", threaded)
-            artifacts = re.search(r"Artifacts: (.*)", threaded)
-            self.assertIsNotNone(artifacts, threaded)
-            base = Path(artifacts.group(1).strip())
-            for index in range(2):
-                text = (base / f"worker-{index}" / "worker.out").read_text(
-                    errors="replace")
-                self.assertIn("adopted multi-thread cross-process bindings", text)
-                self.assertIn("EDGE ", text)
+            source = session.current_hash()
+            for strategy in ("dfs", "bfs"):
+                output = session.send("parallel 2 1 --strategy " + strategy)
+                rows = re.findall(r"PARALLEL_RESULT (\{[^\n]+\})", output)
+                self.assertEqual(len(rows), 1, output)
+                result = json.loads(rows[0])
+                self.assertEqual(result["status"], "bounded", result)
+                self.assertEqual(result["retries"], 0, result)
+                journal = Path(result["artifacts"]) / "journal.jsonl"
+                edges = [json.loads(line) for line in journal.read_text().splitlines()
+                         if json.loads(line).get("event") == "edge"]
+                self.assertEqual({edge["thread"] for edge in edges}, {0, 1}, edges)
+                self.assertEqual(session.current_hash(), source)
         finally:
             self.assertEqual(session.close(), 0)
 

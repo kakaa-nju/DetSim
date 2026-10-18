@@ -1,4 +1,5 @@
 #include "scheduler.h"
+#include "config.h"
 #include "api/plugin.h"
 #include "debug.h"
 #include "net/emu.h"
@@ -699,27 +700,45 @@ static TransitionResult search_actor_choice(const sys_state& source,const ActorA
   return result;
 }
 
-std::vector<hash_type> enumerate_successors(const sys_state& source)
+EnumerationSummary enumerate_state(const sys_state& source, bool may_expand,
+                                   const EdgeCallback& callback)
 {
-  std::set<hash_type> unique;
+  if (source.property_failed) return {EnumerationKind::Violation, 0};
   const auto actions = enabled_actor_actions(source);
+  if (actions.empty()) return {EnumerationKind::Terminal, 0};
+  if (source.error_bound <= 0) return {EnumerationKind::ModelBudget, 0};
+  if (!may_expand) return {EnumerationKind::DepthCut, 0};
+  if (!callback) throw std::runtime_error("Single-state expansion requires an edge callback");
+  // This API owns its choice policy independently of the invoking UI command.
+  // In particular a persistent worker has no stdin, and a previous RAND command
+  // must not replace explicit saved-actor presets with random choices.
+  struct PresetChoiceScope {
+    int previous_auto = auto_mode;
+    decltype(ptmc_state.mode) previous_mode = ptmc_state.mode;
+    PresetChoiceScope() { auto_mode = 1; ptmc_state.mode = PTMC_STATE::MODE_BFS; }
+    ~PresetChoiceScope() { auto_mode = previous_auto; ptmc_state.mode = previous_mode; }
+  } choice_scope;
+  uint64_t emitted = 0;
   for (const auto& actor : actions) {
     int cardinality = -1;
     std::vector<int> choices;
-    TransitionResult first = search_actor_choice(source, actor, 0, cardinality, choices);
-    if (first.code != CKPT_DISCARD && first.new_state.ss_hash)
-      unique.insert(first.new_state.ss_hash);
-    const std::vector<int> alternatives = choices;
-    for (int choice : alternatives) {
-      std::vector<int> unused;
-      TransitionResult result =
-          search_actor_choice(source, actor, choice, cardinality, unused);
-      if (result.code != CKPT_DISCARD && result.new_state.ss_hash)
-        unique.insert(result.new_state.ss_hash);
-    }
+    do {
+      int preset = 0;
+      if (cardinality >= 0) { preset = choices.back(); choices.pop_back(); }
+      TransitionResult result = search_actor_choice(source, actor, preset, cardinality, choices);
+      if (!result.new_state.ss_hash)
+        throw std::runtime_error("Single-state expansion produced no target identity");
+      const int choice = actor.action == TransitionAction::Timeout ? DETSIM_CHOICE_TIMEOUT :
+          (ptmc_state.n_choose ? ptmc_state.choose : -1);
+      const bool violation = result.property_violation || result.new_state.property_failed;
+      callback(actor, choice, cardinality, result);
+      ++emitted;
+      if (violation) return {EnumerationKind::Violation, emitted};
+    } while (!choices.empty());
   }
+  // A failed final restore is a worker failure, never a successful Done receipt.
   load(source.ss_hash);
-  return std::vector<hash_type>(unique.begin(), unique.end());
+  return {EnumerationKind::Expanded, emitted};
 }
 
 /* auto mode: */

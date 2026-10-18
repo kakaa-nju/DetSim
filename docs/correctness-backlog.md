@@ -1365,56 +1365,24 @@ Automatic time advance, wake injection, and blocking vector/partial pipe writes
 remain open.
 
 
-### Parallel seed workers and cross-process restore (2026-10-18)
+### Native shared-frontier parallel exploration (2026-10-18)
 
-Cross-startup identity remains C17-blocked: fixed layout makes mappings/GPRs close,
-but loader RDTSC/CPUID bytes still differ, so raw startup hashes are not a safe
-global key. Directly loading a seed store into a fresh tracer was rejected with
-`Snapshot has no local thread binding provenance`; the capture-time pidfd/layout
-provenance is deliberately process-local.
+The original split-frontier / copied-store / stdout-union prototype has been
+replaced by `core/search`: one authoritative frontier, persistent native workers,
+complete snapshot bundles, typed leases/results, bounded reassignment and explicit
+completion classes. No 512-branch truncation or independent worker visited sets.
+See [the current implementation and evidence](parallel-exploration.md).
 
-`load --adopt HASH` now provides an explicit, opt-in provenance bypass for workers
-that bootstrapped the same executable and have an identical logical thread layout.
-It still validates node/hash, model identity, live process incarnation and layout;
-normal `load` is unchanged. With both seed and workers launched under a fixed
-layout (`setarch x86_64 -R`), full and pages store copies restore successfully.
-Two workers loading the same checkpoint and executing the same `si` produced the
-same successor hash (test `test_adopted_seed_snapshot_is_identical_across_workers`).
-The same test also verifies that a normal-ASLR worker is rejected before restore.
+Framework-managed target layout leaves host ASLR enabled. Repeated full/pages
+adoption covers thread births/exits, dead main/all logical threads, and selected
+pthread TLS/signal-mask/altstack/join/robust paths. Fixed-profile state identity
+binds its original bootstrap compatibility manifest; a current worker Hello cannot
+by itself certify an older snapshot from a different environment.
 
-`parallel N DEPTH [--split-depth=D]` now adds a branch-partitioned coordinator:
-it expands D frontier levels (default 1; actors plus discovered choices, capped at
-512), copies the store to per-worker directories, spawns fixed-layout workers with
-`posix_spawn`, and each worker `load --adopt`s assigned frontier states and runs
-the built-in `dfs` for the remaining depth. The NP=2 gate starts two workers on a depth-2 frontier
-(three branches) and checks adopted/search outputs plus the merged union. Worker
-success is now explicit: exit 0 alone is insufficient; the coordinator requires
-every assigned branch to emit `Loaded state` and rejects restore/adoption error
-lines. A multi-thread frontier (fresh single-thread workers cannot adopt it) is
-covered by an NP1 regression and reports `status=FAILED` for both workers. Failed
-workers are retried once with a fresh store copy in `worker-<n>-retry1`; the
-structural multi-thread failure is retried, still fails, and remains visible. A worker
-that loads several frontier states also exposed a `cmd_load` bug: after
-`recover_running_state()` it overwrote the resolved state with the unbound loaded
-copy, so the second adoption failed with "Logical thread has no unique owned
-carrier binding". The overwrite is removed; NP1 load/replay tests still pass. Artifacts are retained under
-`.parallel-<pid>-<time>/`.
-
-`load --adopt-threads` extends adoption to a saved multi-thread layout: a fresh
-single-main worker creates parked carriers with `create_thread_carrier`, records a
-synthetic layout binding, then restores all registers/memory. A main-futex +
-runnable-worker checkpoint has been restored and searched this way (full backend).
-`parallel --threads` uses this mode; ordinary `--adopt` still rejects a layout
-mismatch.
-
-After the workers exit, the coordinator inspects each worker `SysStateStore` for
-visited hashes and parses `tree` `EDGE` lines, then reports a post-hoc union
-(`Merged: ...`). Workers still have independent visited sets and no shared
-frontier or during-search dedup/merge; failures are only summarized, and
-ordinary `--adopt` remains limited to matching local layouts; `--adopt-threads`
-creates carriers but has not been tested across all multi-thread lifecycle cases. Normal cold-start
-hashes still cannot be used as shared keys. Normal
-ASLR adoption fails explicitly at brk/mapping restore, multi-thread layouts are
-not yet bootstrapped in workers, and loader bytes are not normalized. A real
-parallel BFS/DFS must keep the built-in search authoritative and merge only
-verified state identities; do not use cold-start hashes as shared keys.
+Integration gates must jointly exercise choices, pending completion, timeout,
+thread adoption, property replay and worker loss. Component frontier/bundle tests
+alone do not close these gates. Arbitrary cold-root equivalence, relocation of
+untyped pointers, direct hardware nondeterminism, remote workers, durable
+coordinator restart, and every Linux syscall/thread model remain outside the
+current verified contract. Full-closure transport and metadata durability barriers
+still require performance measurement; parallelism does not imply speedup.

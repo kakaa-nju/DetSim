@@ -5,16 +5,16 @@
         wc clean clear benchmark tools pgo-generate pgo-use pgo-clean \
         check-integration check-scenarios check-tui check-parallel check-redis
 
-ifneq ($(filter benchmark-redisraft,$(MAKECMDGOALS)),)
+ifneq ($(filter benchmark-redisraft benchmark-redisraft-parallel,$(MAKECMDGOALS)),)
 NP ?= 3
 endif
 
-ifneq ($(filter check-accept check-redis check-parallel check-port check-identity check-capture check-io-boundary check-writev check-state-view check-plugins check-runtime-profile check-syscall-policy check-process-state check-pending-io check-pending-io-snapshot check-getdents,$(MAKECMDGOALS)),)
+ifneq ($(filter check-accept check-redis check-parallel check-snapshot-bundle check-port check-identity check-capture check-io-boundary check-writev check-state-view check-plugins check-runtime-profile check-syscall-policy check-process-state check-pending-io check-pending-io-snapshot check-getdents,$(MAKECMDGOALS)),)
 NP ?= 2
 endif
 
 # Integration fixtures use one node unless explicitly overridden.
-ifneq ($(filter check-integration check-dwarf check-elf check-scenarios check-tui check-cases audit-runtimes check-xstate check-exec check-state-io check-mappings check-futex-snapshot check-futex check-thread-control check-thread-identity check-thread-carrier check-thread-lifecycle check-thread-tid check-thread-signal-mask check-thread-robust check-pending-syscall check-storage check-store-cache check-store-packed check-store-metadata check-store-tools benchmark-storage check-soft-dirty check-page-snapshot check-vfs-content check-thread-altstack check-dfs-residency check-history-presentation,$(MAKECMDGOALS)),)
+ifneq ($(filter check-integration check-dwarf check-elf check-scenarios check-tui check-adoption check-fixed-layout check-parallel-actors check-parallel-protocol check-cases audit-runtimes check-xstate check-exec check-state-io check-mappings check-futex-snapshot check-futex check-thread-control check-thread-identity check-thread-carrier check-thread-lifecycle check-thread-tid check-thread-signal-mask check-thread-robust check-pending-syscall check-storage check-store-cache check-store-packed check-store-metadata check-store-tools benchmark-storage check-soft-dirty check-page-snapshot check-vfs-content check-thread-altstack check-dfs-residency check-history-presentation,$(MAKECMDGOALS)),)
 NP ?= 1
 endif
 
@@ -44,6 +44,7 @@ LDLIBS = -ldwarf -lreadline -ldw -lzstd -lxxhash -lunwind-ptrace -lunwind-x86_64
 SRCS = src/main.cpp\
        src/core/scheduler.cpp src/core/guest.cpp src/core/monitor.cpp src/core/config.cpp src/core/syscall_fmt.cpp src/core/resolve.cpp \
        src/core/dwarf.cpp src/core/plugins.cpp src/core/runtime_profile.cpp src/core/state/state_view.cpp \
+       src/core/search/frontier.cpp src/core/search/protocol.cpp src/core/search/worker.cpp src/core/search/parallel.cpp src/core/search/compatibility.cpp src/core/state/snapshot_bundle.cpp \
        src/core/state/state.cpp src/core/state/page_snapshot.cpp src/core/state/page_capture.cpp src/core/state/xstate.cpp src/core/state/state_store.cpp src/core/state/state_store_packed.cpp src/core/state/sysstate_store.cpp src/core/state/state_transition.cpp src/core/state/serialize.cpp \
        src/core/engine/pending_syscall.cpp src/core/engine/thread_manager.cpp src/core/engine/thread_control.cpp src/core/engine/thread_carrier.cpp src/core/engine/thread_pool.cpp src/core/engine/signal_handler.cpp src/core/engine/exec_engine.cpp \
        src/core/syscall/dispatcher.cpp src/core/syscall/handlers.cpp \
@@ -135,6 +136,7 @@ check-example-layout:
 # Optional fragments are absent in the disposable build-contract fixtures.
 -include tests/dwarf.mk tests/elf.mk tests/accept.mk tests/xstate.mk tests/exec.mk tests/state_io.mk tests/port.mk tests/identity.mk tests/mapping.mk tests/futex_snapshot.mk tests/futex.mk tests/storage.mk tests/store_cache.mk tests/store_packed.mk examples/redisraft/benchmark.mk tests/capture.mk tests/soft_dirty.mk tests/page_snapshot.mk tests/io_boundary.mk tests/framework.mk tests/runtime_profile.mk tests/syscall_policy.mk tests/process_state.mk tests/thread_control.mk tests/thread_identity.mk tests/thread_carrier.mk tests/thread_lifecycle.mk tests/thread_tid.mk tests/thread_signal_mask.mk tests/thread_robust.mk tests/pending_syscall.mk tests/pending_timeout.mk tests/pending_io.mk tests/pending_io_snapshot.mk tests/vfs_content.mk tests/thread_altstack.mk tests/getdents.mk tests/history_presentation.mk
 -include tests/writev.mk
+-include tests/search_frontier.mk tests/snapshot_bundle.mk tests/parallel_protocol.mk
 check-integration: check-dwarf check-elf
 
 .PHONY: check-dfs-residency
@@ -162,6 +164,21 @@ check-scenarios: tracer
 check-tui: tracer
 	@test "$(NP)" = 1 || { echo 'check-tui requires NP=1' >&2; exit 1; }
 	python3 tests/tui_smoke_test.py --tracer "$(abspath tracer)"
+
+.PHONY: check-adoption check-fixed-layout check-parallel-actors
+check-adoption: tracer
+	@test "$(NP)" = 1 || { echo 'check-adoption requires NP=1' >&2; exit 1; }
+	CC="$(CC)" python3 tests/adoption_scenarios.py --tracer "$(abspath tracer)" --managed-layout
+	CC="$(CC)" python3 tests/adoption_pthread_scenarios.py --tracer "$(abspath tracer)"
+	CC="$(CC)" python3 tests/adoption_pthread_scenarios.py --tracer "$(abspath tracer)" --main-owner --output build/parallel-redesign/adoption-pthread-main-owner
+
+check-fixed-layout: tracer
+	@test "$(NP)" = 1 || { echo 'check-fixed-layout requires NP=1' >&2; exit 1; }
+	CC="$(CC)" python3 tests/fixed_layout_scenarios.py --tracer "$(abspath tracer)"
+
+check-parallel-actors: tracer
+	@test "$(NP)" = 1 || { echo 'check-parallel-actors requires NP=1' >&2; exit 1; }
+	python3 tests/parallel_actor_scenarios.py --tracer "$(abspath tracer)"
 
 check-parallel: tracer
 	@test "$(NP)" = 2 || { echo 'check-parallel requires NP=2' >&2; exit 1; }

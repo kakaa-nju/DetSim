@@ -31,7 +31,13 @@ make check-cases         # NP=1 healthy/mutant counterexamples and replay
 make audit-runtimes      # NP=1 language admission; reports unsupported cases as failures
 make check-scenarios     # build NP=1 tracer and run isolated native ptrace scenarios
 make check-tui           # NP=1 headless PTY: TUI startup, commands, resize, small terminal
-make check-parallel      # NP=2 fixed-layout seed workers partition root branches
+make check-parallel      # NP=2 shared frontier, equivalence, worker loss, cancellation
+make check-parallel-actors # NP=1 actual threads/choices/pending/timeouts + replay
+make check-search-frontier # pure policy/lease/depth oracle
+make check-parallel-protocol # typed frames, bounds and absolute timeout
+make NP=2 check-snapshot-bundle # full/pages closure and metadata publication faults
+make check-adoption      # NP=1 repeated full/pages thread-layout adoption
+make check-fixed-layout  # NP=1 framework controls target layout; host ASLR unchanged
 make check-thread-control check-thread-identity check-thread-carrier # NP=1 thread gates
 make check-pending-syscall # NP=1 blocked/wake/completion/deadline replay
 make check-pending-timeout # NP=2 explicit timeout event, zero user resume, cold replay
@@ -116,7 +122,8 @@ not build and are not evidence. See
 | Responsibility | Current entry / owner |
 | --- | --- |
 | Startup | `src/main.cpp`, argument/config parsing in `core/config.cpp` |
-| CLI exploration | `ui/cli/commands.cpp` → `exec_bfs`, `exec_dfs`, `exec_rand` in `core/scheduler.cpp` |
+| Serial CLI exploration | `ui/cli/commands.cpp` → `exec_bfs`, `exec_dfs`, `exec_rand` in `core/scheduler.cpp` |
+| Parallel exploration | `core/search/parallel.cpp` owns frontier/leases; persistent workers call `enumerate_state` in `core/scheduler.cpp` |
 | State transition | `core/state/state_transition.cpp` → restore, execute, capture |
 | Tracee execution | `core/engine/exec_engine.cpp`, thread and signal managers |
 | Syscall interception | `core/syscall/dispatcher.cpp`, `handlers.cpp` |
@@ -125,7 +132,9 @@ not build and are not evidence. See
 | Emulated resources | `subsys/fs`, `subsys/net`, `subsys/sync` |
 | Inspection | `core/dwarf.cpp`, `utils/expr*`, `core/syscall_fmt.cpp` |
 
-`core/scheduler.cpp` is the only compiled exploration implementation. The
+`core/scheduler.cpp` implements serial exploration and shared single-state actor
+enumeration. `core/search` implements the native parallel coordinator, transport
+and worker lifecycle; it does not create a second syscall transition model. The
 unused `core/scheduler/exploration.cpp` experiment with `scheduler_exec_*` entry
 points was removed after confirming it had no callers; it never affected CLI
 runs. Search-side changes should be evaluated against the actual `exec_*` path.

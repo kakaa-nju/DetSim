@@ -3,18 +3,14 @@
  */
 
 #include "commands.h"
+#include "runtime_profile.h"
 #include "scheduler.h"
+#include "search/parallel.h"
 #include "state/state_transition.h"
 #include "engine/pending_syscall.h"
 #include "engine/thread_pool.h"
 #include "proc_status.h"
 #include <charconv>
-#include <chrono>
-#include <filesystem>
-#include <fstream>
-#include <limits.h>
-#include <spawn.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #include <set>
 #include <unordered_set>
@@ -38,7 +34,6 @@
 #include <cstring>
 #include <cstdlib>
 
-extern char **environ;
 #include <cstdio>
 #include <sstream>
 #include <arpa/inet.h>
@@ -106,15 +101,6 @@ std::string pending_syscall_text(const PendingSyscall &pending) {
         text += " result=" + std::to_string(pending.result);
     }
     return text;
-}
-
-bool fixed_layout(pid_t pid) {
-    std::ifstream input("/proc/" + std::to_string(pid) + "/personality");
-    std::string value;
-    if (!(input >> value)) return false;
-    char *end = nullptr;
-    const unsigned long personality = strtoul(value.c_str(), &end, 16);
-    return end && !*end && (personality & 0x40000UL);
 }
 
 struct JsonDiffOptions {
@@ -216,7 +202,7 @@ static CommandEntry cmd_table[] = {
     {"pending", "List blocked/ready syscalls, deadlines and runnable actors", cmd_pending},
     {"inspect", "Print saved process/thread/resource JSON (inspect [PROCESS])", cmd_inspect},
     {"plugins", "List loaded plugins, monitor schemas and current monitor bytes", cmd_plugins},
-    {"parallel", "Run N tracer workers over distinct successor branches (parallel <N> <depth>)", cmd_parallel},
+    {"parallel", "Explore a shared frontier (parallel <N> <depth> --strategy dfs|bfs)", cmd_parallel},
     {"tree", "Print recorded search edges (source target process choice thread)", cmd_tree},
     {"load", "Load state of given StateHash", cmd_load},
     {"info", "Display state history (info current: scalar current edge only)", cmd_info},
@@ -572,314 +558,53 @@ int cmd_tree(char *args) {
 }
 
 int cmd_parallel(char *args) {
+    using namespace detsim::search;
+    const char *usage = "Usage: parallel <workers 1..32> <depth> [--strategy dfs|bfs] [--retries N] [--timeout-ms N]\n";
     std::istringstream input(args ? args : "");
-    int workers = 0;
-    int depth = 0;
-    int split_depth = 1;
-    bool adopt_threads = false;
-    std::string option;
-    if (!(input >> workers >> depth) || workers < 1 || workers > 32 ||
-        depth < 1) {
-        detsim::ui::ui_printf(
-            "Usage: parallel <workers 1..32> <depth> [--split-depth=N] [--threads]\n");
+    Options options;
+    auto number = [](const std::string& text, uint64_t& value) {
+        const auto result = std::from_chars(text.data(), text.data() + text.size(), value);
+        return !text.empty() && result.ec == std::errc{} && result.ptr == text.data() + text.size();
+    };
+    std::string workers, depth, flag;
+    uint64_t count = 0;
+    if (!(input >> workers >> depth) || !number(workers, count) || count < 1 || count > 32 ||
+        !number(depth, options.depth)) {
+        detsim::ui::ui_printf("%s", usage);
         return 1;
     }
-    while (input >> option) {
+    options.workers = static_cast<unsigned>(count);
+    while (input >> flag) {
         std::string value;
-        if (option == "--threads") {
-            adopt_threads = true;
-            continue;
-        }
-        if (option == "--split-depth") {
-            if (!(input >> value)) {
-                detsim::ui::ui_printf(
-                    "parallel: --split-depth must be 1..depth\n");
-                return 1;
-            }
-        } else if (option.rfind("--split-depth=", 0) == 0) {
-            value = option.substr(14);
-        } else {
-            detsim::ui::ui_printf(
-                "Usage: parallel <workers 1..32> <depth> [--split-depth=N] [--threads]\n");
-            return 1;
-        }
-        size_t parsed = 0;
-        const auto result = std::from_chars(value.data(),
-            value.data() + value.size(), parsed);
-        if (value.empty() || result.ec != std::errc{} ||
-            result.ptr != value.data() + value.size() ||
-            parsed < 1 || parsed > static_cast<size_t>(depth)) {
-            detsim::ui::ui_printf("parallel: --split-depth must be 1..depth\n");
-            return 1;
-        }
-        split_depth = static_cast<int>(parsed);
+        const auto equals = flag.find('=');
+        if (equals != std::string::npos) { value = flag.substr(equals + 1); flag.resize(equals); }
+        else if (!(input >> value)) { detsim::ui::ui_printf("%s", usage); return 1; }
+        if (flag == "--strategy" && (value == "dfs" || value == "bfs")) {
+            options.policy = value == "dfs" ? Policy::Dfs : Policy::Bfs;
+        } else if (flag == "--retries" && number(value, count) && count <= 100) {
+            options.retries = static_cast<unsigned>(count);
+        } else if (flag == "--timeout-ms" && number(value, count) && count >= 1 && count <= 3600000) {
+            options.timeout_ms = static_cast<int>(count);
+        } else { detsim::ui::ui_printf("%s", usage); return 1; }
     }
-    for (int i = 0; i < NP; ++i) {
-        if (!fixed_layout(ptmc_state.pids[i])) {
-            detsim::ui::ui_printf(
-                "parallel requires fixed layout; launch with `setarch x86_64 -R`\n");
-            return 1;
-        }
+    const Report report = run_parallel(ptmc_state.running_state, options);
+    const char *status = "failed";
+    switch (report.status) {
+        case ParallelStatus::Complete: status = "complete"; break;
+        case ParallelStatus::Bounded: status = "bounded"; break;
+        case ParallelStatus::Violation: status = "violation"; break;
+        case ParallelStatus::Failed: break;
     }
-
-    const hash_type original_hash = ptmc_state.running_state.ss_hash;
-    std::vector<hash_type> branches{original_hash};
-    std::set<hash_type> seen{original_hash};
-    try {
-        for (int level = 0; level < split_depth; ++level) {
-            std::vector<hash_type> next;
-            for (hash_type hash : branches) {
-                load(hash);
-                for (hash_type successor : enumerate_successors(ptmc_state.running_state)) {
-                    if (successor && seen.insert(successor).second)
-                        next.push_back(successor);
-                }
-            }
-            if (next.empty()) break;
-            if (next.size() > 512) {
-                detsim::ui::ui_printf(
-                    "parallel: frontier capped at 512 branches (was %zu)\n",
-                    next.size());
-                next.resize(512);
-            }
-            branches.swap(next);
-        }
-        load(original_hash);
-    } catch (const std::exception &error) {
-        detsim::ui::ui_printf("parallel branch enumeration failed: %s\n", error.what());
-        return 1;
-    }
-    if (branches.empty()) {
-        detsim::ui::ui_printf("parallel: no runnable successor branches\n");
-        return 1;
-    }
-    if (workers > static_cast<int>(branches.size()))
-        workers = static_cast<int>(branches.size());
-
-    namespace fs = std::filesystem;
-    const fs::path cwd = fs::current_path();
-    const auto stamp = std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::system_clock::now().time_since_epoch()).count();
-    const fs::path base = cwd / (".parallel-" + std::to_string(getpid()) + "-" +
-                                 std::to_string(stamp));
-    const fs::path config = cfg_file ? fs::absolute(cfg_file) : cwd / "config.json";
-    if (!fs::is_regular_file(config)) {
-        detsim::ui::ui_printf("parallel: config file not found: %s\n",
-                              config.c_str());
-        return 1;
-    }
-    char exe_buffer[PATH_MAX];
-    const ssize_t exe_size = readlink("/proc/self/exe", exe_buffer,
-                                      sizeof(exe_buffer) - 1);
-    if (exe_size <= 0) {
-        detsim::ui::ui_printf("parallel: cannot locate tracer executable\n");
-        return 1;
-    }
-    exe_buffer[exe_size] = '\0';
-    const std::string exe = exe_buffer;
-
-    try {
-        StateStore::instance().wait_for_completion();
-        SysStateStore::instance().flush_index();
-        fs::create_directories(base);
-    } catch (const std::exception &error) {
-        detsim::ui::ui_printf("parallel store barrier failed: %s\n", error.what());
-        return 1;
-    }
-
-    struct Worker {
-        pid_t pid = -1;
-        fs::path directory;
-        fs::path output;
-        size_t branch_count = 0;
-        int attempt = 1;
-        std::vector<hash_type> assigned;
-    };
-    const char *shell = "exec \"$0\" -n -c \"$1\" -b \"$2\" > \"$3\" 2>&1";
-
-    auto setup_and_spawn = [&](Worker &worker, int index,
-                               const fs::path &directory, int attempt) -> bool {
-        worker.directory = directory;
-        worker.output = directory / "worker.out";
-        worker.attempt = attempt;
-        try {
-            fs::create_directories(worker.directory);
-            fs::copy(cwd / "memory", worker.directory / "memory",
-                     fs::copy_options::recursive);
-            fs::copy(cwd / "sstate", worker.directory / "sstate",
-                     fs::copy_options::recursive);
-            const auto lock = worker.directory / "memory" / ".packed.lock";
-            if (fs::exists(lock)) fs::remove(lock);
-            fs::copy_file(config, worker.directory / "config.json",
-                          fs::copy_options::overwrite_existing);
-        } catch (const std::exception &error) {
-            detsim::ui::ui_printf("parallel: worker %d setup failed: %s\n",
-                                  index, error.what());
-            return false;
-        }
-
-        const fs::path commands = worker.directory / "commands";
-        std::ofstream script(commands);
-        if (!script) {
-            detsim::ui::ui_printf("parallel: cannot write worker commands\n");
-            return false;
-        }
-        script << "sw 0\n";
-        for (hash_type branch : worker.assigned) {
-            char branch_hash[32];
-            snprintf(branch_hash, sizeof(branch_hash), "%016lx", branch);
-            script << (adopt_threads ? "load --adopt-threads " : "load --adopt ")
-                   << branch_hash << "\n";
-            if (depth > split_depth)
-                script << "dfs " << (depth - split_depth) << " --quiet\n";
-        }
-        script << "tree\nq\n";
-        script.close();
-
-        posix_spawn_file_actions_t file_actions;
-        if (posix_spawn_file_actions_init(&file_actions) != 0) {
-            detsim::ui::ui_printf("parallel: spawn actions init failed\n");
-            return false;
-        }
-        posix_spawn_file_actions_addchdir_np(&file_actions,
-                                             worker.directory.c_str());
-        std::string exe_arg = exe;
-        std::string config_arg = config.string();
-        std::string commands_arg = commands.string();
-        std::string output_arg = worker.output.string();
-        char *argv[] = {const_cast<char *>("/bin/sh"),
-                        const_cast<char *>("-c"),
-                        const_cast<char *>(shell),
-                        exe_arg.data(), config_arg.data(), commands_arg.data(),
-                        output_arg.data(), nullptr};
-        const int spawn_result = posix_spawn(&worker.pid, "/bin/sh", &file_actions,
-                                             nullptr, argv, environ);
-        posix_spawn_file_actions_destroy(&file_actions);
-        if (spawn_result != 0) {
-            detsim::ui::ui_printf("parallel: worker %d spawn failed: %s\n",
-                                  index, strerror(spawn_result));
-            return false;
-        }
-        return true;
-    };
-
-    std::vector<Worker> started;
-    for (int index = 0; index < workers; ++index) {
-        Worker worker;
-        for (size_t branch = index; branch < branches.size();
-             branch += static_cast<size_t>(workers)) {
-            worker.assigned.push_back(branches[branch]);
-        }
-        worker.branch_count = worker.assigned.size();
-        if (!setup_and_spawn(worker, index,
-                             base / ("worker-" + std::to_string(index)), 1))
-            return 1;
-        started.push_back(std::move(worker));
-    }
-
-    detsim::ui::ui_printf(
-        "Parallel exploration: %d workers, %zu frontier branches, depth %d, split %d\n",
-        workers, branches.size(), depth, split_depth);
-    detsim::ui::ui_printf("Artifacts: %s\n", base.c_str());
-    bool failed = false;
-    std::unordered_set<hash_type> merged_states;
-    std::unordered_set<std::string> merged_edges;
-
-    auto evaluate = [&](Worker &worker, size_t index, bool merge) -> bool {
-        int status = 0;
-        if (waitpid(worker.pid, &status, 0) != worker.pid) {
-            detsim::ui::ui_printf(
-                "parallel: worker %zu attempt %d wait failed: %s\n", index,
-                worker.attempt, strerror(errno));
-            return false;
-        }
-        const int code = WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status);
-        size_t worker_edges = 0;
-        if (merge) {
-            try {
-                SysStateStore::inspect(
-                    (worker.directory / "sstate").string(),
-                    [&](hash_type key, const SysStateEntry&, const std::vector<uint8_t>&) {
-                        merged_states.insert(key);
-                    });
-            } catch (const std::exception &error) {
-                detsim::ui::ui_printf(
-                    "parallel: worker %zu attempt %d store inspect failed: %s\n",
-                    index, worker.attempt, error.what());
-                return false;
-            }
-        }
-        std::ifstream output(worker.output);
-        std::string line;
-        int printed = 0;
-        size_t loaded = 0;
-        bool worker_ok = code == 0;
-        while (std::getline(output, line)) {
-            if (line.rfind("EDGE ", 0) == 0) {
-                if (merge && merged_edges.insert(line).second) ++worker_edges;
-                continue;
-            }
-            if (line.find("Loaded state ") != std::string::npos) ++loaded;
-            if (line.find("DetSim state/execution error:") != std::string::npos ||
-                line.find("Load --adopt rejected") != std::string::npos ||
-                line.find("Load rejected:") != std::string::npos ||
-                line.find("No state found with prefix") != std::string::npos) {
-                worker_ok = false;
-                if (printed < 3) {
-                    detsim::ui::ui_printf("  %s\n", line.c_str());
-                    ++printed;
-                }
-                continue;
-            }
-            if (printed < 3 &&
-                (line.find("Stopped for illegal state") != std::string::npos ||
-                 line.find("Complete explore all") != std::string::npos ||
-                 line.find("No runnable") != std::string::npos)) {
-                detsim::ui::ui_printf("  %s\n", line.c_str());
-                ++printed;
-            }
-        }
-        if (loaded < worker.assigned.size()) {
-            worker_ok = false;
-            detsim::ui::ui_printf(
-                "  worker loaded %zu of %zu assigned branches\n", loaded,
-                worker.assigned.size());
-        }
-        detsim::ui::ui_printf(
-            "worker %zu attempt %d (%zu branches): exit %d, status=%s, edges=%zu, output=%s\n",
-            index, worker.attempt, worker.branch_count, code,
-            worker_ok ? "ok" : "FAILED", worker_edges,
-            worker.output.c_str());
-        return worker_ok;
-    };
-
-    for (size_t index = 0; index < started.size(); ++index) {
-        const bool first_ok = evaluate(started[index], index, true);
-        if (first_ok) continue;
-        Worker retry;
-        retry.assigned = started[index].assigned;
-        retry.branch_count = started[index].branch_count;
-        const fs::path directory =
-            base / ("worker-" + std::to_string(index) + "-retry1");
-        if (!setup_and_spawn(retry, static_cast<int>(index), directory, 2)) {
-            failed = true;
-            continue;
-        }
-        const bool retry_ok = evaluate(retry, index, true);
-        detsim::ui::ui_printf("parallel: worker %zu retry1 %s\n", index,
-                              retry_ok ? "ok" : "FAILED");
-        if (!retry_ok) failed = true;
-    }
-    for (const auto &[target, edge] : state_tree) {
-        char text[128];
-        snprintf(text, sizeof(text), "EDGE %016lx %016lx %d %d %d",
-                 std::get<0>(edge), target, std::get<1>(edge),
-                 std::get<2>(edge), std::get<3>(edge));
-        merged_edges.insert(text);
-    }
-    detsim::ui::ui_printf("Merged: %zu unique states, %zu unique edges\n",
-                          merged_states.size(), merged_edges.size());
-    return failed ? 1 : 0;
+    nlohmann::json receipt = {{"schema", 1}, {"status", status}, {"workers", options.workers},
+        {"strategy", options.policy == Policy::Dfs ? "dfs" : "bfs"}, {"depth", options.depth},
+        {"nodes", report.nodes}, {"edges", report.edges}, {"attempted_edges", report.attempted_edges}, {"retries", report.retries},
+        {"leases", report.frontier.leased}, {"expansions", report.frontier.committed},
+        {"duplicates", report.frontier.duplicates}, {"seconds", report.elapsed_seconds},
+        {"property_violation", report.property_violation},
+        {"artifacts", report.artifacts}, {"error", report.error}};
+    if (report.violation_state) receipt["violation_state"] = *report.violation_state;
+    detsim::ui::ui_printf("PARALLEL_RESULT %s\n", receipt.dump().c_str());
+    return report.status == ParallelStatus::Failed ? 1 : 0;
 }
 
 int cmd_load(char *args) {
@@ -926,18 +651,18 @@ int cmd_load(char *args) {
                 return 0;
             }
             for (int i = 0; i < NP; ++i) {
-                if (!fixed_layout(ptmc_state.pids[i])) {
+                if (!detsim::tracee_has_fixed_layout(ptmc_state.pids[i])) {
                     detsim::ui::ui_printf(
                         "Load --adopt rejected: process %d is not fixed-layout; "
-                        "launch both seed and worker with `setarch x86_64 -R`\n", i);
+                        "use RuntimeProfile.fixed_layout=true or launch both with `setarch x86_64 -R`\n", i);
                     return 0;
                 }
             }
             /* An adopting worker has bootstrapped the same executable but has no
              * capture provenance for the seed's snapshot. Require the local
              * logical thread layout to match exactly, then bind its carriers.
-             * --adopt-threads additionally creates parked carriers for a saved
-             * multi-thread layout from a fresh single-main bootstrap. */
+             * --adopt-threads grows/reuses parked carriers for saved layouts,
+             * including main-dead and repeated imports. */
             if (!adopt_threads) {
                 for (int i = 0; i < NP; ++i) {
                     const auto &current = ptmc_state.running_state.child[i].threads;

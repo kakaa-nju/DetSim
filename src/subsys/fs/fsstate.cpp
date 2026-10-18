@@ -54,6 +54,11 @@ struct FileContent::Payload {
   hash_type key = 0;
   uint64_t generation = 0;
 };
+uint64_t FileContent::saved_blob_key() const {
+  if (!payload_) return 0;
+  std::lock_guard lock(payload_->registration_mutex);
+  return payload_->key;
+}
 const std::vector<uint8_t>& FileContent::bytes() const {
   static const std::vector<uint8_t> empty;
   return !payload_ ? empty : payload_->restored ? *payload_->restored : payload_->owned;

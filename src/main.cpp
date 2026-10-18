@@ -1,4 +1,6 @@
 #include "core/config.h"
+#include "core/search/worker.h"
+#include <unistd.h>
 #include "core/state/state_store.h"
 #include "core/state/sysstate_store.h"
 #include "core/state/state_transition.h"
@@ -37,6 +39,7 @@ static int run_tracer(int argc, char *argv[])
 
   /* 先解析参数（设置 loglevel, use_ui, batch_file） */
   parse_args(argc, argv);
+  if (worker_control_fd >= 0) detsim::search::prepare_worker_process(worker_control_fd);
 
   /* 检查是否有 --force */
   bool force_lock = false;
@@ -111,7 +114,13 @@ static int run_tracer(int argc, char *argv[])
 
   // 使用日志宏输出调试信息
   UI_LOG_DEBUG("About to call ui_mainloop");
-  ui_mainloop();
+  int result = 0;
+  if (worker_control_fd >= 0) {
+    detsim::search::wire::Limits limits;
+    limits.io_timeout_ms = worker_io_timeout_ms;
+    result = detsim::search::worker_loop(worker_control_fd, limits);
+  } else ui_mainloop();
+  worker_control_fd = -1; // worker_loop owns and closes its Channel descriptor.
   UI_LOG_DEBUG("ui_mainloop returned");
 
   /* 清理资源 */
@@ -125,7 +134,7 @@ static int run_tracer(int argc, char *argv[])
   /* 释放文件锁 */
   detsim::utils::FileLock::release();
 
-  return 0;
+  return result;
 }
 
 int main(int argc, char *argv[])

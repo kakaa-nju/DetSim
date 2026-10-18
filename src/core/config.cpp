@@ -28,6 +28,9 @@
 #include <nlohmann/json.hpp>
 #include <sys/syscall.h>
 #include <stdexcept>
+#include <cerrno>
+#include <cstdlib>
+#include <fcntl.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -39,6 +42,9 @@ FILE *log_fp = NULL;
 int auto_mode = 0;
 int use_ui = 1; // Default to using UI
 char *batch_file = NULL;
+int worker_control_fd = -1;
+std::string tracee_native_cwd;
+int worker_io_timeout_ms = 30000;
 
 bool should_log(int level) { return level >= loglevel; }
 
@@ -381,6 +387,9 @@ void parse_args(int argc, char *argv[])
       {"log", required_argument, nullptr, 'l'},
       {"help", no_argument, nullptr, 'h'},
       {"cfg", required_argument, nullptr, 'c'},
+      {"worker-fd", required_argument, nullptr, 1000},
+      {"target-cwd", required_argument, nullptr, 1001},
+      {"worker-io-timeout-ms", required_argument, nullptr, 1002},
       {0, 0, nullptr, 0},
   };
 
@@ -389,6 +398,31 @@ void parse_args(int argc, char *argv[])
   {
     switch (o)
     {
+      case 1001:
+        if (!tracee_native_cwd.empty() || !fs::path(optarg).is_absolute())
+          throw std::runtime_error("Native target cwd must be an absolute path");
+        tracee_native_cwd = optarg;
+        break;
+      case 1002: {
+        char* end = nullptr; errno = 0;
+        const long timeout = std::strtol(optarg, &end, 10);
+        if (errno || !end || *end || end == optarg || timeout <= 0 || timeout > INT_MAX)
+          throw std::runtime_error("Invalid internal worker frame timeout");
+        worker_io_timeout_ms = static_cast<int>(timeout);
+        break;
+      }
+      case 1000: {
+        char* end = nullptr;
+        errno = 0;
+        const long descriptor = std::strtol(optarg, &end, 10);
+        if (errno || !end || *end || end == optarg || descriptor < 3 || descriptor > INT_MAX || worker_control_fd >= 0)
+          throw std::runtime_error("Invalid internal worker descriptor");
+        const int flags = fcntl(static_cast<int>(descriptor), F_GETFD);
+        if (flags < 0 || fcntl(static_cast<int>(descriptor), F_SETFD, flags | FD_CLOEXEC) < 0)
+          throw std::runtime_error("Cannot protect worker control descriptor from tracee exec");
+        worker_control_fd = static_cast<int>(descriptor);
+        break;
+      }
       case 'a':
         auto_mode = 1;
         break;
@@ -411,9 +445,15 @@ void parse_args(int argc, char *argv[])
         printf("\t-b,--batch=FILE         run commands from script file\n");
         printf("\t-l,--log=FILE           output log to FILE\n");
         printf("\t-c,--cfg=FILE           specify configuration FILE\n");
+        printf("\t--target-cwd=DIR        absolute native directory for target exec\n");
         printf("\n");
         exit(0);
     }
+  }
+  if (worker_control_fd >= 0) {
+    if (auto_mode || batch_file)
+      throw std::runtime_error("Internal worker mode cannot run auto/batch commands");
+    use_ui = 0;
   }
 }
 

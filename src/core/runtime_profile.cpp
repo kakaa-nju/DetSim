@@ -6,13 +6,25 @@
 #include <string>
 #include <utility>
 #include <sys/syscall.h>
+#include <sys/personality.h>
+#include <fstream>
+#include <charconv>
 
 namespace detsim {
 static RuntimeProfile defaults() {
-  return {SYS_munmap, {}, 100000, true, true, {}, 1000000};
+  return {SYS_munmap, {}, 100000, true, true, {}, 1000000, false};
 }
 static RuntimeProfile profile = defaults();
 const RuntimeProfile& runtime_profile() { return profile; }
+bool tracee_has_fixed_layout(pid_t pid) {
+  std::ifstream input("/proc/" + std::to_string(pid) + "/personality");
+  std::string value;
+  if (!(input >> value)) return false;
+  unsigned long flags = 0;
+  const auto result = std::from_chars(value.data(), value.data() + value.size(), flags, 16);
+  return result.ec == std::errc{} && result.ptr == value.data() + value.size() &&
+         (flags & ADDR_NO_RANDOMIZE);
+}
 int startup_syscall_for_node(size_t node) {
   if (node >= NP) throw std::runtime_error("RuntimeProfile startup node index out of range");
   return profile.startup_syscalls.empty() ? profile.startup_syscall : profile.startup_syscalls.at(node);
@@ -30,19 +42,22 @@ std::string runtime_profile_identity() {
     {"deterministic_at_random", profile.deterministic_at_random},
     {"disable_vdso", profile.disable_vdso},
     {"ignored_signals", profile.ignored_signals}};
+  // Preserve the legacy identity for inherited-layout profiles. Enabling the
+  // explicit execution constraint must distinguish otherwise identical models.
+  if (profile.fixed_layout) identity["address_layout"] = "linux-x86_64-fixed-v1";
   return identity.dump();
 }
 void configure_runtime_profile(const nlohmann::json& settings) {
   if (!settings.is_object()) throw std::runtime_error("RuntimeProfile must be an object");
   static const std::set<std::string> keys{
     "startup_syscall", "startup_syscalls", "startup_syscall_limit", "deterministic_at_random",
-    "disable_vdso", "ignored_signals", "initial_time_us"};
+    "disable_vdso", "ignored_signals", "initial_time_us", "fixed_layout"};
   for (const auto& item : settings.items())
     if (!keys.count(item.key())) throw std::runtime_error("Unknown RuntimeProfile key: " + item.key());
   for (const char* key : {"startup_syscall", "startup_syscall_limit"})
     if (settings.contains(key) && !settings[key].is_number_integer())
       throw std::runtime_error(std::string("RuntimeProfile ") + key + " must be an integer");
-  for (const char* key : {"deterministic_at_random", "disable_vdso"})
+  for (const char* key : {"deterministic_at_random", "disable_vdso", "fixed_layout"})
     if (settings.contains(key) && !settings[key].is_boolean())
       throw std::runtime_error(std::string("RuntimeProfile ") + key + " must be a boolean");
   auto syscall_number = [](const nlohmann::json& value) {
@@ -79,6 +94,7 @@ void configure_runtime_profile(const nlohmann::json& settings) {
   }
   next.deterministic_at_random = settings.value("deterministic_at_random", true);
   next.disable_vdso = settings.value("disable_vdso", true);
+  next.fixed_layout = settings.value("fixed_layout", false);
   if (settings.contains("ignored_signals")) {
     if (!settings["ignored_signals"].is_array()) throw std::runtime_error("RuntimeProfile ignored_signals must be an array");
     for (const auto& item : settings["ignored_signals"]) {

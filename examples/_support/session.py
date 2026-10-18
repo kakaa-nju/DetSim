@@ -51,7 +51,8 @@ class CaseFailure(RuntimeError):
 
 class Session:
     def __init__(self, tracer, argv, plugin, directory, backend, timeout, choices=False, fsmap=(),
-                 *, tracees=None, addresses=None, runtime_profile=None, choose_points=()):
+                 *, tracees=None, addresses=None, runtime_profile=None, choose_points=(), assertions=(),
+                 target_cwd=None):
         self.directory = directory
         directory.mkdir(parents=True)
         self.timeout = timeout
@@ -66,13 +67,17 @@ class Session:
         config = {"Nodes": len(targets), "Loglevel": 4, "Tracee": targets, "Addr": addresses,
                   "RuntimeProfile": {"startup_syscall": 11} | (runtime_profile or {}),
                   "Plugins": [str(p) for p in plugin] if isinstance(plugin,(list,tuple)) else [str(plugin)],
-                  "FSMap": list(fsmap), "StateStore": {"hot_cache_mb": 32, "warm_cache_mb": 64}}
+                  "FSMap": list(fsmap), "Assertions": list(assertions),
+                  "StateStore": {"hot_cache_mb": 32, "warm_cache_mb": 64}}
         points = ([{"syscall": 96, "choose": 2}] if choices else []) + list(choose_points)
         if points:
             config["ChoosePoint"] = points
         (directory / "config.json").write_text(json.dumps(config, indent=2))
         self.output = self.log.open("wb")
-        self.proc = subprocess.Popen([str(tracer), "-n", "-c", str(directory / "config.json")],
+        invocation = [str(tracer), "-n", "-c", str(directory / "config.json")]
+        if target_cwd is not None:
+            invocation += ["--target-cwd", str(Path(target_cwd).resolve())]
+        self.proc = subprocess.Popen(invocation,
             cwd=directory, stdin=subprocess.PIPE, stdout=self.output, stderr=subprocess.STDOUT,
             env=os.environ | ENV | {"DETSIM_SNAPSHOT_BACKEND": backend}, start_new_session=True,
             preexec_fn=limits)
@@ -113,6 +118,11 @@ class Session:
             if self.proc.poll() is None:
                 os.killpg(self.proc.pid, signal.SIGKILL)
             self.proc.wait()
+            if self.proc.stdin and not self.proc.stdin.closed:
+                try:
+                    self.proc.stdin.close()
+                except BrokenPipeError:
+                    pass
             self.output.close()
             (self.directory / "commands.json").write_text(json.dumps(self.commands, indent=2))
         return self.proc.returncode

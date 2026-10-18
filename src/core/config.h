@@ -6,6 +6,7 @@
 #define __CONFIG_H
 
 #include <stdio.h>
+#include <string>
 
 /* Configuration file (set by command line argument, default: config.json) */
 extern char *cfg_file;
@@ -37,6 +38,12 @@ extern int use_ui;
 
 /* Batch mode: command script file */
 extern char *batch_file;
+
+/* Internal native expansion worker socket; -1 for ordinary execution. */
+extern int worker_control_fd;
+// Optional absolute native cwd for each tracee, independent of tracer storage.
+extern std::string tracee_native_cwd;
+extern int worker_io_timeout_ms;
 
 /* Cleanup allocated configuration memory */
 void cleanup_config();

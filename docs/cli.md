@@ -34,7 +34,7 @@ TUI 状态区显示搜索统计、存储队列、缓存、错误预算和线程/
 | `pending [PROCESS]` | 列出所有阻塞/可完成 syscall、原因、deadline 和 runnable actor |
 | `inspect [PROCESS]` | 输出保存状态的 schema1 JSON（线程/寄存器/pending/futex/描述符/文件/socket） |
 | `plugins` | 列出已加载插件、ABI/monitor schema、time-choice 和当前 monitor 字节 |
-| `parallel N DEPTH [--split-depth=D] [--threads]` | 展开 D 层 frontier，起 N 个 fixed-layout worker 分工搜索，并汇总 visited/edges；`--threads` 允许 multi-thread adoption |
+| `parallel N DEPTH [--strategy dfs|bfs] [--retries N] [--timeout-ms N]` | 使用统一 frontier 和持久 worker 搜索，完整提交一步的所有 actor/choice |
 | `tree` | 打印已记录的搜索边（source target process choice thread） |
 | `load [--adopt|--adopt-threads] HASH` | 按 hash 前缀加载保存状态；`--adopt` 允许匹配 layout 的新进程接管 seed snapshot，`--adopt-threads` 可创建缺失 carrier |
 | `info` / `info current` | 系统调用历史 / 当前边的单行摘要 |
@@ -64,42 +64,42 @@ socket 等），不是原始内存逐字节 diff。`--brief` 只列变化的顶�
 `plugins` 显示已加载模块 ID、ABI、monitor schema、是否为 time-choice，以及当前
 保存状态中每个 monitor key 的字节数；无插件时明确显示 `No plugins loaded`。
 
-### 跨进程 seed worker（实验）
+### 原生并行探索
 
-`load --adopt HASH` 用于并行探索的 seed-worker：一个 tracer 捕获 snapshot 后，
-其他 tracer 启动同一 executable，跳过本地 capture provenance 的硬拒绝，把 seed
-snapshot 绑定到本地 carrier。它要求：
+配置 `RuntimeProfile.fixed_layout=true`，然后运行：
 
-- 所有 tracer 和 tracee 使用同一固定地址布局（例如 `setarch x86_64 -R ./tracer`）；
-  `load --adopt` 会在恢复前拒绝非 fixed-layout tracee，而不是让 brk/mapping
-  restore 走到一半才失败；
-- 普通 `--adopt` 要求本地 logical thread layout 与 snapshot 完全一致；
-  `--adopt-threads` 允许 fresh single-main worker 为 snapshot 的额外逻辑线程
-  创建 parked carrier（`ensure_thread_carriers`），再恢复寄存器/内存；
-- model identity/executable 一致，store 已复制到 worker cwd；
-- 这是显式 opt-in，普通 `load` 仍要求同进程 capture provenance。
+```text
+parallel 4 100 --strategy bfs --retries 2 --timeout-ms 30000
+```
 
-已经有 full/pages 回归：同一 seed checkpoint 启动两个 worker，`load --adopt` 后执行
-同一 `si`，得到相同 successor hash。`--adopt-threads` 已用 main futex + worker
-runnable 的双线程 checkpoint 验证，worker 能恢复完整 thread layout 并继续执行。
+框架只固定目标进程布局，宿主 ASLR 保持开启。`N` 为 1..32；深度可以为0，
+此时仅判断终点/截断，不执行转移。DFS 使用后进先出分派，BFS 有层屏障；并行DFS
+的完成顺序不等同于串行DFS。C++ `Frontier::Priority` 可提供启发式，CLI目前提供DFS/BFS。
+旧 `--split-depth`、`--threads` 已移除：不再串行切分固定数量分支，线程接管自动进行。
 
-`parallel N DEPTH [--split-depth=D]` 现在把这一步接成可执行的 coordinator：
-默认 D=1，从当前状态枚举 actor/choice 后继；D>1 时在 seed 内逐层展开 frontier，
-再把 frontier 状态分给 worker。复制 store 到 worker 目录后，用 `posix_spawn` 起
-N 个 fixed-layout worker；每个 worker `load --adopt`（`--threads` 时
-`load --adopt-threads`）自己的分支后跑内建
-`dfs DEPTH-D`，最后执行 `tree` 输出边。父进程汇总每个 worker 的
-`SysStateStore` visited hash 和 `EDGE` 行，打印 `Merged: N unique states, M unique
-edges`。worker 输出/artifacts 保留在 `.parallel-<pid>-<time>/`。每个 worker 的
-`status=ok` 要求退出码为0、全部分配分支出现 `Loaded state`，且没有
-`Load --adopt rejected`/`DetSim state/execution error` 等错误；否则显示
-`status=FAILED`，即使 batch 本身 exit 0。失败的 worker 会用 fresh store 在
-`worker-<n>-retry1` 重试一次；仍失败才影响 `parallel` 的失败状态。
+协调器维护全局去重、深度和租约；worker逐状态枚举所有支持的actor/choice。
+完整快照闭包经socket传输，导入验证后才接受边；只有完整Done才能标记源状态已展开。
+失联/超时任务可重新分派，恢复异常、模型不匹配和协议错误明确失败，不继续损坏worker。
+重试次数按源状态计，超过上限不能报告complete。
 
-它仍是 **branch-partitioned seed-worker**：汇总发生在 worker 结束后，没有共享
-frontier、搜索中实时去重或 merge，worker 失败只汇总不重试；NP=2 root 的 branch
-分工和汇总已验证。跨启动 raw hash 仍受
-loader RDTSC/CPUID 差异影响，不能用冷启动 hash 直接当同一状态。
+输出 `PARALLEL_RESULT` JSON，status为 `complete`、`bounded`、`violation` 或 `failed`。
+`edges` 是唯一验证边，`attempted_edges` 包含重试/重展开；`expansions` 包含终点和边界probe
+的完成提交。`seconds` 包括自动搜索中的worker启动、通信、导入及清理，不含此前手动前缀。
+CLI/batch进程退出0不能代替此receipt。`.parallel-*/journal.jsonl` 保存实际边、租约、
+worker PID、结束后的节点深度和阶段；日志与worker存储保留供复核。
+
+启动兼容清单覆盖引擎/动态库、目标映像和映射、原始环境、CPU/xstate、身份、资源限制、
+目标原生cwd，并纳入fixed-profile状态的model identity。worker使用缓存的原始环境，
+不继承readline等后续修改。`--target-cwd /absolute/path` 单独固定目标exec目录，
+不会改变tracer的存储目录；默认是tracer启动cwd。普通 `WorkingDir` 仍是虚拟FS目录。
+
+`load --adopt HASH` 要求一致的逻辑线程布局；`load --adopt-threads HASH` 能创建停驻carrier，
+支持反复导入及主线程/全部逻辑线程退出。普通 `load` 继续要求本地绑定。跨启动载入必须
+保证完整store闭包、固定布局和模型兼容；旧fixed-profile快照不会自动迁移到新模型。
+
+这是一套同机、同规范seed的并行执行机制，不会把独立冷启动的随机字节或不同地址中的
+指针自动归一化。直接硬件输入（如RDTSC/CPUID）仍有边界，兼容清单不证明任意二进制
+确定性。最新验收和性能限制见[并行探索报告](parallel-exploration.md)。
 
 ## 阻塞 syscall 的行为
 
