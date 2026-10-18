@@ -6,6 +6,10 @@
 
 namespace detsim::search {
 struct Options {
+    // Shared publication guarantees cross-process visibility; explicit store
+    // barriers/finalization retain durability. Durable uses complete bundles.
+    enum class Storage { Shared, Durable };
+    Storage storage = Storage::Shared;
     unsigned workers = 2;
     uint64_t depth = 1;
     Policy policy = Policy::Dfs;
@@ -19,6 +23,7 @@ struct Report {
     bool property_violation = false;
     std::optional<StateKey> violation_state;
     uint64_t nodes = 0, edges = 0, attempted_edges = 0, retries = 0;
+    uint64_t local_completions = 0;
     Counters frontier;
     double elapsed_seconds = 0;
     std::string artifacts;

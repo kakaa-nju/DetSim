@@ -5,6 +5,8 @@
 #include "runtime_profile.h"
 #include "engine/thread_pool.h"
 #include "state/resident_memory.h"
+#include "state/state_store.h"
+#include "config.h"
 #include <exception>
 #include <cerrno>
 #include <poll.h>
@@ -15,7 +17,6 @@
 #include <unistd.h>
 
 namespace detsim::search {
-namespace {
 wire::DoneKind completion_kind(EnumerationKind kind) {
     switch (kind) {
         case EnumerationKind::Expanded: return wire::DoneKind::Expanded;
@@ -25,7 +26,6 @@ wire::DoneKind completion_kind(EnumerationKind kind) {
         case EnumerationKind::Violation: return wire::DoneKind::Violation;
     }
     throw std::runtime_error("Invalid single-state expansion outcome");
-}
 }
 void prepare_worker_process(int fd, int blob_fd) {
     ucred peer{}; socklen_t size = sizeof(peer);
@@ -46,6 +46,10 @@ int worker_loop(int fd, wire::Limits limits, int blob_fd) {
     try {
         if (ptmc_state.model_identity.empty())
             throw std::runtime_error("Worker has no initialized execution model");
+        auto& store = StateStore::instance();
+        if (!worker_shared_pool_path.empty()) store.attach_shared_pool(worker_shared_pool_path, true);
+        const auto pool = worker_shared_pool_path.empty() ? nullptr : store.shared_pool();
+        detsim::resident::Scope resident_scope;
         channel.send(wire::Hello{ptmc_state.model_identity, compatibility_manifest()});
         for (;;) {
             // Idle workers hold no lease. Start the frame deadline only once a
@@ -71,8 +75,8 @@ int worker_loop(int fd, wire::Limits limits, int blob_fd) {
             for (int node = 0; node < NP; ++node)
                 if (!tracee_has_fixed_layout(ptmc_state.pids[node]))
                     throw std::runtime_error("Worker tracee does not have canonical fixed layout");
-            detsim::resident::Scope resident_scope;
-            auto source = snapshot::import_bundle(task.bundle, ptmc_state.model_identity);
+            auto source = pool ? snapshot::import_shared_bundle(task.bundle, ptmc_state.model_identity, *pool, true).state
+                               : snapshot::import_bundle(task.bundle, ptmc_state.model_identity);
             channel.confirm_objects();
             // Drop the raw incoming closure before capture/exporting successors.
             task.bundle = {};
@@ -88,7 +92,8 @@ int worker_loop(int fd, wire::Limits limits, int blob_fd) {
                     edge.actor = actor; edge.choice = choice; edge.choice_count = static_cast<uint32_t>(count);
                     edge.property_violation = result.property_violation || result.new_state.property_failed;
                     edge.result_code = result.code;
-                    edge.bundle = snapshot::export_bundle(edge.target);
+                    edge.bundle = pool ? snapshot::export_shared_bundle(edge.target, *pool)
+                                       : snapshot::export_bundle(edge.target);
                     channel.send(std::move(edge));
                 });
             channel.send(wire::Done{lease, source_key, completion_kind(summary.kind), summary.emitted});

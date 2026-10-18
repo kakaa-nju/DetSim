@@ -1,4 +1,6 @@
 #include "state_store.h"
+#include "shared_object_pool.h"
+#include <filesystem>
 #include "cereal/archives/binary.hpp"
 #include "debug.h"
 #include "state.h"
@@ -34,9 +36,17 @@ void StateStore::init(const Config &config) {
   packed.compression_level = config.compression_level;
   packed.read_only = config.read_only;
   StateStorePacked::instance().init(packed);
+  std::shared_ptr<detsim::snapshot::SharedObjectPool> fallback;
+  try {
+    const auto path = std::filesystem::path(config.packed_storage_path) / "shared-objects";
+    if (std::filesystem::exists(path))
+      fallback = std::make_shared<detsim::snapshot::SharedObjectPool>(path.string(), false, true);
+  } catch (...) { StateStorePacked::instance().shutdown(); throw; }
   {
     std::lock_guard lock(mutex_);
     config_ = config;
+    shared_pool_ = std::move(fallback);
+    shared_writes_ = false;
     stopping_ = false;
     failure_ = nullptr;
     stats_ = {};
@@ -58,6 +68,31 @@ void StateStore::init(const Config &config) {
   { std::lock_guard lock(mutex_); initialized_ = true; }
   ++generation_;
   ever_initialized_ = true;
+}
+void StateStore::attach_shared_pool(const std::string& path, bool publish_writes) {
+  ensure_initialized();
+  std::unique_lock lifecycle(lifecycle_mutex_);
+  std::unique_lock lock(mutex_);
+  check_ready();
+  if (publish_writes && config_.read_only) throw std::runtime_error("StateStore is read-only");
+  completion_cv_.wait(lock, [&] { return failure_ || pending_.empty(); });
+  check_ready();
+  try {
+    StateStorePacked::instance().flush_index();
+    if (shared_pool_) shared_pool_->flush();
+    auto next = std::make_shared<detsim::snapshot::SharedObjectPool>(path, publish_writes, !publish_writes || config_.read_only);
+    shared_pool_ = std::move(next);
+    shared_writes_ = publish_writes;
+    ++generation_;
+  } catch (...) { record_failure(std::current_exception()); throw; }
+}
+std::shared_ptr<detsim::snapshot::SharedObjectPool> StateStore::shared_pool() const {
+  std::shared_lock lifecycle(lifecycle_mutex_);
+  std::lock_guard lock(mutex_); check_ready(); return shared_pool_;
+}
+std::string StateStore::storage_path() const {
+  std::shared_lock lifecycle(lifecycle_mutex_);
+  std::lock_guard lock(mutex_); check_ready(); return config_.packed_storage_path;
 }
 void StateStore::ensure_initialized() {
   if (!ever_initialized_.load()) init();
@@ -92,6 +127,8 @@ void StateStore::shutdown() {
   for (auto &thread : prefetch_threads_) thread.join();
   io_threads_.clear(); prefetch_threads_.clear();
   auto failure = failure_;
+  try { if (shared_pool_) shared_pool_->flush(); }
+  catch (...) { if (!failure) failure = std::current_exception(); }
   try { StateStorePacked::instance().shutdown(); }
   catch (...) { if (!failure) failure = std::current_exception(); }
   {
@@ -100,6 +137,7 @@ void StateStore::shutdown() {
     hot_cache_.clear(); warm_cache_.clear(); hot_lru_.clear(); warm_lru_.clear();
     hot_memory_usage_ = 0; warm_memory_usage_ = 0;
     prefetch_inflight_.clear(); prefetch_queue_.clear(); state_queue_.clear();
+    shared_pool_.reset(); shared_writes_ = false;
     initialized_ = false;
   }
   if (failure) std::rethrow_exception(failure);
@@ -143,6 +181,46 @@ hash_type StateStore::save(const void *data, size_t len, hash_type reference_has
   check_ready();
   if (config_.read_only) throw std::runtime_error("StateStore is read-only");
   ++stats_.save_calls;
+  if (shared_writes_) {
+    try {
+      Buffer hinted;
+      if (reference_hash) {
+        const auto found = pending_.find(reference_hash);
+        if (found != pending_.end()) hinted = found->second;
+        if (!hinted) hinted = find_cache(hot_cache_, hot_lru_, reference_hash);
+      }
+      const bool reference_equal = hinted && hinted->size() == len && !std::memcmp(hinted->data(), data, len);
+      const auto hash = reference_equal ? reference_hash : XXHash64::hash(data, len);
+      if (!hash) throw std::runtime_error("snapshot hash is reserved zero");
+      Buffer existing = find_cache(hot_cache_, hot_lru_, hash);
+      const bool hot = bool(existing);
+      if (!existing && StateStorePacked::instance().exists(hash)) {
+        std::vector<uint8_t> local;
+        if (StateStorePacked::instance().load(hash, local) < 0)
+          throw std::runtime_error("unreadable existing local state");
+        existing = std::make_shared<const std::vector<uint8_t>>(std::move(local));
+      }
+      if (!existing) existing = shared_pool_->load_blob(hash);
+      if (existing && (existing->size() != len || std::memcmp(existing->data(), data, len)))
+        throw std::runtime_error("snapshot hash collision");
+      const bool known = bool(existing);
+      // Never return a cache/reference hit before ensuring global publication.
+      shared_pool_->publish_blob(hash, data, len);
+      if (!existing && len <= config_.hot_cache_size)
+        existing = std::make_shared<const std::vector<uint8_t>>(
+            static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data)+len);
+      if (existing)
+        insert_cache(hot_cache_, hot_lru_, hot_memory_usage_, config_.hot_cache_size, hash, existing, len);
+      if (reference_equal) ++stats_.save_reference_hits;
+      if (hot) ++stats_.save_dedup_hot;
+      else if (known) ++stats_.save_dedup_disk;
+      else ++stats_.save_new;
+      const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+          std::chrono::steady_clock::now()-started).count();
+      stats_.save_time_us += elapsed; stats_.save_new_slow += elapsed > 1000;
+      return hash;
+    } catch (...) { record_failure(std::current_exception()); throw; }
+  }
   if (reference_hash) {
     Buffer candidate;
     const auto pending = pending_.find(reference_hash);
@@ -239,7 +317,10 @@ void StateStore::wait_for_completion() {
   completion_cv_.wait(lock, [&] {return failure_ || pending_.empty();});
   check_ready();
   // Holding mutex_ excludes new accepted writes until both data and index sync.
-  try { StateStorePacked::instance().flush_index(); }
+  try {
+    StateStorePacked::instance().flush_index();
+    if (shared_pool_) shared_pool_->flush();
+  }
   catch (...) { record_failure(std::current_exception()); throw; }
 }
 
@@ -258,7 +339,17 @@ StateStore::Buffer StateStore::load_buffer(hash_type hash) {
   auto &packed = StateStorePacked::instance();
   if (!compressed) {
     std::vector<uint8_t> bytes;
-    if (packed.load_compressed(hash, bytes) < 0) return {};
+    if (packed.load_compressed(hash, bytes) < 0) {
+      if (!shared_pool_) return {};
+      try {
+        auto shared = shared_pool_->load_blob(hash);
+        if (shared) {
+          std::lock_guard lock(mutex_); check_ready();
+          insert_cache(hot_cache_, hot_lru_, hot_memory_usage_, config_.hot_cache_size, hash, shared, shared->size());
+        }
+        return shared;
+      } catch (...) { std::lock_guard lock(mutex_); record_failure(std::current_exception()); throw; }
+    }
     original_size = packed.get_original_size(hash);
     compressed = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
     std::lock_guard lock(mutex_); check_ready(); ++stats_.disk_reads;
@@ -285,7 +376,9 @@ ssize_t StateStore::load(hash_type hash, std::vector<uint8_t> &out_data) {
 bool StateStore::exists(hash_type hash) {
   ensure_initialized(); std::shared_lock lifecycle(lifecycle_mutex_);
   std::lock_guard lock(mutex_); check_ready();
-  return pending_.contains(hash) || hot_cache_.contains(hash) || warm_cache_.contains(hash) || StateStorePacked::instance().exists(hash);
+  if (pending_.contains(hash) || hot_cache_.contains(hash) || warm_cache_.contains(hash) || StateStorePacked::instance().exists(hash)) return true;
+  try { return shared_pool_ && bool(shared_pool_->load_blob(hash)); }
+  catch (...) { record_failure(std::current_exception()); throw; }
 }
 
 void StateStore::queue_push_back(hash_type hash) { std::lock_guard lock(mutex_); state_queue_.push_back(hash); }
@@ -311,7 +404,7 @@ void StateStore::submit_prefetch_tasks() {
   std::vector<hash_type> candidates;
   {
     std::lock_guard lock(mutex_);
-    if (!initialized_ || stopping_ || config_.prefetch_threads == 0 || config_.warm_cache_size == 0) return;
+    if (!initialized_ || stopping_ || shared_writes_ || config_.prefetch_threads == 0 || config_.warm_cache_size == 0) return;
     check_ready();
     auto count = std::min(config_.prefetch_window, state_queue_.size());
     candidates.assign(state_queue_.begin(), state_queue_.begin() + count);

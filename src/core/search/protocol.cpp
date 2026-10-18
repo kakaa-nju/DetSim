@@ -316,7 +316,7 @@ void Channel::send(const Message& message) const {
     // This controls sending only: an off endpoint can still import a peer's V2
     // closure. Both descriptors remain owned and are closed normally.
     const bool enabled = mode && !std::strcmp(mode, "on");
-    const bool shared = enabled && bundle && objects_ && objects_->supports(*bundle);
+    const bool shared = enabled && bundle && bundle->version == 1 && objects_ && objects_->supports(*bundle);
     std::vector<BlobSpec> specs;
     if (shared) specs = objects_->plan(bundle->blobs);
     Writer measure{nullptr, 0, limits_, shared ? &specs : nullptr}; encode(measure, message);

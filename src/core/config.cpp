@@ -46,6 +46,7 @@ int worker_control_fd = -1;
 int worker_blob_fd = -1;
 std::string tracee_native_cwd;
 int worker_io_timeout_ms = 30000;
+std::string worker_shared_pool_path;
 
 bool should_log(int level) { return level >= loglevel; }
 
@@ -392,6 +393,7 @@ void parse_args(int argc, char *argv[])
       {"worker-blob-fd", required_argument, nullptr, 1003},
       {"target-cwd", required_argument, nullptr, 1001},
       {"worker-io-timeout-ms", required_argument, nullptr, 1002},
+      {"worker-shared-pool", required_argument, nullptr, 1004},
       {0, 0, nullptr, 0},
   };
 
@@ -400,6 +402,11 @@ void parse_args(int argc, char *argv[])
   {
     switch (o)
     {
+      case 1004:
+        if (!worker_shared_pool_path.empty() || !fs::path(optarg).is_absolute())
+          throw std::runtime_error("Worker shared pool must be an absolute path");
+        worker_shared_pool_path = optarg;
+        break;
       case 1001:
         if (!tracee_native_cwd.empty() || !fs::path(optarg).is_absolute())
           throw std::runtime_error("Native target cwd must be an absolute path");
@@ -456,6 +463,8 @@ void parse_args(int argc, char *argv[])
   }
   if (worker_blob_fd >= 0 && (worker_control_fd < 0 || worker_control_fd == worker_blob_fd))
     throw std::runtime_error("Internal object descriptor requires a distinct worker control descriptor");
+  if (!worker_shared_pool_path.empty() && worker_control_fd < 0)
+    throw std::runtime_error("Internal shared pool requires worker mode");
   if (worker_control_fd >= 0) {
     if (auto_mode || batch_file)
       throw std::runtime_error("Internal worker mode cannot run auto/batch commands");

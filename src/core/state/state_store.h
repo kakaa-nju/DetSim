@@ -16,6 +16,8 @@
 #include <unordered_set>
 #include <vector>
 
+namespace detsim::snapshot { class SharedObjectPool; }
+
 class StateStore
 {
   public:
@@ -61,6 +63,12 @@ class StateStore
 
   void init(const Config &config);
   void init();
+
+  // Switch only after draining local writes. Fallback reads remain enabled when
+  // publish_writes=false; ordinary packed writes keep their existing backend.
+  void attach_shared_pool(const std::string& path, bool publish_writes);
+  std::shared_ptr<detsim::snapshot::SharedObjectPool> shared_pool() const;
+  std::string storage_path() const;
 
   // Save accepts immutable bytes with bounded backpressure; wait confirms durability.
   hash_type save(const void *data, size_t len);
@@ -200,6 +208,8 @@ class StateStore
   std::vector<std::thread> io_threads_, prefetch_threads_;
   std::deque<hash_type> state_queue_, prefetch_queue_;
   std::unordered_set<hash_type> prefetch_inflight_;
+  std::shared_ptr<detsim::snapshot::SharedObjectPool> shared_pool_;
+  bool shared_writes_ = false;
 
   void ensure_initialized();
   void check_ready() const; // mutex_ held

@@ -168,3 +168,8 @@
 !tui_smoke_test.py
 
 !parallel_scenarios.py
+!shared_object_pool_test.cpp
+!shared_store_integration.cpp
+!shared_object_pool.mk
+!shared_snapshot_integration.cpp
+!shared_snapshot.mk

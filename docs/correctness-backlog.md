@@ -1448,3 +1448,39 @@ The fixed Willemt Raft depth-6 workload retains 1084 visits, 201 new states and
 multiset matches the baseline, and a separate verify run checks full capture
 bytes. This is scoped evidence, not general full-memory graph equivalence.
 See [measurements and remaining limits](search-throughput-2026-10-18.md).
+
+### Shared immutable pool and phase-only worker inventory (2026-10-19)
+
+Parallel search now defaults to a private same-host immutable CAS. Workers verify
+and publish complete dependencies before atomically publishing Ready; the
+coordinator imports metadata references without a per-edge durability barrier.
+The strict complete-bundle path remains available with `--storage durable`.
+Existing wait/shutdown APIs still synchronize data. The pool uses filesystem-wide
+`syncfs` plus ancestor fsync; its writeback-error contract requires Linux >=5.8
+and includes unrelated writes/errors on the same backing filesystem.
+
+Evidence: concurrent/corrupt/missing/evicted object and Ready components;
+full/pages VFS closure and normal cold reopen after worker-store removal;
+15 NP2 native parallel scenarios, including a post-Hello setsid host helper
+without parent-death protection that is naturally killed/reaped after worker
+loss; 40 NP1 native scenarios, actual parallel actors and thread adoption;
+`make check`, pure pool ASan/UBSan and NP1/2/3 production builds.
+Bulk-barrier device coverage uses mocked st_dev, not real mount experiments.
+Logs are in `build/shared-parallel/{np2-syncfs-gates,np2-phase-inventory-gates,
+np1-syncfs-gates,syncfs-make-check,syncfs-asan}.log`; the retained helper evidence
+is in `build/shared-parallel/late-helper-evidence/`.
+
+Worker descendant scans now happen at Hello/terminate, outside the scheduling
+loop. Subreaper cleanup covers unobserved orphans before parallel returns;
+unguarded host helpers may wait until that final cleanup. This does not extend
+PDEATHSIG/EXITKILL to arbitrary host helpers if the coordinator itself is killed.
+Published files must remain immutable for the private pool lifetime; warm proof
+reuse does not detect arbitrary external edits/deletion. Normal close/reopen and
+worker loss tests do not establish power-loss or coordinator-restart recovery.
+
+The frozen initial shared implementation completes a bounded 291,332-node,
+521,196-edge Raft-library search and local serial node/first-parent coverage
+checks, but no same-size worker-count speedup measurement exists yet. Small-graph
+8-worker speedup is 4.52x search-only, 3.65x including finalization; near-linear
+scaling is not established. See the [scale report](shared-pool-scaling-2026-10-19.md).
+None of this closes general snapshot/atom coverage or runtime admission gaps.

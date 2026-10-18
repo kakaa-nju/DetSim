@@ -64,6 +64,8 @@ void load(hash_type hash);
 // and selected choice remain valid for the callback; retain no live references.
 enum class EnumerationKind { Expanded, Terminal, DepthCut, ModelBudget, Violation };
 struct EnumerationSummary { EnumerationKind kind; uint64_t emitted; };
+EnumerationKind classify_enumeration(const sys_state& source,
+    const std::vector<ActorAction>& actors, bool may_expand);
 using EdgeCallback = std::function<void(const ActorAction&, int, int, const TransitionResult&)>;
 EnumerationSummary enumerate_state(const sys_state& source, bool may_expand,
                                    const EdgeCallback& callback);

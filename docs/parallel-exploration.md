@@ -41,7 +41,8 @@ choice，逐条发送 Edge，不把整个 fanout 的快照攒在内存。收到 
 
 1. 检查 lease/source、目标身份、saved actor 合法性、normal/timeout 与 choice。
 2. 检查实际 choice cardinality；必须恰好覆盖整个 `0..N-1`，连续前缀不算完整。
-3. 完整验证并导入目标闭包，核对保存的性质结果；重复同一动作必须得到相同后继。
+3. 完整闭包验证由发布端执行；协调器读取已发布的 Ready 或验证完整 Bundle，
+   核对保存的性质结果；重复同一动作必须得到相同后继。
 4. Done 的 emitted 数量与已收边一致，全部 actor 完成，才将源标为 expanded。
 
 完整验证并记录的性质反例 Edge 立即成立，不等待 Done；worker 随后失联不能抹掉
@@ -53,19 +54,42 @@ choice，逐条发送 Edge，不把整个 fanout 的快照攒在内存。收到 
 
 ## 传输、持久化与清理
 
-SnapshotBundle 包含原始系统 metadata、所有节点 root、page 对象及外置 VFS 内容。
+默认 `parallel N depth --storage shared` 使用同宿主、私有不可变共享池，
+位置在协调器状态存储的 `shared-objects/`，独立于 worker 临时目录。
+worker 先原子发布带类型和 checksum 的 blob，确认完整依赖已进入共享池并验证内容，
+最后原子发布 Ready（系统 metadata、model identity 与派生的 actor 列表）。
+协调器只读 Ready 和小型引用，不再次物化完整进程图像；worker 恢复时仍通过
+StateStore/SnapshotView 读取同一组不可变字节。源状态的终点、预算、深度与
+性质分类可直接从验证后的 Ready 得出，不为零转换分类派发任务。
+
+发布保证跨进程可见，不在每条 Edge 上保证断电持久性。共享模式导入系统 metadata
+也是进程可见的追加；显式完成屏障与正常 shutdown 仍执行持久化。
+池持有独占发布锁时按不同 backing filesystem 调用 `syncfs`，并同步祖先目录；
+Linux >=5.8 才提供所依赖的 writeback 错误报告。
+它会同步同文件系统的无关写入，错误仍传播并 poison，不把失败当成成功。
+发布后的文件在所有使用者关闭前不得被外部修改或删除；有界缓存的验证证明
+依赖这个私有不可变生命周期，冷读会检查完整对象。
+正常关闭后池继续保留；worker 私有存储删除不能让已发布反例消失。
+这不是协调器崩溃恢复或分布式远程共享存储协议。
+
+`--storage durable` 保留完整 SnapshotBundle 路径，包含原始系统 metadata、
+所有节点 root、page 对象及外置 VFS 内容。
 引用必须在包中声明，即使目的端缓存已有对应对象。先检查 hash/重复冲突，保存并验证
 全部不可变依赖，完成数据持久化屏障后，最后发布系统 metadata。失败可以留下有效孤立
 blob；I/O poison 后不能继续写，也不宣称 exactly-once 或协调器重启恢复。
 
 IPC 为有版本和长度界限的二进制 Unix socket 帧。对象直接写入/读入 vector，没有第二份
-完整编码包或 base64，但每条 Edge 仍需 **O(完整闭包)** raw 内存。默认 frame 上限8GiB、
+完整编码包或 base64；durable 路径每条 Edge 仍需 **O(完整闭包)** raw 内存，
+shared 路径的引用不包含该字节副本。默认 frame 上限8GiB、
 单 blob 2GiB；超过界限明确失败。整帧使用绝对 deadline，缓慢分片不能无限延长超时。
 一次发送 Task 后返回读取结果，避免连续上传所有大任务饿死已完成 worker。
 
 worker 在创建 tracee 前设置并验证父死亡信号；control FD 对目标 exec 为 CLOEXEC。
 tracee 另有 PDEATHSIG/ptrace EXITKILL。协调器临时作为 subreaper，使用精确 pidfd/子进程
 集合清理和回收，保留原有目标；不使用 `waitpid(-1)` 消耗其他 ptrace 事件。
+后代 inventory 只在 Hello 和 terminate 时扫描，不在调度循环里轮询 `/proc`。
+未被观察到的孤儿在本次 parallel 结束前由 subreaper 回收；无父死保护的宿主辅助
+进程可能延迟到此时清理，不能把它们也算入 coordinator 被杀后的自动退出保证。
 SIGINT 明确中断搜索并清理 worker，CLI 可继续使用。阻塞帧的取消延迟仍受 frame timeout
 限制，尚未实现完全非阻塞的多连接 IO 状态机。
 

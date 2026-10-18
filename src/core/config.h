@@ -45,6 +45,7 @@ extern int worker_blob_fd;
 // Optional absolute native cwd for each tracee, independent of tracer storage.
 extern std::string tracee_native_cwd;
 extern int worker_io_timeout_ms;
+extern std::string worker_shared_pool_path;
 
 /* Cleanup allocated configuration memory */
 void cleanup_config();

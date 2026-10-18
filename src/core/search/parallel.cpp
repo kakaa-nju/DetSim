@@ -5,10 +5,13 @@
 #include "protocol.h"
 #include "object_transport.h"
 #include "compatibility.h"
+#include "worker.h"
 #include "config.h"
 #include "monitor.h"
 #include "runtime_profile.h"
 #include "state/sysstate_store.h"
+#include "state/state_store.h"
+#include "state/shared_object_pool.h"
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <chrono>
@@ -129,6 +132,8 @@ struct Worker {
         }
     }
     void terminate() noexcept {
+        // Final inventory is unconditional. Subreaper cleanup also owns any
+        // descendants orphaned before an observation could see them.
         try { observe_descendants(); } catch (...) {}
         channel.reset();
         if (pid > 0) kill(-pid, SIGKILL);
@@ -165,7 +170,8 @@ public:
     }
 };
 void spawn(Worker& worker, const fs::path& base, const fs::path& executable,
-           const fs::path& configuration, int timeout_ms, Journal& journal, const std::shared_ptr<wire::ObjectCache>& cache) {
+           const fs::path& configuration, int timeout_ms, Journal& journal, const std::shared_ptr<wire::ObjectCache>& cache,
+           const std::string& shared_pool_path) {
     const auto directory = base / ("worker-" + std::to_string(worker.id) + "-" + std::to_string(++worker.incarnation));
     fs::create_directory(directory);
     int sockets[2];
@@ -195,15 +201,20 @@ void spawn(Worker& worker, const fs::path& base, const fs::path& executable,
         checked(posix_spawnattr_setpgroup(&attrs, 0), "spawn group");
         std::string exe = executable.string(), config = configuration.string(), target_cwd = tracee_native_cwd.empty() ? fs::current_path().string() : tracee_native_cwd;
         std::string io_timeout = std::to_string(timeout_ms);
-        char* args[] = {exe.data(), const_cast<char*>("--worker-fd"), const_cast<char*>("3"),
+        std::vector<char*> args = {exe.data(), const_cast<char*>("--worker-fd"), const_cast<char*>("3"),
                         const_cast<char*>("--worker-blob-fd"), const_cast<char*>("4"),
                         const_cast<char*>("-n"), const_cast<char*>("-c"), config.data(),
                         const_cast<char*>("--target-cwd"), target_cwd.data(),
-                        const_cast<char*>("--worker-io-timeout-ms"), io_timeout.data(), nullptr};
+                        const_cast<char*>("--worker-io-timeout-ms"), io_timeout.data()};
+        if (!shared_pool_path.empty()) {
+            args.push_back(const_cast<char*>("--worker-shared-pool"));
+            args.push_back(const_cast<char*>(shared_pool_path.c_str()));
+        }
+        args.push_back(nullptr);
         std::vector<char*> environment;
         for (const auto& entry : bootstrap_environment()) environment.push_back(const_cast<char*>(entry.c_str()));
         environment.push_back(nullptr);
-        checked(posix_spawn(&worker.pid, exe.c_str(), &actions, &attrs, args, environment.data()), "spawn worker");
+        checked(posix_spawn(&worker.pid, exe.c_str(), &actions, &attrs, args.data(), environment.data()), "spawn worker");
     } catch (...) {
         posix_spawn_file_actions_destroy(&actions); posix_spawnattr_destroy(&attrs); throw;
     }
@@ -243,6 +254,8 @@ Report run_parallel(const sys_state& root, const Options& options) {
     std::unique_ptr<Frontier> frontier;
     std::unique_ptr<Journal> journal;
     auto object_cache = std::make_shared<wire::ObjectCache>();
+    std::shared_ptr<snapshot::SharedObjectPool> pool;
+    std::string shared_pool_path;
     try {
         check_interrupted();
         require(options.workers > 0 && options.workers <= 32 && options.timeout_ms > 0, "Invalid parallel worker count or timeout");
@@ -269,7 +282,13 @@ Report run_parallel(const sys_state& root, const Options& options) {
         frontier = std::make_unique<Frontier>(options.depth, options.policy, options.priority);
         // Validate/export once before launching; per-task transport reads saved
         // state, never coordinator live memory or current UI bindings.
-        (void)snapshot::export_bundle(root.ss_hash);
+        if (options.storage == Options::Storage::Shared) {
+            auto& store = StateStore::instance();
+            shared_pool_path = fs::absolute(fs::path(store.storage_path()) / "shared-objects").lexically_normal().string();
+            pool = std::make_shared<snapshot::SharedObjectPool>(shared_pool_path, true);
+            store.attach_shared_pool(shared_pool_path, false);
+            snapshot::publish_shared_state(root.ss_hash, *pool);
+        } else (void)snapshot::export_bundle(root.ss_hash);
         frontier->admit(root.ss_hash);
         Subreaper subreaper;
         std::vector<std::unique_ptr<Worker>> workers;
@@ -293,43 +312,81 @@ Report run_parallel(const sys_state& root, const Options& options) {
             ++report.retries;
         };
         bool violation = false;
+        size_t next_worker = 0;
         while (frontier->status() == Status::Running && !violation) {
             check_interrupted();
-            for (auto& owned : workers) {
+            bool progressed = false;
+            const size_t dispatch_start = next_worker;
+            for (size_t scan = 0; scan < workers.size(); ++scan) {
+                const size_t index = (dispatch_start + scan) % workers.size();
+                auto& owned = workers[index];
                 Worker& worker = *owned;
                 check_interrupted();
                 if (!worker.channel) {
-                    try { spawn(worker, base, executable, configuration, options.timeout_ms, *journal, object_cache); }
+                    try { spawn(worker, base, executable, configuration, options.timeout_ms, *journal, object_cache, shared_pool_path); }
                     catch (const std::exception& error) { lost(worker,error.what()); continue; }
                 }
-                worker.observe_descendants();
                 if (worker.hello && !worker.ticket) {
                     if (auto ticket = frontier->lease(worker.id)) {
                         worker.ticket = ticket;
-                        const sys_state source(ticket->state);
+                        auto ready = pool ? snapshot::load_shared_state(ticket->state, root.model_identity, *pool)
+                                          : snapshot::ReadyState{sys_state(ticket->state), {}};
+                        const auto& source = ready.state;
+                        if (!pool) ready.actors = enabled_actor_actions(source);
                         worker.source_budget = source.error_bound; worker.source_violation = source.property_failed;
-                        for (const auto& actor : enabled_actor_actions(source)) worker.actors.insert(action_key(actor));
+                        for (const auto& actor : ready.actors) worker.actors.insert(action_key(actor));
                         journal->write({{"event","lease"},{"worker",worker.id},{"lease",ticket->lease_id},
                                        {"state",ticket->state},{"depth",ticket->depth},{"may_expand",ticket->may_expand}});
-                        auto bundle = snapshot::export_bundle(ticket->state);
+                        next_worker = (index + 1) % workers.size();
+                        const auto kind = classify_enumeration(source, ready.actors, ticket->may_expand);
+                        if (pool && kind != EnumerationKind::Expanded) {
+                            if (kind == EnumerationKind::Violation) {
+                                report.violation_state = ticket->state;
+                                report.property_violation = violation = true;
+                            } else {
+                                Expansion expansion;
+                                switch (kind) {
+                                case EnumerationKind::Terminal: expansion.kind = ResultKind::Terminal; break;
+                                case EnumerationKind::DepthCut: expansion.kind = ResultKind::DepthCut; break;
+                                case EnumerationKind::ModelBudget:
+                                    expansion.kind = ResultKind::ModelBudget;
+                                    expansion.reason = "Saved model budget exhausted";
+                                    break;
+                                default: throw std::runtime_error("Invalid local completion kind");
+                                }
+                                frontier->commit(*ticket, std::move(expansion));
+                            }
+                            journal->write({{"event","done"},{"worker",worker.id},{"lease",ticket->lease_id},
+                                {"source",ticket->state},{"kind",static_cast<int>(completion_kind(kind))},
+                                {"emitted",0},{"local",true}});
+                            ++report.local_completions;
+                            worker.clear_job();
+                            progressed = true;
+                            if (violation) break;
+                            continue;
+                        }
+                        auto bundle = pool ? snapshot::export_shared_bundle(ticket->state, *pool)
+                                           : snapshot::export_bundle(ticket->state);
                         check_interrupted();
                         try { worker.channel->send(wire::Task{*ticket,std::move(bundle)}); }
                         catch (const std::exception& error) { lost(worker,error.what()); continue; }
                         check_interrupted();
                         worker.deadline = Clock::now() + std::chrono::milliseconds(options.timeout_ms);
+                        progressed = true;
                         // Drain ready result streams between large task uploads;
                         // never queue 32 synchronous closure sends in one pass.
                         break;
                     }
                 }
             }
+            if (violation) break;
             std::vector<pollfd> fds; std::vector<Worker*> active;
             for (auto& worker : workers) if (worker->channel) {
                 fds.push_back({worker->channel->fd(), POLLIN, 0}); active.push_back(worker.get());
             }
             const bool buffered = std::any_of(active.begin(), active.end(),
                 [](const Worker* worker) { return worker->channel->has_buffered_input(); });
-            const int ready = poll(fds.data(), fds.size(), buffered ? 0 : 20);
+            const int ready = poll(fds.data(), fds.size(), buffered || progressed ? 0 : 20);
             check_interrupted();
             if (ready < 0 && errno != EINTR) throw std::runtime_error("Parallel coordinator poll failed");
             for (size_t index = 0; index < active.size() && !violation; ++index) {
@@ -354,6 +411,7 @@ Report run_parallel(const sys_state& root, const Options& options) {
                     }
                     require(!worker.hello && !worker.ticket && hello->model_identity == root.model_identity &&
                             hello->compatibility == compatibility, "Worker startup model/compatibility/phase mismatch");
+                    worker.observe_descendants();
                     worker.hello = true; continue;
                 }
                 if (const auto* error = std::get_if<wire::Error>(&*message); error && !worker.ticket) {
@@ -383,7 +441,8 @@ Report run_parallel(const sys_state& root, const Options& options) {
                     const auto previous = verified_edges.find(edge_key);
                     require(previous == verified_edges.end() || previous->second == std::make_tuple(edge->target, int(edge->result_code),edge->choice_count),
                             "Nondeterministic transition: same source/action/choice produced a different result");
-                    const auto target = snapshot::import_bundle(edge->bundle, root.model_identity);
+                    const auto target = pool ? snapshot::import_shared_bundle(edge->bundle, root.model_identity, *pool).state
+                                             : snapshot::import_bundle(edge->bundle, root.model_identity);
                     require(edge->property_violation == target.property_failed, "Worker property result differs from saved state");
                     worker.channel->confirm_objects();
                     if (edge->property_violation) worker.violation = edge->target;

@@ -1,7 +1,9 @@
 #pragma once
 #include "protocol.h"
+#include "scheduler.h"
 
 namespace detsim::search {
+wire::DoneKind completion_kind(EnumerationKind kind);
 // Before any tracee starts: bind worker lifetime to the socket's coordinator.
 void prepare_worker_process(int fd, int blob_fd = -1);
 // Called only after normal configuration, tracee and state initialization.

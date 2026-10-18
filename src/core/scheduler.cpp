@@ -715,15 +715,23 @@ static TransitionResult search_actor_choice(const sys_state& source,const ActorA
   return result;
 }
 
+EnumerationKind classify_enumeration(const sys_state& source,
+    const std::vector<ActorAction>& actors, bool may_expand)
+{
+  if (source.property_failed) return EnumerationKind::Violation;
+  if (actors.empty()) return EnumerationKind::Terminal;
+  if (source.error_bound <= 0) return EnumerationKind::ModelBudget;
+  if (!may_expand) return EnumerationKind::DepthCut;
+  return EnumerationKind::Expanded;
+}
+
 EnumerationSummary enumerate_state(const sys_state& source, bool may_expand,
                                    const EdgeCallback& callback)
 {
   detsim::resident::Scope controlled_execution;
-  if (source.property_failed) return {EnumerationKind::Violation, 0};
   const auto actions = enabled_actor_actions(source);
-  if (actions.empty()) return {EnumerationKind::Terminal, 0};
-  if (source.error_bound <= 0) return {EnumerationKind::ModelBudget, 0};
-  if (!may_expand) return {EnumerationKind::DepthCut, 0};
+  const auto kind = classify_enumeration(source, actions, may_expand);
+  if (kind != EnumerationKind::Expanded) return {kind, 0};
   if (!callback) throw std::runtime_error("Single-state expansion requires an edge callback");
   // This API owns its choice policy independently of the invoking UI command.
   // In particular a persistent worker has no stdin, and a previous RAND command

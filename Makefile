@@ -47,7 +47,7 @@ SRCS = src/main.cpp\
        src/core/search/frontier.cpp src/core/search/protocol.cpp src/core/search/worker.cpp src/core/search/parallel.cpp src/core/search/compatibility.cpp src/core/state/snapshot_bundle.cpp \
        src/core/search/object_transport.cpp \
        src/core/state/resident_memory.cpp \
-       src/core/state/state.cpp src/core/state/page_snapshot.cpp src/core/state/page_capture.cpp src/core/state/xstate.cpp src/core/state/state_store.cpp src/core/state/state_store_packed.cpp src/core/state/sysstate_store.cpp src/core/state/state_transition.cpp src/core/state/serialize.cpp \
+       src/core/state/state.cpp src/core/state/page_snapshot.cpp src/core/state/page_capture.cpp src/core/state/xstate.cpp src/core/state/state_store.cpp src/core/state/shared_object_pool.cpp src/core/state/state_store_packed.cpp src/core/state/sysstate_store.cpp src/core/state/state_transition.cpp src/core/state/serialize.cpp \
        src/core/engine/pending_syscall.cpp src/core/engine/thread_manager.cpp src/core/engine/thread_control.cpp src/core/engine/thread_carrier.cpp src/core/engine/thread_pool.cpp src/core/engine/signal_handler.cpp src/core/engine/exec_engine.cpp \
        src/core/syscall/dispatcher.cpp src/core/syscall/handlers.cpp \
        src/subsys/net/sockstate.cpp src/subsys/net/emu.cpp \
@@ -140,6 +140,7 @@ check-example-layout:
 -include tests/writev.mk
 -include tests/search_frontier.mk tests/snapshot_bundle.mk tests/parallel_protocol.mk
 -include tests/parallel_bundle.mk
+-include tests/shared_object_pool.mk tests/shared_snapshot.mk
 check-integration: check-dwarf check-elf
 
 .PHONY: check-dfs-residency

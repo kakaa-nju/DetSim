@@ -1,5 +1,9 @@
 #include "snapshot_bundle.h"
 #include "page_snapshot.h"
+#include "shared_object_pool.h"
+#include "proc_status.h"
+#include <cstring>
+#include <tuple>
 #include "sysstate_store.h"
 #include "cereal/archives/binary.hpp"
 #include "utils.h"
@@ -93,5 +97,125 @@ sys_state import_bundle(const Bundle& bundle, const std::string& expected_model_
     require(metadata_store.save(bundle.system_key, bundle.metadata), "Failed to publish snapshot bundle metadata");
     metadata_store.flush_index();
     return state;
+}
+namespace {
+// Local same-host wire record. Metadata carries model identity and ordered node
+// roots; a checksum also covers derived actor admission data and framing.
+constexpr uint32_t ready_magic = 0x44535244;
+constexpr uint32_t ready_version = 1;
+template<class T> void append(std::vector<uint8_t>& out, T value) {
+    const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+    out.insert(out.end(), bytes, bytes + sizeof(value));
+}
+template<class T> T take(const std::vector<uint8_t>& bytes, size_t& offset) {
+    require(offset <= bytes.size() && sizeof(T) <= bytes.size() - offset, "Truncated shared ready record");
+    T result; std::memcpy(&result, bytes.data() + offset, sizeof(result));
+    offset += sizeof(result); return result;
+}
+struct DecodedReady { ReadyState ready; std::vector<uint8_t> metadata; };
+DecodedReady decode_ready(hash_type key, const std::vector<uint8_t>& bytes,
+                          const std::string& expected) {
+    require(!expected.empty(), "Empty shared snapshot execution model");
+    require(bytes.size() >= sizeof(uint64_t), "Truncated shared ready checksum");
+    size_t checksum_offset = bytes.size() - sizeof(uint64_t);
+    size_t tail = checksum_offset;
+    require(take<uint64_t>(bytes, tail) == XXHash64::hash(bytes.data(), checksum_offset),
+            "Corrupt shared ready checksum");
+    size_t offset = 0;
+    require(take<uint32_t>(bytes, offset) == ready_magic &&
+            take<uint32_t>(bytes, offset) == ready_version &&
+            take<uint64_t>(bytes, offset) == key && key, "Invalid shared ready header");
+    const auto metadata_size = take<uint64_t>(bytes, offset);
+    const auto actor_count = take<uint32_t>(bytes, offset);
+    require(actor_count <= NP * MAX_THREADS_PER_PROCESS && offset <= checksum_offset &&
+            metadata_size <= checksum_offset - offset &&
+            checksum_offset - offset - metadata_size == uint64_t(actor_count) * 3 * sizeof(int32_t),
+            "Invalid shared ready lengths");
+    DecodedReady result;
+    result.metadata.assign(bytes.begin() + offset, bytes.begin() + offset + metadata_size);
+    offset += metadata_size;
+    Bundle bundle; bundle.system_key = key; bundle.metadata = result.metadata;
+    result.ready.state = decode(bundle);
+    require(result.ready.state.model_identity == expected, "Shared snapshot execution model mismatch");
+    std::pair<int, int> previous{-1, -1};
+    for (uint32_t i = 0; i < actor_count; ++i) {
+        const auto process = take<int32_t>(bytes, offset);
+        const auto thread = take<int32_t>(bytes, offset);
+        const auto action = take<int32_t>(bytes, offset);
+        require(process >= 0 && process < NP && thread >= 0 && thread < MAX_THREADS_PER_PROCESS &&
+                (action == int(TransitionAction::Normal) || action == int(TransitionAction::Timeout)) &&
+                std::make_pair(process, thread) > previous &&
+                !DISDEAD(result.ready.state.status[process]) && !result.ready.state.property_failed,
+                "Invalid shared ready actor admission");
+        previous = {process, thread};
+        result.ready.actors.push_back({process, thread, TransitionAction(action)});
+    }
+    return result;
+}
+std::vector<uint8_t> encode_ready(const Bundle& bundle, const std::vector<ActorAction>& actors) {
+    std::vector<uint8_t> bytes;
+    append(bytes, ready_magic); append(bytes, ready_version); append<uint64_t>(bytes, bundle.system_key);
+    append<uint64_t>(bytes, bundle.metadata.size()); append<uint32_t>(bytes, actors.size());
+    bytes.insert(bytes.end(), bundle.metadata.begin(), bundle.metadata.end());
+    for (const auto& actor : actors) {
+        append<int32_t>(bytes, actor.process); append<int32_t>(bytes, actor.thread);
+        append<int32_t>(bytes, int(actor.action));
+    }
+    append<uint64_t>(bytes, XXHash64::hash(bytes.data(), bytes.size()));
+    return bytes;
+}
+}
+void publish_shared_state(hash_type key, SharedObjectPool& pool) {
+    Bundle bundle; bundle.system_key = key;
+    require(SysStateStore::instance().load(key, bundle.metadata), "Missing shared system metadata");
+    auto state = decode(bundle);
+    require(!state.model_identity.empty(), "Empty shared snapshot execution model");
+    if (const auto existing = pool.load_ready(key)) {
+        const auto saved = decode_ready(key, *existing, state.model_identity);
+        require(saved.metadata == bundle.metadata, "Conflicting shared ready metadata");
+        return; // Immutable ready certificate is valid throughout this pool generation.
+    }
+    std::set<hash_type> seen;
+    validate_closure(state, [&](hash_type blob_key) {
+        if (!seen.insert(blob_key).second) return;
+        const auto bytes = StateStore::instance().load_shared(blob_key);
+        require(bytes && !bytes->empty(), "Missing shared snapshot dependency");
+        // publish validates existing-key equality or atomically installs missing
+        // bytes. A private hot cache cannot substitute for pool publication.
+        pool.publish_blob(blob_key, bytes->data(), bytes->size());
+    });
+    const auto actors = enabled_actor_actions(state);
+    const auto record = encode_ready(bundle, actors);
+    (void)decode_ready(key, record, state.model_identity);
+    pool.publish_ready(key, record); // Last: all referenced objects were validated and published.
+}
+ReadyState load_shared_state(hash_type key, const std::string& expected, SharedObjectPool& pool) {
+    const auto record = pool.load_ready(key);
+    require(bool(record), "Shared snapshot is not ready");
+    return decode_ready(key, *record, expected).ready;
+}
+Bundle export_shared_bundle(hash_type key, SharedObjectPool& pool) {
+    publish_shared_state(key, pool);
+    Bundle result; result.version = 2; result.system_key = key;
+    require(SysStateStore::instance().load(key, result.metadata), "Missing shared system metadata");
+    return result;
+}
+ReadyState import_shared_bundle(const Bundle& bundle, const std::string& expected,
+                               SharedObjectPool& pool, bool materialize_child) {
+    require(bundle.version == 2 && bundle.blobs.empty(), "Invalid shared reference bundle");
+    const auto record = pool.load_ready(bundle.system_key);
+    require(bool(record), "Shared snapshot is not ready");
+    auto decoded = decode_ready(bundle.system_key, *record, expected);
+    require(decoded.metadata == bundle.metadata, "Shared reference metadata mismatch");
+    if (materialize_child) {
+        const auto attached = StateStore::instance().shared_pool();
+        require(attached && attached->path() == pool.path(), "Shared materialization requires the same attached pool");
+        for (int node = 0; node < NP; ++node)
+            decoded.ready.state.child[node] = tracee_state(decoded.ready.state.ts_hash[node]);
+    }
+    require(SysStateStore::instance().save(bundle.system_key, bundle.metadata),
+            "Failed to register shared system metadata");
+    // Process-visible registration only. Explicit caller checkpoints own durability.
+    return std::move(decoded.ready);
 }
 } // namespace detsim::snapshot

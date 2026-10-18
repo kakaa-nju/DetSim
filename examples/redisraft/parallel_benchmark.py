@@ -187,9 +187,11 @@ def validate_reference(report, reference_path):
                    'reference tracer/fixture/plugin/seed/backend/depth/prefix inputs differ')
     common.require(reference.get('seed_model_budget') == report['seed_model_budget'] and
                    reference['prefix']['nodes'] == report['prefix']['nodes'], 'reference seed model budget/business projection differs')
-    witnesses = [row for row in reference['parallel'] if row['workers'] == 1 and
+    common.require(reference.get('serial', {}).get('local') is not False,
+                   'reference needs local serial coverage validation, not another reference')
+    witnesses = [row for row in reference['parallel'] if
                  row.get('new_node_sets_equal') and row.get('serial_projection_edges_subset')]
-    common.require(witnesses, 'reference lacks a 1-worker graph with local serial coverage validation')
+    common.require(witnesses, 'reference lacks a graph with local serial coverage validation')
     expected_graph = canonical_graph(reference['seed'], witnesses[0])
     for row in report['parallel']:
         common.require(canonical_graph(report['seed'], row) == expected_graph, 'fresh graph differs from validated reference')
@@ -282,7 +284,7 @@ def run(args, work, report):
                                (args.tracer, args.binary, *plugins, shim, Path(__file__))}
     report['execution_inputs'] = dict(tracer_sha256=common.digest(args.tracer), binary_sha256=common.digest(args.binary),
         plugins_sha256=[common.digest(path) for path in plugins], seed_shim_sha256=common.digest(shim),
-        seed=args.seed, backend=args.backend, depth=args.depth, rounds=args.rounds)
+        seed=args.seed, backend=args.backend, depth=args.depth, rounds=args.rounds, storage=args.storage)
     (work / 'driver-source.py').write_bytes(Path(__file__).read_bytes())
     old_preload, old_seed = os.environ.get("LD_PRELOAD"), os.environ.get("DETSIM_BENCH_SEED")
     old_limit = common.MODEL_ADDRESS_SPACE_LIMIT
@@ -402,7 +404,7 @@ def run(args, work, report):
                 remaining_ms = min(3_600_000, max(1, int((session.started + session.timeout - time.monotonic()) * 1000)))
                 started = time.monotonic()
                 with ResourceSample(session, args.sample_resources) as resources:
-                    reply = checked(session, f"parallel {workers} {args.depth} --strategy {strategy} --retries 0 --timeout-ms {remaining_ms}")
+                    reply = checked(session, f"parallel {workers} {args.depth} --strategy {strategy} --storage {args.storage} --retries 0 --timeout-ms {remaining_ms}")
                 elapsed = time.monotonic() - started
                 matches = re.findall(r"(?m)^PARALLEL_RESULT (\{[^\n]+\})$", reply)
                 common.require(len(matches) == 1, "missing native parallel receipt")
@@ -466,7 +468,11 @@ def run(args, work, report):
     finally:
         if failed and session.proc.poll() is None:
             os.kill(session.proc.pid, signal.SIGINT)
-        report["tracer_exit"] = session.close()
+        finalization_started = time.monotonic()
+        report["tracer_exit"] = session.close(timeout=args.timeout)
+        report["finalization_seconds"] = time.monotonic() - finalization_started
+        report["search_and_finalization_seconds"] = sum(row['command_seconds'] for row in report.get('parallel', [])) + report["finalization_seconds"]
+        report["finalization_scope"] = "graceful tracer shutdown after validation; includes store durability barriers, reported separately from search command"
         common.require(report["tracer_exit"] == 0, "benchmark tracer cleanup failed")
 
 
@@ -483,7 +489,8 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--workers", type=int, nargs='+', default=[1, 2, 4], help="explicit worker counts, including 8 for large cases")
     parser.add_argument("--strategies", choices=('dfs', 'bfs'), nargs='+', default=['dfs', 'bfs'])
-    parser.add_argument("--reference-report", type=Path, help="verified same-workload 1-worker graph; skips local serial and requires parallel-first")
+    parser.add_argument("--storage", choices=('shared', 'durable'), default='shared')
+    parser.add_argument("--reference-report", type=Path, help="locally verified same-workload graph; skips local serial and requires parallel-first")
     parser.add_argument("--parallel-first", action='store_true', help="one worker/strategy per fresh session; time parallel before serial oracle")
     parser.add_argument("--sample-resources", action='store_true', help="sample owned tree CPU/RSS and low-frequency PSS")
     args = parser.parse_args()
@@ -505,7 +512,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="run-", dir=args.output))
     report = {"passed": False, "artifacts": str(work), "backend": args.backend, "depth": args.depth,
-              "workers": args.workers, "strategies": args.strategies, "sample_resources": args.sample_resources, "parallel_first": args.parallel_first, "reference_report": str(args.reference_report) if args.reference_report else None,
+              "workers": args.workers, "strategies": args.strategies, "storage": args.storage, "sample_resources": args.sample_resources, "parallel_first": args.parallel_first, "reference_report": str(args.reference_report) if args.reference_report else None,
               "scope": __doc__, "timing": "command_seconds is complete command to prompt (including tail journal and driver polling); native seconds separately excludes final node journal; primary large-scale throughput uses command_seconds"}
     started = time.monotonic()
     try:

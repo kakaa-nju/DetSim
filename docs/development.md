@@ -15,9 +15,14 @@ checks. Reuse assumes no external writes to target memory/file backing and no
 plugin writes bypassing framework helpers. It does not track arbitrary dirty
 pages. Snapshot backend selection remains `DETSIM_SNAPSHOT_BACKEND=full|pages`.
 Parallel transport defaults to buffered sockets. `DETSIM_SHARED_OBJECTS=on`
-opts into sealed-memfd object transfer; `off` selects the default. The shared
-path retains owning Bundle copies and validation, and was slower in the measured
-Raft workload. It remains an experimental comparison path, not a speed guarantee.
+opts into sealed-memfd transfer for complete bundles; `off` selects buffered
+complete-bundle transfer. This comparison concerns `parallel --storage durable`.
+The default `parallel --storage shared` uses a private same-host immutable object
+pool and small metadata references, rather than transferring full bundles.
+It requires Linux >=5.8 for filesystem writeback error reporting at its explicit
+`syncfs` durability barriers. These barriers can also synchronize unrelated writes
+on the same filesystem. See the [shared-pool scale measurements](shared-pool-scaling-2026-10-19.md)
+for scope, cutoffs, memory and remaining scaling limits.
 
 For the project's actual model-checking requirements, start with the
 [state and atom contract assessment](model-checking-contract.md). It includes a
@@ -50,6 +55,7 @@ make check-search-frontier # pure policy/lease/depth oracle
 make check-parallel-protocol # typed frames, bounds and absolute timeout
 make check-parallel-bundle # NP=2 real full/pages shared transfer and cold reopen
 make NP=2 check-snapshot-bundle # full/pages closure and metadata publication faults
+make NP=2 check-shared-object-pool check-shared-snapshot # shared CAS, ready closure and durable barriers
 make check-adoption      # NP=1 repeated full/pages thread-layout adoption
 make check-fixed-layout  # NP=1 framework controls target layout; host ASLR unchanged
 make check-thread-control check-thread-identity check-thread-carrier # NP=1 thread gates
