@@ -821,3 +821,23 @@ leader regs、alive regs/xstate和资源恢复。verify走原全字节oracle路�
 这证明当前有界案例和故障/重放回归，未证明任意程序/任意调度的模型完整性。
 大图候选收益仍未重测，不默认启用。另一项memory-image等价恢复仍只在私有
 原型中，尚缺原生专门oracle，未修改产品恢复代码。
+
+
+## memory-image 等价恢复：私有原生 oracle 首批通过
+
+私有NP1候选的predicate组件及三个专门native场景已实际通过，尚未推广产品：
+不同FS/I/O/stdout与GPR/XMM0 root但页面相同的命中；dead logical main、活worker
+的命中并直接GETREGS物理anchor header；verify仍走baseline。每次还核对活线程
+GPR/xstate、完整saved-region字节、canonical live mappings和模型资源。tracked
+write撤销proof、单页不同均实际回退。native日志最终累计hits2/fallback6，verify
+场景不新增hit。源码、getter、命令及日志在`equivalent-memory-restore/`；
+`native-proc-mem-oracle.log`保留实际输出。此计数不序列化、不进入状态身份。
+
+测试修正保留RED：先把raw /proc VMA分区与已合并snapshot直接比较，baseline
+就失败；修正为完整flags/name/dev/inode/offset覆盖的canonical比较。PROT_NONE
+区域不能用process_vm_readv作无写入oracle，改为只读/proc/<pid>/mem核对全部
+字节，没有临时放开保护或撤销proof；dead-main仍直接读物理leader寄存器，
+没有用frozen logical-main recapture替代。predicate测试不冒充live restore证据。
+
+仍待现有stateIO/mapping/pages广门禁、更多guard/brk/normalize/multinode场景和
+原生同图/反例重放；吞吐尚未测。产品恢复代码没有这项快路。
