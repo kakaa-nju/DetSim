@@ -898,3 +898,36 @@ cleanup。原日志保留，README和verification.json分别列明该证据限�
 区间，不能据此为最窄Scope造LRU。扩大Scope还涉及plugin/fork/凭证边界，
 缓存占FD也会使其他maps/CAS打开遭遇EMFILE，不能靠status-open重试保证
 资源失败等价。故暂不实现，不减少任何fresh pending/rseq/停驻检查。
+
+## 不可变 saved-maps 解析复用：四轮隔离对照
+
+私有候选`build/shared-parallel/saved-maps-cache/`在既有SnapshotView LRU中
+保留不可变解析向量，计入4MiB预算；不缓存live /proc，不改变SnapshotView
+对象布局和快照格式。只有global C/POSIX CTYPE、无thread locale且C++ classic
+locale时复用；其它locale按原sscanf/istringstream语义旁路。capture借用owner，
+restore仍复制到其既有可变vector。源码审查未发现隔离实验阻断项。
+
+NP1普通/tiny组件、full/pages/verify-pages各default/tiny共6组mapping、
+state-I/O和page-snapshot门禁通过；NP3组件通过。覆盖解析兼容、错误、容量、
+owner淘汰后存活、locale旁路、串行generation和poison。尚未实际覆盖双miss
+或旧parse与store重开竞争，不声称并发race门禁已通过。新增native fixture
+首次未登记owned child导致resident未激活的RED保留；只修测试的作用域绑定。
+
+候选NP3 SHA256为
+`e57d3d31618603fbf6e170c7984178879df35d3b581b8c02956fa8e50ff2b527`。
+独立native参考及24个fresh reference-only会话全部同图，10457节点/18266边、
+零重试，canonical SHA与前述depth12一致。两轮baseline先、两轮candidate先，
+均same-cpu、locality none、pages/shared；没有并发build或perf采样。
+
+| worker | 原实现四轮中位秒 | 缓存候选四轮中位秒 |
+| --- | ---: | ---: |
+| 1 | 31.6706 | 30.0387 |
+| 8 | 6.9499 | 6.5925 |
+| 12 | 6.4690 | 6.5169 |
+
+1-worker四对均更快，8-worker三对更快、一对略慢；两档中位均改善约5.2%，
+因此8-worker加速比基本不变（约4.56倍）。12-worker两对更快、两对更慢，
+中位稍退。该优化不能解决当前并行扩展性，暂保留私有候选，不推广。
+原始命令、完整输出和逐轮数据见`saved-maps-pilot/{summary,paired-summary}.json`。
+下一项隔离实验仅扩大现有BFS root局部性选择窗口，检查更强复用是否抵消
+协调器额外评分开销；不放松恢复或状态图验证。
