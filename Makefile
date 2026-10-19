@@ -140,7 +140,7 @@ check-example-layout:
 -include tests/writev.mk
 -include tests/search_frontier.mk tests/snapshot_bundle.mk tests/parallel_protocol.mk
 -include tests/parallel_bundle.mk
--include tests/shared_object_pool.mk tests/shared_snapshot.mk
+-include tests/shared_object_pool.mk tests/shared_snapshot.mk tests/worker_placement.mk
 check-integration: check-dwarf check-elf
 
 .PHONY: check-dfs-residency

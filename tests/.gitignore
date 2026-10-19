@@ -173,3 +173,6 @@
 !shared_object_pool.mk
 !shared_snapshot_integration.cpp
 !shared_snapshot.mk
+
+!worker_placement_integration.cpp
+!worker_placement.mk

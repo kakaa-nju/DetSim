@@ -537,3 +537,45 @@ profile 的阶段占比来排名优化收益。下一步需定位展开失败或
 worker阶段计数完全相同，没有解决展开问题，未改系统库配置。NP=3实测
 sizeof(syscall_info)=64、sizeof(tracee_state)=5240、sizeof(sys_state)=15856；
 这些尺寸本身不足以证明展开失败来自栈采集长度。
+
+
+## 12-worker 阶段计时（完整计数，非 CPU 归因）
+
+v2 在每个 Done 前记录累计阶段墙钟时间；每次取各 worker 最后一条，核对
+总计3824远程Task、18266边，三种worker数均通过同图验证。输出、时钟和
+调度扰动包含在结果内，不与无instrumentation版本直接排名。
+`build/shared-parallel/stage-pressure12-v2/phase-summary.json` 保留精确值。
+
+| worker | 含收尾秒 | 导入累计秒 | adoption累计秒 | 首次恢复累计秒 | 枚举扣除发布/发送累计秒 | 发布累计秒 | 发送累计秒 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 30.9627 | 0.3691 | 0.8716 | 1.2474 | 23.3424 | 3.6292 | 0.1004 |
+| 8 | 6.3208 | 0.7162 | 1.3381 | 2.1077 | 33.4765 | 5.7527 | 0.1847 |
+| 12 | 6.1718 | 1.0667 | 1.9196 | 2.8246 | 44.3565 | 8.2189 | 0.5811 |
+
+累计秒为各worker区间求和，包含睡眠/抢占，不能读作CPU秒，也不能相加
+得到全链路时间。首次恢复不含 enumerate 内部为不同分支做的恢复；枚举
+扣除项仍包括执行、分支恢复、捕获、性质检查。发送区间仅测Edge发送，
+不是完整通信或等待总量。12相对8本轮仅快2.4%，与首轮13.6%不一致，
+提示必须重复，不能据首轮宣布稳定12-worker收益。
+同样工作量的多个阶段均出现累计墙钟放大，下一步增加线程CPU计时以区分
+运行成本与等待，再细分枚举区间；当前证据不支持“只是通信瓶颈”。
+
+
+## 可选放置产品接线验证
+
+`--worker-placement none|same-cpu` 已接入原生 parallel，默认 none。
+通用拓扑算法替代 artifact 的硬编码主机 CPU 顺序；尚未以此产品二进制
+重跑大图吞吐，不能直接将 artifact 的11.5%收益当作产品测量。
+独立静态审查未发现 P0/P1 阻断。以下命令新鲜通过（固定各NP二进制副本）：
+
+- `make NP=2 CC=/usr/bin/gcc CXX=/usr/bin/g++ -j4 check-worker-placement`：拓扑、默认与私有参数。
+- NP=2 production tracer 构建；`parallel_scenarios.py --worker-placement same-cpu`：15/15。
+- 同一NP=2二进制 `--worker-placement none`：15/15。
+- NP=1 production tracer 构建；`parallel_actor_scenarios.py --worker-placement same-cpu`：choices/mixed/pending × full/pages 六例通过。
+- `make CC=/usr/bin/gcc CXX=/usr/bin/g++ check` 通过；`git diff --check` 通过。
+
+原生15例包含full/pages同图、shared/durable对照、冷反例重放、worker丢失重试、
+父进程死亡与晚建helper清理；新增审计核对原进程mask和worker逐TID绑定及
+重启分配。actor六例覆盖实际线程、选择和pending/timeout的手工动作对照及重放。
+尚无same-cpu专属2→3→2多次线程数量变化门禁、实际sched_setaffinity故障注入，
+也没有产品二进制的新大图/重复吞吐矩阵；这些证据仍需补充。

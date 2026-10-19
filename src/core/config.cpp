@@ -4,6 +4,8 @@
  */
 
 #include "config.h"
+#include <charconv>
+#include <sched.h>
 #include "common.h"
 #include "debug.h"
 #include "net/emu.h"
@@ -46,6 +48,7 @@ int worker_control_fd = -1;
 int worker_blob_fd = -1;
 std::string tracee_native_cwd;
 int worker_io_timeout_ms = 30000;
+int worker_host_cpu = -1;
 std::string worker_shared_pool_path;
 
 bool should_log(int level) { return level >= loglevel; }
@@ -394,6 +397,7 @@ void parse_args(int argc, char *argv[])
       {"target-cwd", required_argument, nullptr, 1001},
       {"worker-io-timeout-ms", required_argument, nullptr, 1002},
       {"worker-shared-pool", required_argument, nullptr, 1004},
+      {"worker-host-cpu", required_argument, nullptr, 1005},
       {0, 0, nullptr, 0},
   };
 
@@ -402,6 +406,16 @@ void parse_args(int argc, char *argv[])
   {
     switch (o)
     {
+      case 1005: {
+        int cpu = -1;
+        const std::string text(optarg);
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), cpu);
+        if (worker_host_cpu >= 0 || text.empty() || parsed.ec != std::errc{} ||
+            parsed.ptr != text.data() + text.size() || cpu < 0 || cpu >= CPU_SETSIZE)
+          throw std::runtime_error("Invalid internal worker host CPU");
+        worker_host_cpu = cpu;
+        break;
+      }
       case 1004:
         if (!worker_shared_pool_path.empty() || !fs::path(optarg).is_absolute())
           throw std::runtime_error("Worker shared pool must be an absolute path");
@@ -463,6 +477,8 @@ void parse_args(int argc, char *argv[])
   }
   if (worker_blob_fd >= 0 && (worker_control_fd < 0 || worker_control_fd == worker_blob_fd))
     throw std::runtime_error("Internal object descriptor requires a distinct worker control descriptor");
+  if (worker_host_cpu >= 0 && worker_control_fd < 0)
+    throw std::runtime_error("Internal host CPU requires worker mode");
   if (!worker_shared_pool_path.empty() && worker_control_fd < 0)
     throw std::runtime_error("Internal shared pool requires worker mode");
   if (worker_control_fd >= 0) {

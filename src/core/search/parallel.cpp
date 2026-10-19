@@ -96,6 +96,7 @@ struct Subreaper {
 };
 struct Worker {
     WorkerId id;
+    int host_cpu = -1;
     pid_t pid = -1;
     unsigned incarnation = 0, startup_failures = 0;
     std::unique_ptr<wire::Channel> channel;
@@ -172,6 +173,7 @@ public:
 void spawn(Worker& worker, const fs::path& base, const fs::path& executable,
            const fs::path& configuration, int timeout_ms, Journal& journal, const std::shared_ptr<wire::ObjectCache>& cache,
            const std::string& shared_pool_path) {
+    if (worker.host_cpu >= 0) require_bootstrap_cpu_affinity();
     const auto directory = base / ("worker-" + std::to_string(worker.id) + "-" + std::to_string(++worker.incarnation));
     fs::create_directory(directory);
     int sockets[2];
@@ -200,7 +202,7 @@ void spawn(Worker& worker, const fs::path& base, const fs::path& executable,
         checked(posix_spawnattr_setflags(&attrs, POSIX_SPAWN_SETPGROUP), "spawn flags");
         checked(posix_spawnattr_setpgroup(&attrs, 0), "spawn group");
         std::string exe = executable.string(), config = configuration.string(), target_cwd = tracee_native_cwd.empty() ? fs::current_path().string() : tracee_native_cwd;
-        std::string io_timeout = std::to_string(timeout_ms);
+        std::string io_timeout = std::to_string(timeout_ms), host_cpu = std::to_string(worker.host_cpu);
         std::vector<char*> args = {exe.data(), const_cast<char*>("--worker-fd"), const_cast<char*>("3"),
                         const_cast<char*>("--worker-blob-fd"), const_cast<char*>("4"),
                         const_cast<char*>("-n"), const_cast<char*>("-c"), config.data(),
@@ -209,6 +211,10 @@ void spawn(Worker& worker, const fs::path& base, const fs::path& executable,
         if (!shared_pool_path.empty()) {
             args.push_back(const_cast<char*>("--worker-shared-pool"));
             args.push_back(const_cast<char*>(shared_pool_path.c_str()));
+        }
+        if (worker.host_cpu >= 0) {
+            args.push_back(const_cast<char*>("--worker-host-cpu"));
+            args.push_back(host_cpu.data());
         }
         args.push_back(nullptr);
         std::vector<char*> environment;
@@ -222,7 +228,7 @@ void spawn(Worker& worker, const fs::path& base, const fs::path& executable,
     wire::Limits limits; limits.io_timeout_ms = timeout_ms;
     worker.channel = std::make_unique<wire::Channel>(parent.release(), limits, object_parent.release(), cache);
     worker.hello = false; worker.deadline = Clock::now() + std::chrono::milliseconds(timeout_ms);
-    journal.write({{"event","worker_spawn"},{"worker",worker.id},{"pid",worker.pid},{"incarnation",worker.incarnation},{"directory",directory.string()}});
+    journal.write({{"event","worker_spawn"},{"worker",worker.id},{"pid",worker.pid},{"incarnation",worker.incarnation},{"directory",directory.string()},{"host_cpu",worker.host_cpu}});
 }
 void transport_report(Worker& worker, Journal& journal) {
     if (!worker.channel) return;
@@ -258,6 +264,11 @@ Report run_parallel(const sys_state& root, const Options& options) {
     std::string shared_pool_path;
     try {
         check_interrupted();
+        std::vector<int> placement_cpus;
+        if (options.worker_placement == Options::WorkerPlacement::SameCpu) {
+            require_bootstrap_cpu_affinity();
+            placement_cpus = worker_cpu_order(bootstrap_cpu_affinity());
+        } else require(options.worker_placement == Options::WorkerPlacement::None, "Invalid worker placement");
         require(options.workers > 0 && options.workers <= 32 && options.timeout_ms > 0, "Invalid parallel worker count or timeout");
         require(runtime_profile().fixed_layout, "Parallel exploration requires RuntimeProfile.fixed_layout=true");
         require(!root.model_identity.empty() && root.model_identity == ptmc_state.model_identity,
@@ -295,7 +306,11 @@ Report run_parallel(const sys_state& root, const Options& options) {
         std::map<StateKey,unsigned> failures;
         using EdgeKey = std::tuple<StateKey,int,int,int,int>;
         std::map<EdgeKey,std::tuple<StateKey,int,uint32_t>> verified_edges;
-        for (unsigned index = 0; index < options.workers; ++index) workers.push_back(std::make_unique<Worker>(index + 1));
+        for (unsigned index = 0; index < options.workers; ++index) {
+            auto worker = std::make_unique<Worker>(index + 1);
+            if (!placement_cpus.empty()) worker->host_cpu = placement_cpus[index % placement_cpus.size()];
+            workers.push_back(std::move(worker));
+        }
         auto lost = [&](Worker& worker, const std::string& reason) {
             check_interrupted();
             journal->write({{"event","worker_lost"},{"worker",worker.id},{"pid",worker.pid},

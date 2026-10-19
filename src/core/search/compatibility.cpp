@@ -4,6 +4,9 @@
 #include <nlohmann/json.hpp>
 #include <xxhash.h>
 #include <array>
+#include <filesystem>
+#include <charconv>
+#include <tuple>
 #include <algorithm>
 #include <set>
 #include <cerrno>
@@ -219,6 +222,104 @@ const std::string& compatibility_manifest() {
 const std::vector<std::string>& bootstrap_environment() {
     (void)compatibility_manifest();
     return initial_environment;
+}
+std::vector<int> bootstrap_cpu_affinity() {
+    return Json::parse(compatibility_manifest()).at("cpu").at("affinity").get<std::vector<int>>();
+}
+void require_bootstrap_cpu_affinity() {
+    cpu_set_t current{};
+    if (sched_getaffinity(0, sizeof(current), &current)) failed("cannot inspect current CPU affinity");
+    std::vector<int> cpus;
+    for (int cpu = 0; cpu < CPU_SETSIZE; ++cpu) if (CPU_ISSET(cpu, &current)) cpus.push_back(cpu);
+    if (cpus != bootstrap_cpu_affinity()) failed("CPU affinity changed since bootstrap admission");
+}
+std::vector<int> worker_cpu_order(const std::vector<int>& allowed, const std::string& sysfs_root) {
+    auto ascending = allowed;
+    std::sort(ascending.begin(), ascending.end());
+    if (ascending.empty() || ascending.front() < 0 || ascending.back() >= CPU_SETSIZE ||
+        std::adjacent_find(ascending.begin(), ascending.end()) != ascending.end())
+        throw std::runtime_error("Invalid worker CPU candidate set");
+    try {
+        namespace fs = std::filesystem;
+        const auto text = [](const fs::path& path) {
+            std::ifstream input(path);
+            std::string value;
+            if (!input || !std::getline(input, value) || input.bad() || value.empty())
+                throw std::runtime_error("Missing CPU topology");
+            return value;
+        };
+        const auto number = [](const std::string& value) {
+            int result = -1;
+            const auto parsed = std::from_chars(value.data(), value.data() + value.size(), result);
+            if (parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size() || result < 0)
+                throw std::runtime_error("Invalid CPU topology number");
+            return result;
+        };
+        const auto cpu_list = [&](const std::string& value) {
+            std::set<int> result;
+            std::istringstream parts(value);
+            std::string part;
+            while (std::getline(parts, part, ',')) {
+                const auto dash = part.find('-');
+                const int first = number(part.substr(0, dash));
+                const int last = dash == std::string::npos ? first : number(part.substr(dash + 1));
+                if (first > last || last >= CPU_SETSIZE) throw std::runtime_error("Invalid cache CPU list");
+                for (int cpu = first; cpu <= last; ++cpu) result.insert(cpu);
+            }
+            if (result.empty() || value.back() == ',') throw std::runtime_error("Empty cache CPU list");
+            return result;
+        };
+        using Core = std::pair<int,int>;
+        std::map<std::set<int>, std::map<Core,std::vector<int>>> domains;
+        std::map<int,std::set<int>> memberships;
+        for (int cpu : ascending) {
+            const auto root = fs::path(sysfs_root) / ("cpu" + std::to_string(cpu));
+            const Core core{number(text(root / "topology/physical_package_id")), number(text(root / "topology/core_id"))};
+            int highest = -1;
+            std::set<int> shared;
+            for (const auto& entry : fs::directory_iterator(root / "cache")) {
+                const auto name = entry.path().filename().string();
+                if (!name.starts_with("index")) continue;
+                const auto type = text(entry.path() / "type");
+                if (type != "Data" && type != "Unified") continue;
+                const int level = number(text(entry.path() / "level"));
+                const auto members = cpu_list(text(entry.path() / "shared_cpu_list"));
+                if (!members.count(cpu)) throw std::runtime_error("Cache topology excludes own CPU");
+                if (level > highest) { highest = level; shared = members; }
+                else if (level == highest && shared != members) throw std::runtime_error("Ambiguous cache topology");
+            }
+            if (highest < 0) throw std::runtime_error("Missing last-level cache topology");
+            memberships.emplace(cpu, shared);
+            domains[shared][core].push_back(cpu);
+        }
+        // Allowed CPUs sharing a cache must agree about that cache's membership.
+        for (const auto& [cpu, group] : memberships)
+            for (int member : group)
+                if (memberships.count(member) && memberships.at(member) != group)
+                    throw std::runtime_error("Inconsistent cache topology");
+        std::vector<std::vector<std::vector<int>>> groups;
+        for (const auto& [domain, cores] : domains) {
+            std::vector<std::vector<int>> group;
+            for (const auto& [core, siblings] : cores) group.push_back(siblings);
+            std::sort(group.begin(), group.end(), [](const auto& a, const auto& b) { return a.front() < b.front(); });
+            groups.push_back(std::move(group));
+        }
+        std::sort(groups.begin(), groups.end(), [](const auto& a, const auto& b) { return a.front().front() < b.front().front(); });
+        size_t max_cores = 0, max_siblings = 0;
+        for (const auto& group : groups) {
+            max_cores = std::max(max_cores, group.size());
+            for (const auto& core : group) max_siblings = std::max(max_siblings, core.size());
+        }
+        std::vector<int> result;
+        // All first siblings precede all second siblings, including uneven LLCs.
+        for (size_t sibling = 0; sibling < max_siblings; ++sibling)
+            for (size_t core = 0; core < max_cores; ++core)
+                for (const auto& group : groups)
+                    if (core < group.size() && sibling < group[core].size()) result.push_back(group[core][sibling]);
+        return result;
+    } catch (const std::runtime_error&) {
+        return ascending;
+    }
 }
 std::vector<std::string> environment_change_names() {
     (void)compatibility_manifest();

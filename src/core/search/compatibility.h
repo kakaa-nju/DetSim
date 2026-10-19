@@ -16,4 +16,11 @@ const std::string& compatibility_manifest();
 // are for exec only; diagnostics must report names, never credential contents.
 const std::vector<std::string>& bootstrap_environment();
 std::vector<std::string> environment_change_names();
+// Reads the already-admitted bootstrap mask; never changes its identity.
+std::vector<int> bootstrap_cpu_affinity();
+void require_bootstrap_cpu_affinity();
+// Topology is only an ordering hint. Any missing/inconsistent sysfs data falls
+// back to ascending allowed CPUs. The root parameter supports synthetic tests.
+std::vector<int> worker_cpu_order(const std::vector<int>& allowed,
+                                 const std::string& sysfs_root = "/sys/devices/system/cpu");
 }

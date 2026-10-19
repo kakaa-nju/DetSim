@@ -25,6 +25,68 @@ sys.path.insert(0, str(ROOT / "examples"))
 from _support.session import Session, ENV, limits
 TRACER = ROOT / "tracer"
 OUTPUT = None
+WORKER_PLACEMENT = "none"
+
+
+def placement_command(command, mode):
+    return command + " --worker-placement " + mode
+
+
+def original_affinities(pid):
+    """Only the coordinator and its pre-search direct targets, never workers."""
+    leaders = {pid}
+    for task in Path(f"/proc/{pid}/task").iterdir():
+        leaders.update(map(int, (task / "children").read_text().split()))
+    return {int(task.name): sorted(os.sched_getaffinity(int(task.name)))
+            for leader in leaders for task in Path(f"/proc/{leader}/task").iterdir()}
+
+
+def assert_original_affinities(before):
+    for tid, mask in before.items():
+        if sorted(os.sched_getaffinity(tid)) != mask:
+            raise AssertionError(f"original coordinator/target affinity changed: {tid}")
+
+
+def audit_placement(records, mode, allowed):
+    """Audit each incarnation, allowing a killed pre-Task worker no pin log."""
+    slots, active, incarnations = {}, {}, []
+    for record in records:
+        event = record.get("event", record.get("type"))
+        if event == "worker_spawn":
+            cpu = record.get("host_cpu", -1)
+            worker = record["worker"]
+            if mode == "same-cpu":
+                if cpu not in allowed:
+                    raise AssertionError("worker placement outside admitted parent mask")
+                if worker in slots and slots[worker] != cpu:
+                    raise AssertionError("worker restart changed assigned CPU")
+                slots[worker] = cpu
+            elif cpu != -1:
+                raise AssertionError("default placement assigned a CPU")
+            item = dict(record, completed=False)
+            active[worker] = item
+            incarnations.append(item)
+        elif event in ("edge", "done") and not record.get("local", False) and record.get("worker") in active:
+            active[record["worker"]]["completed"] = True
+    for item in incarnations:
+        path = Path(item["directory"]) / "worker.log"
+        text = path.read_text(errors="replace") if path.exists() else ""
+        pins = re.findall(r"HOST_PIN worker=(\d+) cpu=(\d+) pid=(\d+) tid=(\d+) original=([0-9,]+) actual=([0-9,]+)", text)
+        if mode == "none":
+            if pins: raise AssertionError("default placement unexpectedly pinned a thread")
+            continue
+        if item["completed"] and not pins:
+            raise AssertionError("completed worker has no verified placement log")
+        seen = set()
+        for worker, cpu, pid, tid, before, actual in pins:
+            worker, cpu, pid, tid = map(int, (worker, cpu, pid, tid))
+            if worker != item["worker"] or cpu != item["host_cpu"] or actual != str(cpu) or cpu not in map(int, before.split(',')):
+                raise AssertionError("per-thread pin log differs from journal assignment/subset")
+            if tid in seen: raise AssertionError("thread pinned more than once")
+            seen.add(tid)
+        if item["completed"] and (item["pid"] not in seen or len({pin[2] for pin in pins}) < 2):
+            raise AssertionError("pin audit did not include worker leader and target")
+    return {"placement": mode, "slot_cpus": slots, "incarnations": len(incarnations)}
 
 
 def receipts(text):
@@ -58,10 +120,15 @@ class ParallelScenarios(unittest.TestCase):
         return session
 
     def result(self, session, command):
-        reply = session.send(command)
+        before = original_affinities(session.proc.pid)
+        reply = session.send(placement_command(command, WORKER_PLACEMENT))
+        assert_original_affinities(before)
         rows = receipts(reply)
         self.assertEqual(len(rows), 1, reply)
-        return rows[0]
+        result = rows[0]
+        if result.get("artifacts"):
+            audit_placement(self.journal(result), WORKER_PLACEMENT, before[session.proc.pid])
+        return result
 
     def journal(self, result):
         directory = Path(result["artifacts"])
@@ -187,7 +254,7 @@ class ParallelScenarios(unittest.TestCase):
         step = "si timeout" if edge["action"] == "timeout" else "si " + str(max(0, edge["choice"]))
         commands = [f"load --adopt-threads {edge['source']:016x}", f"sw {edge['process']}",
                     f"thread {edge['thread']}", step, "info current",
-                    "parallel 1 0 --storage shared", "q"]
+                    placement_command("parallel 1 0 --storage shared", WORKER_PLACEMENT), "q"]
         # Reuse the existing case directory/config without Session.mkdir; the
         # process has no parent/worker memory caches. This tests normal close,
         # not coordinator mid-append death or power-loss recovery.
@@ -576,7 +643,7 @@ extern "C" const detsim_plugin_v2* detsim_plugin_entry_v2(){return &descriptor;}
         session = None
         try:
             session = self.session("pages")
-            session.proc.stdin.write(b"parallel 2 100 --timeout-ms 30000\n")
+            session.proc.stdin.write((placement_command("parallel 2 100 --timeout-ms 30000", WORKER_PLACEMENT) + "\n").encode())
             session.proc.stdin.flush()
             deadline = time.monotonic() + 10
             stopped = None
@@ -649,12 +716,14 @@ extern "C" const detsim_plugin_v2* detsim_plugin_entry_v2(){return &descriptor;}
 
 
 def main():
-    global TRACER, OUTPUT
+    global TRACER, OUTPUT, WORKER_PLACEMENT
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tracer", type=Path, default=TRACER)
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--worker-placement", choices=("none", "same-cpu"), default="none")
     args, tests = parser.parse_known_args()
     TRACER = args.tracer.resolve()
+    WORKER_PLACEMENT = args.worker_placement
     if args.output_dir:
         OUTPUT = args.output_dir.resolve()
         OUTPUT.mkdir(parents=True, exist_ok=True)

@@ -559,7 +559,7 @@ int cmd_tree(char *args) {
 
 int cmd_parallel(char *args) {
     using namespace detsim::search;
-    const char *usage = "Usage: parallel <workers 1..32> <depth> [--strategy dfs|bfs] [--storage shared|durable] [--retries N] [--timeout-ms N]\n";
+    const char *usage = "Usage: parallel <workers 1..32> <depth> [--strategy dfs|bfs] [--storage shared|durable] [--worker-placement none|same-cpu] [--retries N] [--timeout-ms N]\n";
     std::istringstream input(args ? args : "");
     Options options;
     auto number = [](const std::string& text, uint64_t& value) {
@@ -583,6 +583,8 @@ int cmd_parallel(char *args) {
             options.policy = value == "dfs" ? Policy::Dfs : Policy::Bfs;
         } else if (flag == "--storage" && (value == "shared" || value == "durable")) {
             options.storage = value == "shared" ? Options::Storage::Shared : Options::Storage::Durable;
+        } else if (flag == "--worker-placement" && (value == "none" || value == "same-cpu")) {
+            options.worker_placement = value == "none" ? Options::WorkerPlacement::None : Options::WorkerPlacement::SameCpu;
         } else if (flag == "--retries" && number(value, count) && count <= 100) {
             options.retries = static_cast<unsigned>(count);
         } else if (flag == "--timeout-ms" && number(value, count) && count >= 1 && count <= 3600000) {
@@ -603,6 +605,7 @@ int cmd_parallel(char *args) {
         {"leases", report.frontier.leased}, {"expansions", report.frontier.committed},
         {"duplicates", report.frontier.duplicates}, {"seconds", report.elapsed_seconds},
         {"storage", options.storage == Options::Storage::Shared ? "shared" : "durable"},
+        {"worker_placement", options.worker_placement == Options::WorkerPlacement::None ? "none" : "same-cpu"},
         {"local_completions", report.local_completions},
         {"property_violation", report.property_violation},
         {"artifacts", report.artifacts}, {"error", report.error}};

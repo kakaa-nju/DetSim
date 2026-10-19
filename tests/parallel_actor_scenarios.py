@@ -14,7 +14,10 @@ from native_search_actors import (
 )
 
 
-def run(work, tracer, binary, plugin, mode, backend):
+from parallel_scenarios import placement_command, original_affinities, assert_original_affinities, audit_placement
+
+
+def run(work, tracer, binary, plugin, mode, backend, worker_placement="none"):
     directory = work / f"{mode}-{backend}"
     session = Session(tracer, [str(binary), MODES[mode]], [str(plugin)], directory,
                       backend, 240, choose_points=[{"syscall": 96, "choose": 3}],
@@ -35,7 +38,9 @@ def run(work, tracer, binary, plugin, mode, backend):
         # Parallel searches precede manual references, so neither the state
         # history nor manually persisted successors can manufacture coverage.
         for strategy in ("dfs", "bfs"):
-            reply = checked(session, f"parallel 2 1 --strategy {strategy}")
+            before = original_affinities(session.proc.pid)
+            reply = checked(session, placement_command(f"parallel 2 1 --strategy {strategy}", worker_placement))
+            assert_original_affinities(before)
             (directory / f"parallel-{strategy}.log").write_text(reply)
             results = [json.loads(line) for line in re.findall(r"PARALLEL_RESULT (\{[^\n]+\})", reply)]
             require(len(results) == 1, "missing unique native parallel receipt: " + reply)
@@ -44,6 +49,7 @@ def run(work, tracer, binary, plugin, mode, backend):
             require(current(session) == source, "parallel search changed coordinator state")
             journal = Path(result["artifacts"]) / "journal.jsonl"
             records = [json.loads(line) for line in journal.read_text().splitlines()]
+            placement = audit_placement(records, worker_placement, before[session.proc.pid])
             edge_rows = [record for record in records if record["event"] == "edge"]
             require(len(edge_rows) == result["edges"] == result["attempted_edges"] == len(actions(mode)),
                     "wrong native root action count")
@@ -57,7 +63,7 @@ def run(work, tracer, binary, plugin, mode, backend):
                     all(nodes[target]["depth"] == 1 for target in targets), "incorrect bounded graph depths")
             worker_pids.update(record["pid"] for record in records if record["event"] == "worker_spawn")
             require(all(not Path(f"/proc/{pid}").exists() for pid in worker_pids), "parallel worker remained alive")
-            searches.append({"strategy": strategy, "result": result, "edges": edge_rows, "journal": str(journal)})
+            searches.append({"placement_audit": placement, "strategy": strategy, "result": result, "edges": edge_rows, "journal": str(journal)})
         row["searches"] = searches
         references = []
         for slot, choice in actions(mode):
@@ -111,6 +117,7 @@ def run(work, tracer, binary, plugin, mode, backend):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tracer", type=Path, required=True)
+    parser.add_argument("--worker-placement", choices=("none", "same-cpu"), default="none")
     parser.add_argument("--output", type=Path, default=ROOT / "build/parallel-actor-scenarios")
     parser.add_argument("--modes", nargs="+", choices=["choices", "mixed", "pending"], default=["choices", "mixed", "pending"])
     args = parser.parse_args()
@@ -140,7 +147,7 @@ def main():
             native = command([binary, MODES[mode]], work)
             require(native.returncode == 0 and native.stdout in ("AB", "BA"), "native fixture oracle failed")
             for backend in ("full", "pages"):
-                row = run(work, tracer, binary, plugin, mode, backend)
+                row = run(work, tracer, binary, plugin, mode, backend, args.worker_placement)
                 report["rows"].append(row)
                 print(mode, backend, "PASS" if row["passed"] else row.get("diagnostic", "FAILED"), flush=True)
                 (work / "results.json").write_text(json.dumps(report, indent=2) + "\n")

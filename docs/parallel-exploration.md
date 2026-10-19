@@ -28,6 +28,26 @@ worker 启动先校验 Hello 的 model 和 manifest，再接收任务。启动�
 owned、停止状态、捕获边界及内核注册。失败后的 worker 整体退出，不复用半恢复映像。
 这不是可回滚事务，也没有承诺任意 pthread/Go/JVM 状态已经覆盖。
 
+## 可选 worker CPU 放置
+
+`parallel 8 12 --worker-placement same-cpu` 将每个 worker 及其控制的目标
+物理线程放到同一允许 CPU。默认 `--worker-placement none`，不调整 affinity。
+该选项同时支持 shared/durable，CPU 分配写入 `worker_spawn.host_cpu`，
+属于宿主执行安排，不进入模型身份或快照。worker 重启保留同一 slot 的 CPU。
+
+候选集合取自 bootstrap manifest 的原始 affinity；按 LLC、物理核、SMT
+排列，拓扑资料不可用或矛盾时回退到 CPU 升序。超过允许 CPU 数会轮转复用。
+协调器和原目标保持原 mask，实际绑定延迟到 worker 首个已验证 Task；逐线程
+检查归属、目标 ptrace 停止、原 mask 子集及设置读回，失败终止该 worker。
+后续目标 carrier 继承 anchor 的 mask。运行期间外部修改 affinity/cpuset、
+CPU 热插拔及绕过框架的宿主线程管理不在支持范围；此选项不扩展对直接硬件
+CPU 位置指令的模拟能力。它可能增加 IO 线程的 CPU 竞争，需逐工作负载测量。
+
+组件回归：`make NP=2 check-worker-placement`。原生审计：
+`python3 tests/parallel_scenarios.py --tracer ./tracer --worker-placement same-cpu`
+（NP=2）；多线程 actor 回归使用 NP=1 的 `parallel_actor_scenarios.py` 同名选项。
+原生审计检查 coordinator/原目标 mask 不变、逐线程绑定日志及重启分配一致。
+
 ## 一步任务与共享 frontier
 
 `src/core/search/frontier` 管理唯一节点表、pending 索引、深度及租约。DFS 后进先出

@@ -10,6 +10,8 @@ struct Options {
     // barriers/finalization retain durability. Durable uses complete bundles.
     enum class Storage { Shared, Durable };
     Storage storage = Storage::Shared;
+    enum class WorkerPlacement { None, SameCpu };
+    WorkerPlacement worker_placement = WorkerPlacement::None;
     unsigned workers = 2;
     uint64_t depth = 1;
     Policy policy = Policy::Dfs;
