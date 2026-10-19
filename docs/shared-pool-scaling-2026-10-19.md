@@ -666,3 +666,16 @@ NP=1 production构建，same-cpu choices/mixed/pending × full/pages六例；
 产品journal验证选核为0,3,1,4,2,5,6,9，与artifact预期的均衡排列一致。
 随后已启动depth16独立参考及1/2/4/6/8/12新会话矩阵，仍在运行，暂不发布
 其吞吐结果。该更大图用于判断小图启动/收尾及宽度对扩展性的影响。
+
+
+### depth16 独立参考验证完成，扩展矩阵仍在运行
+
+固定产品二进制的depth16参考已完整通过，tracer退出0：63418节点、112305条
+实际且唯一边、零重试。canonical SHA为
+`7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630`。
+参考生成中的12-worker native搜索37.4390秒、命令37.7471秒；随后独立原生DFS
+命令231.7836秒完成节点/首父边投影验证。该DFS不构成独立全边oracle，
+其工作量也不能作为并行加速比分母。参考会话总计278.6153秒，包含验证，
+不作为纯并行全链路吞吐。权威结果在
+`build/shared-parallel/product-placement-large16/reference12/run-f_g2gsiz/results.json`。
+后续fresh reference-only的1/2/4/6/8/12正在顺序运行，暂未形成完整加速比。
