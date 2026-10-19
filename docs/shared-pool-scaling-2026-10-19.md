@@ -841,3 +841,47 @@ write撤销proof、单页不同均实际回退。native日志最终累计hits2/f
 
 仍待现有stateIO/mapping/pages广门禁、更多guard/brk/normalize/multinode场景和
 原生同图/反例重放；吞吐尚未测。产品恢复代码没有这项快路。
+
+
+## 等价映像首版：正确性门禁扩展，但吞吐未改善
+
+资源oracle已补强：capture提交B时同时安装实际B模型资源，恢复前独立断言
+B stdout内容/offset确与A不同，再检验恢复A。最终NP1候选与原实现均通过
+相同GPR/xstate/完整字节/canonical maps断言；覆盖显式零/非零PROT_NONE、
+真实brk增长及maps/pages相同但brk仅差1字节、mprotect/backing差异、合法
+ENTRY归一化与proof撤销。NP3候选及原实现通过全节点normalize顺序观察、
+early invalid-root及later backing失败的dirty/proof/未commit检查。NP3模型
+资源检查具体为stdout内容/offset，不扩大到完整kernel/network恢复保证。
+独立源码/oracle审查通过。冷generation/poison仍是组件范围证据。
+
+验证元数据曾把日志提到的合成ID123计为owned线程，现已撤回所有精确owned
+计数及完整回收声明；通用日志不等于权威fork/clone所有权记录，不以此证明
+cleanup。原日志保留，README和verification.json分别列明该证据限制。
+
+首版实际Raft独立参考及12个两轮fresh reference-only会话均通过同图；
+`equivalent-memory-pilot/paired-summary.json`：
+
+| worker | 原实现中位秒 | 等价映像逐字段比较中位秒 |
+| --- | ---: | ---: |
+| 1 | 31.0525 | 31.4616 |
+| 8 | 6.7736 | 6.8889 |
+| 12 | 6.2826 | 6.6887 |
+
+首版没有收益，不合入。原因分析必须考虑已有优化：restore_memory_mappings
+在Full resident且maps/brk相同时已提前返回；recover_mem_reg_snapshot也逐页
+按已有key跳过。因此新捷径不是从零消除实际/proc VMA重建，而是在额外比较
+后再省一部分已优化路径。独立参考中的串行oracle记录hits4619/fallback23259，
+这不是全部worker计数，也不是新保存状态数量，不拿它直接推导吞吐收益。
+
+仅比较循环改用packed RegionInfo(33B)/PageRef(20B)整块memcmp的v2已通过
+原predicate/native断言及empty/count边界；无新缓存、状态字段或证明豁免。
+其独立同图与两轮吞吐对照正在运行，产品恢复仍为原实现。
+
+### 未实现的 status FD 缓存假设
+
+独立调用图审查显示：仅限sys_state::recover_running_state的安全Scope中，
+每物理TID只查询一次pending，预期queries==distinct TIDs、FD reuse为零；
+这属于源码推导，不是实测命中率。全局热点来自prepare/adopt/capture等多个
+区间，不能据此为最窄Scope造LRU。扩大Scope还涉及plugin/fork/凭证边界，
+缓存占FD也会使其他maps/CAS打开遭遇EMFILE，不能靠status-open重试保证
+资源失败等价。故暂不实现，不减少任何fresh pending/rseq/停驻检查。
