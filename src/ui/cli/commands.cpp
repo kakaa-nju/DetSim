@@ -559,7 +559,7 @@ int cmd_tree(char *args) {
 
 int cmd_parallel(char *args) {
     using namespace detsim::search;
-    const char *usage = "Usage: parallel <workers 1..32> <depth> [--strategy dfs|bfs] [--storage shared|durable] [--worker-placement none|same-cpu] [--retries N] [--timeout-ms N]\n";
+    const char *usage = "Usage: parallel <workers 1..32> <depth> [--strategy dfs|bfs] [--storage shared|durable] [--worker-placement none|same-cpu] [--worker-locality none|roots] [--retries N] [--timeout-ms N]\n";
     std::istringstream input(args ? args : "");
     Options options;
     auto number = [](const std::string& text, uint64_t& value) {
@@ -585,6 +585,8 @@ int cmd_parallel(char *args) {
             options.storage = value == "shared" ? Options::Storage::Shared : Options::Storage::Durable;
         } else if (flag == "--worker-placement" && (value == "none" || value == "same-cpu")) {
             options.worker_placement = value == "none" ? Options::WorkerPlacement::None : Options::WorkerPlacement::SameCpu;
+        } else if (flag == "--worker-locality" && (value == "none" || value == "roots")) {
+            options.worker_locality = value == "none" ? Options::WorkerLocality::None : Options::WorkerLocality::Roots;
         } else if (flag == "--retries" && number(value, count) && count <= 100) {
             options.retries = static_cast<unsigned>(count);
         } else if (flag == "--timeout-ms" && number(value, count) && count >= 1 && count <= 3600000) {
@@ -607,6 +609,12 @@ int cmd_parallel(char *args) {
         {"storage", options.storage == Options::Storage::Shared ? "shared" : "durable"},
         {"worker_placement", options.worker_placement == Options::WorkerPlacement::None ? "none" : "same-cpu"},
         {"local_completions", report.local_completions},
+        {"worker_locality", report.worker_locality == Options::WorkerLocality::None ? "none" : "roots"},
+        {"locality_requests",report.locality_requests},{"locality_candidates",report.locality_candidates},
+        {"locality_original_overlap",report.locality_original_overlap},{"locality_selected_overlap",report.locality_selected_overlap},
+        {"locality_selection_seconds",report.locality_selection_seconds},
+        {"remote_tasks_with_history",report.remote_tasks_with_history},
+        {"remote_original_overlap",report.remote_original_overlap},{"remote_selected_overlap",report.remote_selected_overlap},
         {"property_violation", report.property_violation},
         {"artifacts", report.artifacts}, {"error", report.error}};
     if (report.violation_state) receipt["violation_state"] = *report.violation_state;

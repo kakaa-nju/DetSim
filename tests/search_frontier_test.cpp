@@ -143,19 +143,30 @@ std::map<StateKey,uint64_t> oracle(uint64_t bound) {
     }
     return seen;
 }
-void equivalence() {
+void equivalence(bool locality = false) {
     for(auto policy:{Policy::Dfs,Policy::Bfs,Policy::Priority})
     for(unsigned workers:{1,2,4}) for(uint64_t bound:{2,3,4,10}) for(bool reverse:{false,true}) {
         Frontier f(bound, policy, policy==Policy::Priority ? Frontier::Priority([](StateKey k,uint64_t) {return int64_t(k%3);}) : Frontier::Priority{});
         f.admit(0);
         std::set<StateKey> completed;
+        std::map<StateKey,uint64_t> expanded_depth;
         while(f.status()==Status::Running) {
             std::vector<Ticket> batch;
-            for(unsigned w=0;w<workers;++w) if(auto t=f.lease(w)) batch.push_back(*t);
+            for(unsigned w=0;w<workers;++w) {
+                auto t = locality ? f.lease(w, [w](StateKey key) { return -int64_t((key+w)%3); }, 3) : f.lease(w);
+                if(t) batch.push_back(*t);
+            }
             assert(!batch.empty());
             if(reverse) std::reverse(batch.begin(),batch.end());
             for(auto t:batch) {
-                if(t.may_expand) assert(completed.insert(t.state).second);
+                if(t.may_expand) {
+                    if (!locality) assert(completed.insert(t.state).second);
+                    else {
+                        auto prior = expanded_depth.find(t.state);
+                        assert(prior == expanded_depth.end() || t.depth < prior->second);
+                        expanded_depth[t.state] = t.depth;
+                    }
+                }
                 const auto& successors=graph.at(t.state);
                 if(successors.empty()) f.commit(t,{ResultKind::Terminal,{},{}});
                 else if(!t.may_expand) f.commit(t,{ResultKind::DepthCut,{},{}});
@@ -203,7 +214,43 @@ void indexed_dispatch_scaling() {
     bfs.commit(t, {ResultKind::Terminal, {}, {}});
     assert(bfs.lease(2)->state == 2);
 }
+void locality_ordering() {
+    const auto same = [](StateKey) -> int64_t { return -7; };
+    for (auto policy : {Policy::Dfs, Policy::Bfs}) {
+        Frontier f(4,policy); for(StateKey key:{1,2,3,4})f.admit(key);
+        std::vector<StateKey> inspected;
+        auto chosen=f.lease(1,[&](StateKey key) {inspected.push_back(key);return int64_t(key);},2);
+        assert(chosen->state==(policy==Policy::Bfs?2:4));
+        assert(inspected==(policy==Policy::Bfs?std::vector<StateKey>{1,2}:std::vector<StateKey>{4,3}));
+        Frontier ties(4,policy);ties.admit(8);ties.admit(2);
+        assert(ties.lease(1,same)->state==(policy==Policy::Bfs?8:2));
+        Frontier zero(4,policy);zero.admit(1);
+        rejects([&]{zero.lease(1,same,0);});
+        assert(zero.lease(1)->lease_id==1);
+        Frontier failing(4,policy);failing.admit(1);failing.admit(2);
+        unsigned calls=0;
+        rejects([&]{failing.lease(1,[&](StateKey)->int64_t {if(++calls==2)throw std::runtime_error("score failed");return 99;});});
+        assert(failing.counters().leased==0 && failing.counters().dispatch_candidates==0);
+        for(const auto& [key,node]:failing.nodes()){(void)key;assert(node.phase==NodePhase::Pending&&!node.ticket);}
+        assert(failing.lease(1)->lease_id==1);
+    }
+    Frontier bounded(4,Policy::Bfs);for(StateKey key=1;key<=40;++key)bounded.admit(key);
+    size_t candidates=0;
+    assert(bounded.lease(1,[&](StateKey key){++candidates;return int64_t(key);})->state==32);
+    assert(candidates==32);
+    Frontier bfs(4,Policy::Bfs);bfs.admit(1);bfs.admit(2);
+    auto first=*bfs.lease(1);bfs.commit(first,edges({3}));
+    std::vector<StateKey> seen;
+    auto second=*bfs.lease(2,[&](StateKey key){seen.push_back(key);return int64_t(key);});
+    assert(second.state==2 && seen==std::vector<StateKey>{2});
+    assert(!bfs.lease(3,[](StateKey)->int64_t {throw std::runtime_error("deeper node scored through barrier");}));
+    bfs.commit(second,{ResultKind::Terminal,{},{}});
+    assert(bfs.lease(3,same)->state==3);
+    Frontier priority(4,Policy::Priority,[](StateKey key,uint64_t){return int64_t(key);});
+    priority.admit(2);priority.admit(1);
+    assert(priority.lease(1,[](StateKey)->int64_t {throw std::runtime_error("Priority must ignore locality");})->state==1);
+}
 int main() {
-    ordering(); recovery(); depth(); capacity_and_outcomes(); equivalence(); indexed_dispatch_scaling();
-    std::cout << "frontier: ordering, leases, cuts, >512 fanout, 72 graph runs, and indexed dispatch scaling passed\n";
+    ordering(); recovery(); depth(); capacity_and_outcomes(); equivalence(); equivalence(true); locality_ordering(); indexed_dispatch_scaling();
+    std::cout << "frontier: ordering, leases, cuts, >512 fanout, 72 baseline + 72 locality graph runs, bounded scoring, and indexed dispatch scaling passed\n";
 }

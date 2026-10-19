@@ -26,10 +26,36 @@ from _support.session import Session, ENV, limits
 TRACER = ROOT / "tracer"
 OUTPUT = None
 WORKER_PLACEMENT = "none"
+WORKER_LOCALITY = "none"
 
 
 def placement_command(command, mode):
     return command + " --worker-placement " + mode
+
+
+def locality_command(command, requested):
+    # Matrices explicitly exercise roots on BFS and preserve none on DFS.
+    # Preserve an explicit override so unsupported-mode rejection is testable.
+    parts = shlex.split(command)
+    for index, part in enumerate(parts):
+        if part == "--worker-locality": return command, parts[index + 1]
+        if part.startswith("--worker-locality="): return command, part.split("=", 1)[1]
+    bfs = "--strategy=bfs" in parts or any(parts[i:i+2] == ["--strategy", "bfs"] for i in range(len(parts)))
+    chosen = requested if bfs else "none"
+    return command + " --worker-locality " + chosen, chosen
+
+
+def audit_locality(result, chosen):
+    if result.get("worker_locality") != chosen:
+        raise AssertionError("parallel receipt locality differs from explicit command")
+    fields = ("locality_requests", "locality_candidates", "locality_original_overlap", "locality_selected_overlap",
+              "remote_tasks_with_history", "remote_original_overlap", "remote_selected_overlap", "locality_selection_seconds")
+    if chosen == "none" and any(result[name] != 0 for name in fields):
+        raise AssertionError("disabled locality performed hint/scorer work")
+    if chosen == "roots" and result["status"] != "failed" and result["edges"] and not result["locality_candidates"]:
+        raise AssertionError("roots BFS run did not evaluate any locality candidates")
+    if result["locality_selected_overlap"] < result["locality_original_overlap"] or result["remote_selected_overlap"] < result["remote_original_overlap"]:
+        raise AssertionError("selected roots scored worse than original eligible candidate")
 
 
 def original_affinities(pid):
@@ -121,11 +147,13 @@ class ParallelScenarios(unittest.TestCase):
 
     def result(self, session, command):
         before = original_affinities(session.proc.pid)
-        reply = session.send(placement_command(command, WORKER_PLACEMENT))
+        selected_command, locality = locality_command(command, WORKER_LOCALITY)
+        reply = session.send(placement_command(selected_command, WORKER_PLACEMENT))
         assert_original_affinities(before)
         rows = receipts(reply)
         self.assertEqual(len(rows), 1, reply)
         result = rows[0]
+        audit_locality(result, locality)
         if result.get("artifacts"):
             audit_placement(self.journal(result), WORKER_PLACEMENT, before[session.proc.pid])
         return result
@@ -179,6 +207,13 @@ class ParallelScenarios(unittest.TestCase):
         self.assertEqual(zero["status"], "bounded", zero)
         self.assertEqual(zero["edges"], 0, zero)
         self.assertEqual(zero["nodes"], 1, zero)
+
+    def test_roots_locality_rejects_dfs(self):
+        session = self.session("pages")
+        result = self.result(session, "parallel 1 1 --strategy dfs --worker-locality roots")
+        self.assertEqual(result["status"], "failed", result)
+        self.assertIn("requires BFS", result["error"])
+        self.assertFalse(result["artifacts"], "unsupported strategy spawned work")
 
     def test_full_graph_equivalence(self):
         self.matrix("full")
@@ -252,9 +287,15 @@ class ParallelScenarios(unittest.TestCase):
         self.assertTrue(removed, "must remove actual worker private stores before cold reopen")
         self.assertTrue((session.directory / "sstate/packed.dat").is_file())
         step = "si timeout" if edge["action"] == "timeout" else "si " + str(max(0, edge["choice"]))
+        cold_command = "parallel 1 0 --storage shared"
+        if WORKER_LOCALITY == "roots": cold_command += " --strategy bfs"
+        cold_command, cold_locality = locality_command(cold_command, WORKER_LOCALITY)
+        if WORKER_LOCALITY == "roots":
+            self.assertEqual(cold_locality, "roots")
+            self.assertIn("--worker-locality roots", cold_command)
         commands = [f"load --adopt-threads {edge['source']:016x}", f"sw {edge['process']}",
                     f"thread {edge['thread']}", step, "info current",
-                    placement_command("parallel 1 0 --storage shared", WORKER_PLACEMENT), "q"]
+                    placement_command(cold_command, WORKER_PLACEMENT), "q"]
         # Reuse the existing case directory/config without Session.mkdir; the
         # process has no parent/worker memory caches. This tests normal close,
         # not coordinator mid-append death or power-loss recovery.
@@ -643,7 +684,13 @@ extern "C" const detsim_plugin_v2* detsim_plugin_entry_v2(){return &descriptor;}
         session = None
         try:
             session = self.session("pages")
-            session.proc.stdin.write((placement_command("parallel 2 100 --timeout-ms 30000", WORKER_PLACEMENT) + "\n").encode())
+            death_command = "parallel 2 100 --timeout-ms 30000"
+            if WORKER_LOCALITY == "roots": death_command += " --strategy bfs"
+            death_command, death_locality = locality_command(death_command, WORKER_LOCALITY)
+            if WORKER_LOCALITY == "roots":
+                self.assertEqual(death_locality, "roots")
+                self.assertIn("--worker-locality roots", death_command)
+            session.proc.stdin.write((placement_command(death_command, WORKER_PLACEMENT) + "\n").encode())
             session.proc.stdin.flush()
             deadline = time.monotonic() + 10
             stopped = None
@@ -716,14 +763,16 @@ extern "C" const detsim_plugin_v2* detsim_plugin_entry_v2(){return &descriptor;}
 
 
 def main():
-    global TRACER, OUTPUT, WORKER_PLACEMENT
+    global TRACER, OUTPUT, WORKER_PLACEMENT, WORKER_LOCALITY
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tracer", type=Path, default=TRACER)
     parser.add_argument("--output-dir", type=Path)
     parser.add_argument("--worker-placement", choices=("none", "same-cpu"), default="none")
+    parser.add_argument("--worker-locality", choices=("none", "roots"), default="none")
     args, tests = parser.parse_known_args()
     TRACER = args.tracer.resolve()
     WORKER_PLACEMENT = args.worker_placement
+    WORKER_LOCALITY = args.worker_locality
     if args.output_dir:
         OUTPUT = args.output_dir.resolve()
         OUTPUT.mkdir(parents=True, exist_ok=True)

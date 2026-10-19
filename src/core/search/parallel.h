@@ -12,6 +12,8 @@ struct Options {
     Storage storage = Storage::Shared;
     enum class WorkerPlacement { None, SameCpu };
     WorkerPlacement worker_placement = WorkerPlacement::None;
+    enum class WorkerLocality { None, Roots };
+    WorkerLocality worker_locality = WorkerLocality::None;
     unsigned workers = 2;
     uint64_t depth = 1;
     Policy policy = Policy::Dfs;
@@ -21,11 +23,16 @@ struct Options {
 };
 enum class ParallelStatus { Complete, Bounded, Violation, Failed };
 struct Report {
+    Options::WorkerLocality worker_locality = Options::WorkerLocality::None;
     ParallelStatus status = ParallelStatus::Failed;
     bool property_violation = false;
     std::optional<StateKey> violation_state;
     uint64_t nodes = 0, edges = 0, attempted_edges = 0, retries = 0;
     uint64_t local_completions = 0;
+    uint64_t locality_requests = 0, locality_candidates = 0;
+    uint64_t locality_original_overlap = 0, locality_selected_overlap = 0;
+    uint64_t remote_tasks_with_history = 0, remote_original_overlap = 0, remote_selected_overlap = 0;
+    double locality_selection_seconds = 0;
     Counters frontier;
     double elapsed_seconds = 0;
     std::string artifacts;

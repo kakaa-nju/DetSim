@@ -96,6 +96,7 @@ struct Subreaper {
 };
 struct Worker {
     WorkerId id;
+    std::optional<std::array<hash_type, NP>> last_source_roots;
     int host_cpu = -1;
     pid_t pid = -1;
     unsigned incarnation = 0, startup_failures = 0;
@@ -133,6 +134,7 @@ struct Worker {
         }
     }
     void terminate() noexcept {
+        last_source_roots.reset();
         // Final inventory is unconditional. Subreaper cleanup also owns any
         // descendants orphaned before an observation could see them.
         try { observe_descendants(); } catch (...) {}
@@ -256,14 +258,32 @@ const char* phase_name(NodePhase phase) {
 }
 Report run_parallel(const sys_state& root, const Options& options) {
     Report report;
+    report.worker_locality = options.worker_locality;
     const auto started = Clock::now();
     std::unique_ptr<Frontier> frontier;
     std::unique_ptr<Journal> journal;
     auto object_cache = std::make_shared<wire::ObjectCache>();
     std::shared_ptr<snapshot::SharedObjectPool> pool;
     std::string shared_pool_path;
+    using Roots = std::array<hash_type, NP>;
+    const bool roots_locality = options.worker_locality == Options::WorkerLocality::Roots;
+    std::optional<std::map<StateKey, Roots>> saved_roots;
+    uint64_t locality_requests = 0, locality_candidates = 0;
+    uint64_t locality_original_overlap = 0, locality_selected_overlap = 0;
+    double locality_selection_seconds = 0;
+    uint64_t remote_tasks_with_history = 0, remote_original_overlap = 0, remote_selected_overlap = 0;
+    const auto remember_roots = [&](const sys_state& state) {
+        if (!roots_locality) return;
+        Roots roots{};
+        std::copy(std::begin(state.ts_hash), std::end(state.ts_hash), roots.begin());
+        const auto [it, inserted] = saved_roots->emplace(state.ss_hash, roots);
+        require(inserted || it->second == roots, "Validated state root tuple changed");
+    };
     try {
         check_interrupted();
+        require(options.worker_locality == Options::WorkerLocality::None || roots_locality, "Invalid worker locality");
+        require(!roots_locality || options.policy == Policy::Bfs, "Root worker locality requires BFS");
+        if (roots_locality) saved_roots.emplace();
         std::vector<int> placement_cpus;
         if (options.worker_placement == Options::WorkerPlacement::SameCpu) {
             require_bootstrap_cpu_affinity();
@@ -300,6 +320,7 @@ Report run_parallel(const sys_state& root, const Options& options) {
             store.attach_shared_pool(shared_pool_path, false);
             snapshot::publish_shared_state(root.ss_hash, *pool);
         } else (void)snapshot::export_bundle(root.ss_hash);
+        remember_roots(root);
         frontier->admit(root.ss_hash);
         Subreaper subreaper;
         std::vector<std::unique_ptr<Worker>> workers;
@@ -342,7 +363,29 @@ Report run_parallel(const sys_state& root, const Options& options) {
                     catch (const std::exception& error) { lost(worker,error.what()); continue; }
                 }
                 if (worker.hello && !worker.ticket) {
-                    if (auto ticket = frontier->lease(worker.id)) {
+                    std::optional<Ticket> selected;
+                    uint64_t selection_original = 0, selection_best = 0;
+                    if (roots_locality) {
+                        uint64_t count = 0, original = 0, best = 0;
+                        const auto started_selection = Clock::now();
+                        selected = frontier->lease(worker.id, [&](StateKey key) -> int64_t {
+                            const auto& roots = saved_roots->at(key); // Already validated; no I/O.
+                            uint64_t overlap = 0;
+                            if (worker.last_source_roots)
+                                for (size_t node = 0; node < NP; ++node)
+                                    overlap += roots[node] == (*worker.last_source_roots)[node];
+                            if (!count) original = overlap;
+                            best = std::max(best, overlap); ++count;
+                            return static_cast<int64_t>(overlap);
+                        });
+                        locality_selection_seconds += std::chrono::duration<double>(Clock::now() - started_selection).count();
+                        ++locality_requests; locality_candidates += count;
+                        if (selected) {
+                            locality_original_overlap += original; locality_selected_overlap += best;
+                            selection_original = original; selection_best = best;
+                        }
+                    } else selected = frontier->lease(worker.id);
+                    if (auto ticket = selected) {
                         worker.ticket = ticket;
                         auto ready = pool ? snapshot::load_shared_state(ticket->state, root.model_identity, *pool)
                                           : snapshot::ReadyState{sys_state(ticket->state), {}};
@@ -385,6 +428,11 @@ Report run_parallel(const sys_state& root, const Options& options) {
                         check_interrupted();
                         try { worker.channel->send(wire::Task{*ticket,std::move(bundle)}); }
                         catch (const std::exception& error) { lost(worker,error.what()); continue; }
+                        if (roots_locality && worker.last_source_roots) {
+                            ++remote_tasks_with_history;
+                            remote_original_overlap += selection_original;
+                            remote_selected_overlap += selection_best;
+                        }
                         check_interrupted();
                         worker.deadline = Clock::now() + std::chrono::milliseconds(options.timeout_ms);
                         progressed = true;
@@ -459,6 +507,7 @@ Report run_parallel(const sys_state& root, const Options& options) {
                     const auto target = pool ? snapshot::import_shared_bundle(edge->bundle, root.model_identity, *pool).state
                                              : snapshot::import_bundle(edge->bundle, root.model_identity);
                     require(edge->property_violation == target.property_failed, "Worker property result differs from saved state");
+                    remember_roots(target);
                     worker.channel->confirm_objects();
                     if (edge->property_violation) worker.violation = edge->target;
                     worker.successors.push_back(edge->target); ++report.attempted_edges;
@@ -516,6 +565,7 @@ Report run_parallel(const sys_state& root, const Options& options) {
                         } else throw std::runtime_error("Invalid worker completion kind");
                     }
                     frontier->commit(ticket,std::move(expansion));
+                    if (roots_locality) worker.last_source_roots = saved_roots->at(ticket.state);
                 }
                 journal->write({{"event","done"},{"worker",worker.id},{"lease",ticket.lease_id},{"source",ticket.state},
                                {"kind",static_cast<int>(done->kind)},{"emitted",done->emitted}});
@@ -551,11 +601,24 @@ Report run_parallel(const sys_state& root, const Options& options) {
         try {
             if (frontier) for (const auto& [key,node] : frontier->nodes())
                 journal->write({{"event","node"},{"state",key},{"depth",node.depth},{"phase",phase_name(node.phase)}});
-            journal->write({{"event","summary"},{"status",static_cast<int>(report.status)},{"nodes",report.nodes},
+            journal->write({{"event","summary"},{"worker_locality",roots_locality ? "roots" : "none"},{"status",static_cast<int>(report.status)},{"nodes",report.nodes},
                            {"edges",report.edges},{"attempted_edges",report.attempted_edges},{"retries",report.retries},{"elapsed_seconds",report.elapsed_seconds},
-                           {"error",report.error},{"violation",report.property_violation}});
+                           {"error",report.error},{"violation",report.property_violation},
+                           {"locality_requests",locality_requests},{"locality_candidates",locality_candidates},
+                           {"locality_original_overlap",locality_original_overlap},{"locality_selected_overlap",locality_selected_overlap},
+                           {"locality_selection_seconds",locality_selection_seconds},
+                           {"remote_tasks_with_history",remote_tasks_with_history},
+                           {"remote_original_overlap",remote_original_overlap},{"remote_selected_overlap",remote_selected_overlap}});
         } catch (const std::exception& error) { report.status = ParallelStatus::Failed; report.error = error.what(); }
     }
+    report.locality_requests = locality_requests;
+    report.locality_candidates = locality_candidates;
+    report.locality_original_overlap = locality_original_overlap;
+    report.locality_selected_overlap = locality_selected_overlap;
+    report.remote_tasks_with_history = remote_tasks_with_history;
+    report.remote_original_overlap = remote_original_overlap;
+    report.remote_selected_overlap = remote_selected_overlap;
+    report.locality_selection_seconds = locality_selection_seconds;
     return report;
 }
 } // namespace detsim::search

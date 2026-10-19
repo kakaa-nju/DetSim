@@ -10,7 +10,8 @@
 无探针depth16同图矩阵为63418节点/112305边：1-worker185.51秒、
 8-worker41.62秒（4.46倍）、12-worker38.01秒（4.88倍），每格一次。
 8-worker至少5.6倍的目标仍未达到。分桶64布局未显示收益，未合入。
-局部性派发仍为待产品门禁的候选，不能将其性能当作已发布能力。
+局部性派发已通过产品门禁，默认none；下文性能来自隔离候选，最终产品版
+尚未重测大图，不能直接沿用为发布版收益。
 本文件后续按实验顺序记录；开头的v1数据是历史基线，后续各节有独立二进制
 与计时范围，不能跨版本或混合后置oracle收尾拼接加速比。
 
@@ -802,3 +803,21 @@ baseline/candidate对照已启动，尚无正确性或收益结论，产品派�
 等价时，复用已有Full resident证明，仍保留binding/signal/normalize、header
 leader regs、alive regs/xstate和资源恢复。verify走原全字节oracle路径。
 此原型未构建或测试，产品不采用这项捷径。
+
+
+## root 局部性可选产品门禁
+
+源码经独立只读审查；共同finalize_lease消除两条路径重复的租约提交逻辑，
+默认none不建立root map、不评分。roots仅BFS，shared/durable共用原校验。
+所有NP调用对象在Options/Report布局变更后统一重编译，没有用旧CLI对象
+拼接新返回类型。新鲜结果在`root-locality-product/`：
+
+- NP=2 production build及纯Frontier旧72组+locality72组、窗口/平分/异常/屏障通过。
+- same-cpu+roots 原生16项通过；same-cpu+none16项通过；默认none放置+none16项通过。
+- roots suite的冷重开与parent-death明确加BFS并断言roots确实传递；没有用默认DFS回退冒充该覆盖。
+- NP=1 production build，roots的choices/mixed/pending × full/pages六例通过。
+- `make CC=/usr/bin/gcc CXX=/usr/bin/g++ check`、NP=2 `check-worker-placement`通过。
+
+这证明当前有界案例和故障/重放回归，未证明任意程序/任意调度的模型完整性。
+大图候选收益仍未重测，不默认启用。另一项memory-image等价恢复仍只在私有
+原型中，尚缺原生专门oracle，未修改产品恢复代码。

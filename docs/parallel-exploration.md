@@ -51,6 +51,24 @@ CPU 位置指令的模拟能力。它可能增加 IO 线程的 CPU 竞争，需�
 （NP=2）；多线程 actor 回归使用 NP=1 的 `parallel_actor_scenarios.py` 同名选项。
 原生审计检查 coordinator/原目标 mask 不变、逐线程绑定日志及重启分配一致。
 
+## 可选 root 局部性派发
+
+`parallel 12 16 --strategy bfs --worker-placement same-cpu --worker-locality roots`
+在当前 BFS 合法层的前32个 pending 项中，优先选择与该 worker 上次正常完成的
+source 在相同 node 位置具有更多相同 tracee root 的任务。默认 `none` 保留
+原派发顺序；`roots` 配合 DFS/Priority 明确失败。Raft 性能驱动支持同名参数，
+启用时要求 `--strategies bfs`，结果记录模式，默认不向历史 binary 追加新参数。
+
+提示来自已验证 Edge 的 root tuple；仅改变排序，不授权跳过任何恢复或验证。
+重启清空 worker 的历史，本地终点/预算/深度完成不更新提示。coordinator
+增加 O(NP×所见状态数) 的 root map 和有限窗口评分开销，shared/durable均可用。
+报告分别记录全部评分开销及有历史的实际远端 Task overlap；重合数不能直接
+当成恢复工作节省。测试驱动的 `--worker-locality roots` 对 BFS启用；DFS对照
+保留none，并另验证 roots+DFS明确拒绝。
+
+当前四轮 Raft artifact 对照在12 worker有约9%的中位改善，8 worker方向混合，
+不保证所有目标加速；产品默认关闭。具体证据与大图缺口见性能报告。
+
 ## 一步任务与共享 frontier
 
 `src/core/search/frontier` 管理唯一节点表、pending 索引、深度及租约。DFS 后进先出

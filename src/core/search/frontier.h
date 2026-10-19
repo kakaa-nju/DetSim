@@ -55,12 +55,17 @@ public:
                       size_t max_states = std::numeric_limits<size_t>::max());
     bool admit(StateKey state, uint64_t depth = 0);
     std::optional<Ticket> lease(WorkerId worker);
+    // Higher signed score wins; ties retain original dispatch order. Scores
+    // must not mutate/reenter this Frontier. Priority policy ignores this hint.
+    using Scorer = std::function<int64_t(StateKey)>;
+    std::optional<Ticket> lease(WorkerId worker, const Scorer& scorer, size_t window = 32);
     void commit(const Ticket& ticket, Expansion expansion);
     size_t worker_lost(WorkerId worker);
     Status status() const;
     const std::map<StateKey, Node>& nodes() const { return nodes_; }
     const Counters& counters() const { return counters_; }
 private:
+    Ticket finalize_lease(WorkerId worker, StateKey key, uint64_t candidates);
     void propagate(StateKey state, uint64_t depth);
     void ensure_healthy() const;
     void index_add(StateKey key, const Node& node);

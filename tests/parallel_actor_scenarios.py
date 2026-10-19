@@ -14,10 +14,10 @@ from native_search_actors import (
 )
 
 
-from parallel_scenarios import placement_command, original_affinities, assert_original_affinities, audit_placement
+from parallel_scenarios import placement_command, original_affinities, assert_original_affinities, audit_placement, locality_command, audit_locality
 
 
-def run(work, tracer, binary, plugin, mode, backend, worker_placement="none"):
+def run(work, tracer, binary, plugin, mode, backend, worker_placement="none", worker_locality="none"):
     directory = work / f"{mode}-{backend}"
     session = Session(tracer, [str(binary), MODES[mode]], [str(plugin)], directory,
                       backend, 240, choose_points=[{"syscall": 96, "choose": 3}],
@@ -39,12 +39,14 @@ def run(work, tracer, binary, plugin, mode, backend, worker_placement="none"):
         # history nor manually persisted successors can manufacture coverage.
         for strategy in ("dfs", "bfs"):
             before = original_affinities(session.proc.pid)
-            reply = checked(session, placement_command(f"parallel 2 1 --strategy {strategy}", worker_placement))
+            selected_command, locality = locality_command(f"parallel 2 1 --strategy {strategy}", worker_locality)
+            reply = checked(session, placement_command(selected_command, worker_placement))
             assert_original_affinities(before)
             (directory / f"parallel-{strategy}.log").write_text(reply)
             results = [json.loads(line) for line in re.findall(r"PARALLEL_RESULT (\{[^\n]+\})", reply)]
             require(len(results) == 1, "missing unique native parallel receipt: " + reply)
             result = results[0]
+            audit_locality(result, locality)
             require(result["status"] == "bounded" and result["retries"] == 0, str(result))
             require(current(session) == source, "parallel search changed coordinator state")
             journal = Path(result["artifacts"]) / "journal.jsonl"
@@ -120,6 +122,7 @@ def main():
     parser.add_argument("--worker-placement", choices=("none", "same-cpu"), default="none")
     parser.add_argument("--output", type=Path, default=ROOT / "build/parallel-actor-scenarios")
     parser.add_argument("--modes", nargs="+", choices=["choices", "mixed", "pending"], default=["choices", "mixed", "pending"])
+    parser.add_argument("--worker-locality", choices=("none", "roots"), default="none")
     args = parser.parse_args()
     tracer = args.tracer.resolve()
     output = args.output.resolve()
@@ -147,7 +150,7 @@ def main():
             native = command([binary, MODES[mode]], work)
             require(native.returncode == 0 and native.stdout in ("AB", "BA"), "native fixture oracle failed")
             for backend in ("full", "pages"):
-                row = run(work, tracer, binary, plugin, mode, backend, args.worker_placement)
+                row = run(work, tracer, binary, plugin, mode, backend, args.worker_placement, args.worker_locality)
                 report["rows"].append(row)
                 print(mode, backend, "PASS" if row["passed"] else row.get("diagnostic", "FAILED"), flush=True)
                 (work / "results.json").write_text(json.dumps(report, indent=2) + "\n")

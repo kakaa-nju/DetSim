@@ -105,7 +105,35 @@ std::optional<Ticket> Frontier::lease(WorkerId worker) {
             }
         }
     }
-    auto selected = nodes_.find(selected_key);
+    return finalize_lease(worker, selected_key, candidates);
+}
+std::optional<Ticket> Frontier::lease(WorkerId worker, const Scorer& scorer, size_t window) {
+    ensure_healthy();
+    if (policy_ == Policy::Priority) return lease(worker);
+    if (!scorer || !window) throw std::invalid_argument("Frontier locality needs a scorer and nonzero window");
+    if (pending_.empty()) return {};
+    StateKey selected_key = 0;
+    int64_t best = 0;
+    size_t candidates = 0;
+    const auto consider = [&](StateKey key) {
+        const auto score = scorer(key); // All callbacks before any Frontier mutation.
+        if (!candidates || score > best) { selected_key = key; best = score; }
+        ++candidates;
+    };
+    if (policy_ == Policy::Bfs) {
+        const auto layer = active_layers_.begin()->first;
+        auto it = bfs_pending_.begin();
+        if (it->first.first != layer) return {}; // Inflight layer barrier.
+        for (; it != bfs_pending_.end() && it->first.first == layer && candidates < window; ++it)
+            consider(it->second);
+    } else {
+        for (auto it = pending_.rbegin(); it != pending_.rend() && candidates < window; ++it)
+            consider(it->second);
+    }
+    return finalize_lease(worker, selected_key, candidates);
+}
+Ticket Frontier::finalize_lease(WorkerId worker, StateKey key, uint64_t candidates) {
+    auto selected = nodes_.find(key);
     if (next_lease_ == UINT64_MAX) throw std::overflow_error("frontier lease IDs exhausted");
     Ticket result{selected->first, worker, ++next_lease_, selected->second.depth, selected->second.depth < limit_};
     try {

@@ -404,8 +404,10 @@ def run(args, work, report):
                 remaining_ms = min(3_600_000, max(1, int((session.started + session.timeout - time.monotonic()) * 1000)))
                 started = time.monotonic()
                 with ResourceSample(session, args.sample_resources) as resources:
-                    placement = " --worker-placement same-cpu" if args.worker_placement == "same-cpu" else ""
-                    reply = checked(session, f"parallel {workers} {args.depth} --strategy {strategy} --storage {args.storage} --retries 0 --timeout-ms {remaining_ms}" + placement)
+                    worker_options = " --worker-placement same-cpu" if args.worker_placement == "same-cpu" else ""
+                    if args.worker_locality == "roots":
+                        worker_options += " --worker-locality roots"
+                    reply = checked(session, f"parallel {workers} {args.depth} --strategy {strategy} --storage {args.storage} --retries 0 --timeout-ms {remaining_ms}" + worker_options)
                 elapsed = time.monotonic() - started
                 matches = re.findall(r"(?m)^PARALLEL_RESULT (\{[^\n]+\})$", reply)
                 common.require(len(matches) == 1, "missing native parallel receipt")
@@ -490,6 +492,7 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--workers", type=int, nargs='+', default=[1, 2, 4], help="explicit worker counts, including 8 for large cases")
     parser.add_argument("--strategies", choices=('dfs', 'bfs'), nargs='+', default=['dfs', 'bfs'])
+    parser.add_argument("--worker-locality", choices=("none", "roots"), default="none")
     parser.add_argument("--worker-placement", choices=("none", "same-cpu"), default="none")
     parser.add_argument("--storage", choices=('shared', 'durable'), default='shared')
     parser.add_argument("--reference-report", type=Path, help="locally verified same-workload graph; skips local serial and requires parallel-first")
@@ -500,6 +503,8 @@ def main():
         parser.error("depth1..64, positive rounds, total-session timeout0..7200 required")
     if not args.workers or any(not 1 <= count <= 32 for count in args.workers) or len(set(args.workers)) != len(args.workers):
         parser.error("workers must be distinct counts from 1..32")
+    if args.worker_locality == "roots" and args.strategies != ["bfs"]:
+        parser.error("worker-locality roots requires --strategies bfs")
     if len(set(args.strategies)) != len(args.strategies):
         parser.error("strategies must be distinct")
     if args.reference_report and not args.parallel_first:
@@ -514,7 +519,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="run-", dir=args.output))
     report = {"passed": False, "artifacts": str(work), "backend": args.backend, "depth": args.depth,
-              "workers": args.workers, "strategies": args.strategies, "storage": args.storage, "worker_placement": args.worker_placement, "sample_resources": args.sample_resources, "parallel_first": args.parallel_first, "reference_report": str(args.reference_report) if args.reference_report else None,
+              "workers": args.workers, "strategies": args.strategies, "storage": args.storage, "worker_placement": args.worker_placement, "worker_locality": args.worker_locality, "sample_resources": args.sample_resources, "parallel_first": args.parallel_first, "reference_report": str(args.reference_report) if args.reference_report else None,
               "scope": __doc__, "timing": "command_seconds is complete command to prompt (including tail journal and driver polling); native seconds separately excludes final node journal; primary large-scale throughput uses command_seconds"}
     started = time.monotonic()
     try:
