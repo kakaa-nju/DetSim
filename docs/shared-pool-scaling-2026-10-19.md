@@ -708,3 +708,27 @@ symlink/非目录/异设备及构造失败FD泄漏也纳入。精确命令/对�
 binaryhash在`pool-sharding64/{build-manifest.json,components-manifest.json}`，
 原始输出在components.log。源码仍未进产品；独立native同图参考与两轮
 baseline/candidate 1/8/12吞吐对照已启动，尚无收益结论。
+
+
+## 分桶两轮结论：不合入
+
+候选独立native参考通过；两轮baseline/candidate正反顺序，各1/8/12的12个
+fresh reference-only会话全部通过10457节点/18266边/零重试和相同canonical图。
+此实验两边都基于冻结v6+balanced worker，唯一受测差异为pool布局；没有把
+新产品的恢复去重混入基线。精确行在`sharding-pilot/summary.json`，中位摘要
+为paired-summary.json。
+
+| worker | 原布局中位秒 | 分桶64中位秒 |
+| --- | ---: | ---: |
+| 1 | 32.2231 | 32.2176 |
+| 8 | 6.8044 | 6.7719 |
+| 12 | 6.1218 | 6.1647 |
+
+8-worker约快0.5%，12-worker约慢0.7%，单worker近乎不变；方向和幅度均
+不足以支持引入新布局及其兼容性成本。两次/格不是“完全无效果”的统计证明，
+而是当前没有可用的收益证据。因此不合入，保留候选源、组件故障门禁与原始
+计时。根目录仍使用原pool布局。原生同图通过也不扩大到任意程序等价保证。
+冻结新产品对象的7.3MiB拷贝发生于本实验运行期间，未运行其他build/目标；
+这也是不解读亚百分比差异的原因之一。
+下一步测固定产品的cycles/instructions/task-clock，并评估bounded roots局部性
+派发；后者只准备隔离候选，不授权跳过任何恢复校验。
