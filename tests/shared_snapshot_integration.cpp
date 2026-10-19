@@ -15,6 +15,7 @@
 #include <cstring>
 #include <filesystem>
 #include <sstream>
+#include <set>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -29,6 +30,8 @@ extern "C" int __wrap_fsync(int fd) {
 // Linker wrappers count the actual calls, including warm-cache publication.
 static std::atomic<size_t> page_calls{0}, blob_publications{0};
 static std::atomic<bool> fail_ready_publication{false};
+static std::atomic<hash_type> fail_ready_key{0}, watched_ready_key{0};
+static std::atomic<size_t> watched_ready_reads{0};
 extern "C" SnapshotView::OwnedSpan real_snapshot_page(const SnapshotView*, size_t, size_t)
     asm("__real__ZNK12SnapshotView4pageEmm");
 extern "C" SnapshotView::OwnedSpan wrapped_snapshot_page(const SnapshotView*, size_t, size_t)
@@ -50,9 +53,17 @@ extern "C" void real_publish_ready(SharedObjectPool*, hash_type, const std::vect
 extern "C" void wrapped_publish_ready(SharedObjectPool*, hash_type, const std::vector<uint8_t>&)
     asm("__wrap__ZN6detsim8snapshot16SharedObjectPool13publish_readyEmRKSt6vectorIhSaIhEE");
 extern "C" void wrapped_publish_ready(SharedObjectPool* pool, hash_type key, const std::vector<uint8_t>& bytes) {
-    if (fail_ready_publication.exchange(false))
+    if (fail_ready_publication.exchange(false) || (key && fail_ready_key.load() == key && fail_ready_key.exchange(0)))
         throw std::runtime_error("Injected failure at Ready publication boundary");
     real_publish_ready(pool, key, bytes);
+}
+extern "C" SharedObjectPool::Buffer real_load_ready(SharedObjectPool*, hash_type)
+    asm("__real__ZN6detsim8snapshot16SharedObjectPool10load_readyEm");
+extern "C" SharedObjectPool::Buffer wrapped_load_ready(SharedObjectPool*, hash_type)
+    asm("__wrap__ZN6detsim8snapshot16SharedObjectPool10load_readyEm");
+extern "C" SharedObjectPool::Buffer wrapped_load_ready(SharedObjectPool* pool, hash_type key) {
+    if (key && key == watched_ready_key.load()) ++watched_ready_reads;
+    return real_load_ready(pool, key);
 }
 static std::atomic<bool> fail_registration{false};
 extern "C" bool real_metadata_save(SysStateStore*, hash_type, const std::vector<uint8_t>&)
@@ -159,12 +170,12 @@ static void check_actors(const ReadyState& ready) {
     }
 }
 static hash_type new_system(hash_type root, bool failed = false, bool first_dead = false,
-                            hash_type last_root = 0) {
+                            hash_type last_root = 0, const std::string& model = "bundle-fixture/model1") {
     static uint64_t nonce = 0;
     sys_state state;
     for (auto& key : state.ts_hash) key = root;
     if (last_root) state.ts_hash[NP - 1] = last_root;
-    state.model_identity = "bundle-fixture/model1";
+    state.model_identity = model;
     state.monitor_states["property"] = {1,2,3};
     state.monitor_states["nonce"] = encode(++nonce);
     state.property_failed = failed;
@@ -334,6 +345,170 @@ static void publisher_import_proofs(bool pages, const std::filesystem::path& dir
     reset_calls(); rejects([&] { materialized.export_bundle(new_system(a)); }); hit_calls();
     puts("shared publisher import: ready seeds, lazy/full import, bounded proofs, rejection and poison passed");
 }
+
+static std::set<hash_type> ready_keys(const SharedObjectPool& pool) {
+    std::set<hash_type> keys;
+    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(pool.path()) / "ready"))
+        if (entry.path().extension() == ".obj") keys.insert(std::stoull(entry.path().stem().string(), nullptr, 16));
+    return keys;
+}
+static Blob added_root_proof(SharedObjectPool& pool, const std::set<hash_type>& before, hash_type system) {
+    auto added = ready_keys(pool);
+    for (auto key : before) added.erase(key);
+    added.erase(system);
+    require(added.size() == 1, "Exactly one certificate for one distinct root");
+    const auto key = *added.begin();
+    const auto bytes = pool.load_ready(key);
+    require(bytes && XXHash64::hash(bytes->data(), bytes->size()) == key, "Root certificate descriptor-derived key");
+    return {key, *bytes};
+}
+static Bundle reference_for(hash_type key) {
+    Bundle ref; ref.version = 2; ref.system_key = key;
+    require(SysStateStore::instance().load(key, ref.metadata), "Reference metadata exists");
+    return ref;
+}
+static void global_root_proofs(bool pages, const std::filesystem::path& directory) {
+    const std::string model = "bundle-fixture/model1:bootstrap-v1:0123456789abcdef";
+    const auto a = make_root(pages), b = make_root(pages, 'n');
+    auto state = [&](hash_type root, const std::string& identity) { return new_system(root, false, false, 0, identity); };
+    SharedObjectPool pool(directory.string());
+    SharedPublisher publisher(pool);
+    auto before = ready_keys(pool);
+    reset_calls(); const auto ref_a = publisher.export_bundle(state(a, model)); full_calls();
+    const auto proof_a = added_root_proof(pool, before, ref_a.system_key);
+    before = ready_keys(pool);
+    const auto ref_b = publisher.export_bundle(state(b, model));
+    const auto proof_b = added_root_proof(pool, before, ref_b.system_key);
+
+    SharedPublisher fresh(pool, 1);
+    reset_calls(); const auto shared = fresh.export_bundle(state(a, model)); hit_calls();
+    check_actors(load_shared_state(shared.system_key, model, pool));
+    reset_calls(); fresh.export_bundle(state(b, model)); hit_calls();
+    reset_calls(); fresh.export_bundle(state(a, model)); hit_calls(); // LRU eviction falls back to global proof.
+    SharedObjectPool reopened(pool.path(), false);
+    SharedPublisher cold(reopened);
+    reset_calls(); cold.export_bundle(state(a, model)); hit_calls();
+    SharedPublisher property(pool), status(pool);
+    reset_calls(); const auto failed = property.export_bundle(new_system(a, true, false, 0, model)); hit_calls();
+    require(load_shared_state(failed.system_key, model, pool).actors.empty(), "Global proof still derives property admission");
+    reset_calls(); const auto exited = status.export_bundle(new_system(a, false, true, 0, model)); hit_calls();
+    require(load_shared_state(exited.system_key, model, pool).actors.size() == 2 * (NP - 1), "Global proof still derives process admission");
+
+    watched_ready_key = proof_a.key; watched_ready_reads = 0;
+    SharedPublisher disabled(pool, 0);
+    reset_calls(); disabled.export_bundle(state(a, model)); full_calls();
+    disabled.import_bundle(ref_a, model);
+    reset_calls(); export_shared_bundle(state(a, model), pool); full_calls();
+    const auto old_bundle = export_bundle(ref_a.system_key);
+    import_bundle(old_bundle, model);
+    require(watched_ready_reads.load() == 0, "cap0/free/v1 must not consult RootProof namespace");
+    watched_ready_key = 0;
+
+    // A different valid complete model needs its own certificate, even with identical roots.
+    const std::string other_model = "another-model:bootstrap-v1:0123456789abcdef";
+    SharedPublisher different_model(pool);
+    reset_calls(); different_model.export_bundle(state(a, other_model)); full_calls();
+    SharedObjectPool empty(directory.string() + "-empty");
+    SharedPublisher empty_context(empty);
+    reset_calls(); empty_context.export_bundle(state(a, model)); full_calls();
+
+    // A v4 pool has complete SystemReady but no optional RootProof. Read-only
+    // imports must retain the old successful behavior without changing the pool.
+    SharedObjectPool legacy(directory.string() + "-legacy");
+    const auto legacy_ref = export_shared_bundle(state(a, model), legacy);
+    legacy.flush();
+    const auto legacy_keys = ready_keys(legacy);
+    require(legacy_keys.size() == 1, "Legacy fixture contains only SystemReady");
+    SharedObjectPool readonly_legacy(legacy.path(), false, true);
+    SharedPublisher readonly_reader(readonly_legacy);
+    check_actors(readonly_reader.import_bundle(legacy_ref, model));
+    require(ready_keys(readonly_legacy) == legacy_keys, "Read-only import must not add optional proofs");
+
+    // Guest blobs may have exactly the descriptor bytes/key; only KindReady is a proof.
+    SharedObjectPool forged_blob(directory.string() + "-blob");
+    forged_blob.publish_blob(proof_a.key, proof_a.bytes.data(), proof_a.bytes.size());
+    SharedPublisher blob_context(forged_blob);
+    reset_calls(); blob_context.export_bundle(state(a, model)); full_calls();
+    require(*forged_blob.load_ready(proof_a.key) == proof_a.bytes, "Real proof published after full validation");
+
+    // Private descriptor layout is exercised without adding a product introspection API.
+    // Domain[16], version u32, NP u32, root u64, model length u64, complete model.
+    const std::vector<size_t> wrong_fields{0, 16, 20, 24, proof_a.bytes.size() - 1};
+    for (size_t field : wrong_fields) {
+        SharedObjectPool invalid(directory.string() + "-field-" + std::to_string(field));
+        auto bytes = proof_a.bytes;
+        if (field == bytes.size() - 1) bytes[field] = 'e'; else bytes[field] ^= 1;
+        invalid.publish_ready(proof_a.key, bytes);
+        SharedPublisher reject(invalid);
+        const auto key = state(a, model);
+        rejects([&] { reject.export_bundle(key); });
+        require(!invalid.load_ready(key), "Invalid descriptor rejected before SystemReady");
+    }
+    SharedObjectPool wrong_type(directory.string() + "-type");
+    wrong_type.publish_ready(proof_a.key, *pool.load_ready(ref_a.system_key));
+    SharedPublisher reject_type(wrong_type);
+    rejects([&] { reject_type.export_bundle(state(a, model)); });
+    const auto colliding_system = state(a, model);
+    wrong_type.publish_ready(colliding_system, proof_a.bytes);
+    rejects([&] { reject_type.export_bundle(colliding_system); });
+
+    SharedObjectPool failed_system(directory.string() + "-system-failure");
+    SharedPublisher failed_context(failed_system);
+    const auto failed_key = state(a, model);
+    fail_ready_publication = true;
+    rejects([&] { failed_context.export_bundle(failed_key); });
+    require(ready_keys(failed_system).empty(), "Failed SystemReady must not publish RootProof");
+
+    if constexpr (NP >= 2) {
+        for (bool importing : {false, true}) {
+            SharedObjectPool partial(directory.string() + (importing ? "-partial-import" : "-partial-export"));
+            const auto key = new_system(a, false, false, b, model);
+            const auto ref = importing ? export_shared_bundle(key, partial) : reference_for(key);
+            SharedPublisher context(partial);
+            fail_ready_key = proof_b.key;
+            rejects([&] {
+                if (importing) (void)context.import_bundle(ref, model);
+                else (void)context.export_bundle(key);
+            });
+            require(!fail_ready_key.load(), "Injected second-root publication failure reached");
+            require(partial.load_ready(key) && partial.load_ready(proof_a.key) && !partial.load_ready(proof_b.key),
+                    "Keep valid SystemReady/first proof, do not fabricate second proof");
+            SharedPublisher reuse(partial);
+            reset_calls(); reuse.export_bundle(state(a, model)); hit_calls();
+            SharedPublisher repair(partial);
+            repair.import_bundle(ref, model); // Existing complete SystemReady certifies both roots.
+            require(partial.load_ready(proof_b.key) != nullptr, "Successful import completes remaining proof");
+            reset_calls(); context.export_bundle(state(b, model)); hit_calls(); // No negative cache from failed attempt.
+        }
+    }
+
+    const std::vector<std::string> unknown_models{
+        "base", ":bootstrap-v1:0123456789abcdef", "base:bootstrap-v2:0123456789abcdef",
+        "base:bootstrap-v1:0123456789abcde", "base:bootstrap-v1:0123456789abcdef0",
+        "base:bootstrap-v1:0123456789abcdeF", "base:bootstrap-v1:0123456789abcdef:tail"};
+    for (size_t index = 0; index < unknown_models.size(); ++index) {
+        const auto& unknown = unknown_models[index];
+        SharedObjectPool fallback(directory.string() + "-unknown-" + std::to_string(index));
+        auto fake = proof_a.bytes;
+        fake.resize(40); const uint64_t length = unknown.size(); std::memcpy(fake.data() + 32, &length, 8);
+        fake.insert(fake.end(), unknown.begin(), unknown.end());
+        const auto fake_key = XXHash64::hash(fake.data(), fake.size());
+        fallback.publish_ready(fake_key, fake); // Even an exact descriptor must not enable an unknown model.
+        watched_ready_key = fake_key; watched_ready_reads = 0;
+        SharedPublisher first(fallback), second(fallback);
+        reset_calls(); first.export_bundle(state(a, unknown)); full_calls();
+        reset_calls(); first.export_bundle(state(a, unknown)); hit_calls(); // v4 local behavior retained.
+        reset_calls(); second.export_bundle(state(a, unknown)); full_calls();
+        require(watched_ready_reads.load() == 0, "Unknown model must not read global RootProof");
+        require(ready_keys(fallback).size() == 4, "Unknown model publishes only three SystemReady records");
+        watched_ready_key = 0;
+    }
+    pool.flush(); fail_sync = true;
+    rejects([&] { pool.flush(); }); fail_sync = false;
+    rejects([&] { publisher.import_bundle(ref_a, model); });
+    rejects([&] { publisher.export_bundle(state(a, model)); });
+    puts("global root proof: namespace/model/type isolation, global/cold reuse, failure ordering, partial repair and fallback passed");
+}
 int main(int argc,char** argv) {
     try {
         if(argc==5 && !strcmp(argv[1],"--cold")) {
@@ -363,6 +538,7 @@ int main(int argc,char** argv) {
             rejects([&]{load_shared_state(bundle.system_key,"bundle-fixture/model1",pool);});
             publisher_proofs(pages, base/(suffix+"-publisher-pool"));
             publisher_import_proofs(pages, base/(suffix+"-import-pool"));
+            global_root_proofs(pages, base/(suffix+"-global-pool"));
             const auto ref=export_shared_bundle(bundle.system_key,pool);
             require(ref.version==2 && ref.blobs.empty() && ref.metadata==bundle.metadata,"Reference carries metadata only");
             const auto before=StateStore::instance().get_stats().load_requests;

@@ -28,6 +28,8 @@ struct Bundle {
 // One worker-loop publication context. The caller must keep this exact pool
 // instance alive until the publisher is destroyed. Published pool objects must
 // remain immutable. Proof eviction drops only an optimization, never objects.
+// Recognized bootstrap-v1 models also share typed root certificates through
+// KindReady. cap=0 and unknown model formats retain the stateless/local path.
 class SharedPublisher final {
 public:
     explicit SharedPublisher(SharedObjectPool& pool, size_t root_capacity = 1024);
@@ -41,6 +43,8 @@ public:
     ReadyState import_bundle(const Bundle& bundle, const std::string& expected_model_identity,
                              bool materialize_child = false);
 private:
+    bool root_proven(hash_type root, const std::string& model);
+    void publish_root_proofs(const sys_state& state);
     void remember(const hash_type (&roots)[NP]);
     SharedObjectPool& pool_;
     size_t capacity_;

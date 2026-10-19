@@ -22,6 +22,7 @@ public:
     SharedObjectPool(const SharedObjectPool&) = delete;
     SharedObjectPool& operator=(const SharedObjectPool&) = delete;
     const std::string& path() const;
+    bool is_read_only() const noexcept;
     void publish_blob(hash_type key, const void* bytes, size_t size);
     Buffer load_blob(hash_type key);
     // Ready payload is opaque. The caller validates its semantic closure before

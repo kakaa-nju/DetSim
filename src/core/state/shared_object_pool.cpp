@@ -198,6 +198,7 @@ SharedObjectPool::SharedObjectPool(std::string dir, bool create, bool read_only)
 }
 SharedObjectPool::~SharedObjectPool() = default;
 const std::string& SharedObjectPool::path() const { return impl_->directory; }
+bool SharedObjectPool::is_read_only() const noexcept { return impl_->read_only; }
 void SharedObjectPool::publish_blob(hash_type key, const void* bytes, size_t size) {
     if (!key || !bytes || !size || size > UINT32_MAX || XXHash64::hash(bytes,size) != key)
         throw std::invalid_argument("SharedObjectPool invalid blob key/bytes");

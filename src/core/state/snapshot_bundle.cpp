@@ -2,6 +2,8 @@
 #include "page_snapshot.h"
 #include "shared_object_pool.h"
 #include "proc_status.h"
+#include <algorithm>
+#include <string_view>
 #include <cstring>
 #include <tuple>
 #include "sysstate_store.h"
@@ -168,6 +170,34 @@ std::vector<uint8_t> encode_ready(const Bundle& bundle, const std::vector<ActorA
 }
 }
 namespace {
+// This recognizes the framework's internal bootstrap version, not an
+// authentication mechanism for arbitrary callers. The worker/Hello/layout
+// admission gates establish the private pool's trusted execution model.
+bool bound_model(const std::string& model) {
+    constexpr std::string_view suffix = ":bootstrap-v1:";
+    const auto marker = model.rfind(suffix);
+    if (marker == std::string::npos || marker == 0 ||
+        model.size() != marker + suffix.size() + 16) return false;
+    for (size_t i = marker + suffix.size(); i < model.size(); ++i)
+        if (!((model[i] >= '0' && model[i] <= '9') || (model[i] >= 'a' && model[i] <= 'f')))
+            return false;
+    return true;
+}
+std::vector<uint8_t> root_descriptor(hash_type root, const std::string& model) {
+    constexpr char domain[] = "DetSim:RootProof";
+    std::vector<uint8_t> bytes(domain, domain + sizeof(domain) - 1);
+    append<uint32_t>(bytes, 1);
+    append<uint32_t>(bytes, NP);
+    append<uint64_t>(bytes, root);
+    append<uint64_t>(bytes, model.size());
+    bytes.insert(bytes.end(), model.begin(), model.end());
+    return bytes;
+}
+hash_type root_proof_key(const std::vector<uint8_t>& descriptor) {
+    const auto key = XXHash64::hash(descriptor.data(), descriptor.size());
+    require(key != 0, "Invalid shared root proof identity");
+    return key;
+}
 template<class Proven, class Commit>
 Bundle publish_reference(hash_type key, SharedObjectPool& pool, Proven proven, Commit commit) {
     Bundle bundle; bundle.system_key = key;
@@ -192,22 +222,49 @@ Bundle publish_reference(hash_type key, SharedObjectPool& pool, Proven proven, C
         const auto root = state.ts_hash[node];
         // A root proof certifies only its immutable closure in this pool.
         // Decode metadata again: actors depend on this system's status/property.
-        state.child[node] = proven(root) ? tracee_state(root) : validate_root(root, publish);
+        state.child[node] = proven(root, state.model_identity) ? tracee_state(root) : validate_root(root, publish);
     }
     const auto actors = enabled_actor_actions(state);
     const auto record = encode_ready(bundle, actors);
     (void)decode_ready(key, record, state.model_identity);
     pool.publish_ready(key, record);
-    commit(state.ts_hash); // No proof or LRU change before successful Ready publication.
+    commit(state); // No root certificate or LRU change before successful SystemReady publication.
     bundle.version = 2;
     return bundle;
 }
 }
 void publish_shared_state(hash_type key, SharedObjectPool& pool) {
-    (void)publish_reference(key, pool, [](hash_type) { return false; }, [](const auto&) {});
+    (void)publish_reference(key, pool, [](hash_type, const std::string&) { return false; }, [](const auto&) {});
 }
 SharedPublisher::SharedPublisher(SharedObjectPool& pool, size_t root_capacity)
     : pool_(pool), capacity_(root_capacity) {}
+bool SharedPublisher::root_proven(hash_type root, const std::string& model) {
+    if (proven_.contains(root)) return true;
+    if (!capacity_ || !bound_model(model)) return false;
+    const auto descriptor = root_descriptor(root, model);
+    // Never consult KindBlob: guest bytes can exactly equal a descriptor.
+    const auto certificate = pool_.load_ready(root_proof_key(descriptor));
+    if (!certificate) return false; // No negative cache; another worker can publish later.
+    require(*certificate == descriptor, "Conflicting shared root proof descriptor/type");
+    return true;
+}
+void SharedPublisher::publish_root_proofs(const sys_state& state) {
+    if (!capacity_ || !bound_model(state.model_identity)) return;
+    for (int node = 0; node < NP; ++node) {
+        const auto root = state.ts_hash[node];
+        if (std::find(state.ts_hash, state.ts_hash + node, root) != state.ts_hash + node) continue;
+        const auto descriptor = root_descriptor(root, state.model_identity);
+        // Opaque Ready publication checks exact existing bytes, including a
+        // collision with SystemReady. A later failure leaves valid certificates
+        // in place; shared immutable files must never be rolled back/deleted.
+        const auto key = root_proof_key(descriptor);
+        if (const auto existing = pool_.load_ready(key))
+            require(*existing == descriptor, "Conflicting shared root proof descriptor/type");
+        else if (!pool_.is_read_only()) pool_.publish_ready(key, descriptor);
+        // RootProof is optional: a read-only v4 pool can contain a complete
+        // SystemReady without it. Existing descriptors and I/O still validate.
+    }
+}
 void SharedPublisher::remember(const hash_type (&roots)[NP]) {
     if (!capacity_) return;
     for (const auto root : roots) {
@@ -226,12 +283,13 @@ void SharedPublisher::remember(const hash_type (&roots)[NP]) {
 }
 Bundle SharedPublisher::export_bundle(hash_type key) {
     return publish_reference(key, pool_,
-        [&](hash_type root) { return proven_.contains(root); },
-        [&](const auto& roots) { remember(roots); });
+        [&](hash_type root, const std::string& model) { return root_proven(root, model); },
+        [&](const sys_state& state) { publish_root_proofs(state); remember(state.ts_hash); });
 }
 ReadyState SharedPublisher::import_bundle(const Bundle& bundle, const std::string& expected,
                                          bool materialize_child) {
     auto ready = import_shared_bundle(bundle, expected, pool_, materialize_child);
+    publish_root_proofs(ready.state);
     remember(ready.state.ts_hash);
     return ready;
 }
@@ -241,7 +299,7 @@ ReadyState load_shared_state(hash_type key, const std::string& expected, SharedO
     return decode_ready(key, *record, expected).ready;
 }
 Bundle export_shared_bundle(hash_type key, SharedObjectPool& pool) {
-    return publish_reference(key, pool, [](hash_type) { return false; }, [](const auto&) {});
+    return publish_reference(key, pool, [](hash_type, const std::string&) { return false; }, [](const auto&) {});
 }
 ReadyState import_shared_bundle(const Bundle& bundle, const std::string& expected,
                                SharedObjectPool& pool, bool materialize_child) {

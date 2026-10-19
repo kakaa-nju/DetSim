@@ -6,5 +6,6 @@ $(BUILD_DIR)/tests/shared_snapshot_integration: $(BUILD_DIR)/tests/shared_snapsh
 	    -Wl,--wrap=_ZNK12SnapshotView4pageEmm \
 	    -Wl,--wrap=_ZN6detsim8snapshot16SharedObjectPool12publish_blobEmPKvm \
 	    -Wl,--wrap=_ZN6detsim8snapshot16SharedObjectPool13publish_readyEmRKSt6vectorIhSaIhEE \
-	    -Wl,--wrap=_ZN13SysStateStore4saveEmRKSt6vectorIhSaIhEE $(LDLIBS) -o $@
+	    -Wl,--wrap=_ZN13SysStateStore4saveEmRKSt6vectorIhSaIhEE \
+	    -Wl,--wrap=_ZN6detsim8snapshot16SharedObjectPool10load_readyEm $(LDLIBS) -o $@
 -include $(BUILD_DIR)/tests/shared_snapshot_integration.d
