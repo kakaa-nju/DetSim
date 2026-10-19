@@ -295,9 +295,90 @@ lease/source/emitted 与 journal 逐条相符，6,633 个协调器本地 Done �
 没有逐 root 身份/LRU 原因追踪，不能将全部额外指令都归因于这些验证。
 来源：`build/shared-parallel/root-count-v4/{report.md,summary.json,build-manifest.json}`。
 
+## 跨 worker 闭包证明候选（v5，性能复核中）
+
+上述重复验证计数促成了同池共享 root 证书的候选实现。证书使用已有 Ready 类型，
+与 guest 可写内容的 Blob 类型隔离；记录包含独立 domain、版本、NP、root 和完整
+model identity，读取时要求逐字节一致。仅框架认可的 bootstrap-v1 模型启用。
+完整闭包验证、依赖发布、SystemReady 发布成功后才能建立 root 证书；导入则必须先
+完成已有 Ready 校验与元数据登记。局部失败留下的有效不可变对象不会删除回滚。
+证书命中仍重新读取元数据并推导当前系统的 actors/property/status。
+
+cap0、无上下文接口与传统完整 bundle 保留完整校验路径。旧池没有可选证书时，
+只读导入仍应成功；这条回归实际先失败（误尝试写只读池）再修复通过，未吞掉
+I/O 或 poison 错误。全量/pages 组件、传统 bundle 组件、NP2 的 15 个 native parallel 场景、
+NP1 actors/adoption、make check 与 NP3 生产构建已通过；独立静态审查通过。
+首次未采样同图性能对照已完成，尚需交错重复测量，当前不宣称显著收益。
+每个不同 root/model 多一个小文件，首次并发 miss 仍可重复验证，需量化其代价。
+
+证据：`build/shared-parallel/global-root-proof-{components,native-np2,readonly-red}.log`。
+这是私有不可变池内的框架校验复用，不构成不可信生产者的认证方案。
+
+v5 首轮每并发数一个冷会话，均为 10,457 节点、18,266 条边、零重试，完整图
+SHA 与前版相同；第一行还通过 native serial 节点集/首父边投影检查。
+
+| workers | 搜索秒 | 含收尾秒 | 同版含收尾加速比 |
+| ---: | ---: | ---: | ---: |
+| 1 | 32.0395 | 32.1033 | 1.000 |
+| 2 | 17.5372 | 17.6513 | 1.819 |
+| 4 | 10.9721 | 11.2364 | 2.857 |
+| 6 | 8.3907 | 8.6049 | 3.731 |
+| 8 | 7.4279 | 7.7422 | 4.147 |
+
+8-worker 含收尾比 v4 单次快约 1.4%，4-worker 反而慢；单次数据不足以认定
+小幅差异为收益。候选尚未提交，是否保留取决于重复对照，而非组件通过。
+来源：`build/shared-parallel/pilot-v5/summary.json`。
+
+## 四页读取缓存（产品回归通过）
+
+`PagedMemory` 的单页缓存改为受同一 mutex 保护的四槽 FIFO。加载成功并校验长度后
+才替换，命中仍检查引用长度，返回的 OwnedSpan 保留独立 immutable owner。
+page 格式的全局 view 缓存预算按四页计费，flat 保留原预算；不是无限增加驻留内存。
+已有 generation/poison 检查保留，未修改状态格式、capture 或 restore 算法。
+
+隔离编译的原版/候选组件均通过完整 page-snapshot 测试，交替 A/B 两页的 40 次
+读取使 StateStore load_requests 从 40 降为 2；超过四页的驱逐、owner 存活、
+同 key 不同长度、cold reopen 与四槽预热后 poison/generation 均有检查。
+独立静态审查通过。隔离候选保留在 `build/shared-parallel/page-cache4/`；重复测量后同一实现已进入产品路径，
+正式 NP2 page/shared/v1 组件与 15 个 native parallel 场景、NP1 actors/adoption、
+make check 和 NP3 生产构建均通过。生产 page_snapshot.o 与隔离候选对象逐字节 SHA
+一致（72e387146469461a360ff0103a30f8092bf6782d3d47f0be543a98651f99e284）。
+
+首轮 1/2/4/6/8 worker 的搜索加收尾分别为
+31.6061 / 16.9516 / 11.0901 / 8.2652 / 7.0331 秒，各行均通过完整参考检查，
+节点/边及规范图 SHA 与前版一致。该候选基于 v5，其独立原生参考也完整运行；
+跨二进制的旧报告不能直接用作测试工具输入，重复测试按版本使用各自已验证参考。
+单次数据由下述交错重复对照补充；样本仍小，不作统计显著性结论。
+
+来源：`build/shared-parallel/page-cache4/build-and-components.log`、
+`build/shared-parallel/pilot-page4/summary.json` 与
+`build/shared-parallel/repeat-v4-v5-page4/`。
+
+## 两轮交错复核
+
+两轮各跑 1/8 worker，第二轮反转版本顺序，每个会话使用新目录。所有结果通过各自
+相同二进制已验证参考的完整带标签图检查。工具拒绝了最初跨二进制参考请求，失败行
+保留，改用每版本独立参考后继续；未把拒绝当作通过。第一次 v4-w1 期间误跑一次
+旧池离线文件统计，故该行排除，矩阵结束后另补一个无干扰冷会话。未中断/重启活跃搜索。
+
+| 版本 | 1-worker 含收尾中位秒 | 8-worker 含收尾中位秒 | 同版加速比 |
+| --- | ---: | ---: | ---: |
+| v4 | 32.4007 | 8.2549 | 3.925 |
+| v5 共享闭包证书 | 32.9381 | 7.6473 | 4.307 |
+| v5 + 四页缓存 | 31.6570 | 7.0050 | 4.519 |
+
+8-worker 两轮分别是 v4 8.2525/8.2574、v5 7.6215/7.6731、四页缓存
+6.9768/7.0332 秒。共享证书减少约 7.4% 的 8-worker 时间；四页缓存在其基础上
+减少约 8.4%，合计约 15.1%。单 worker 共享证书略慢，额外证明有成本，不能只报
+并行收益。每格仅两次，不提供置信区间，不将 4.52× 称为接近线性。
+
+v5 各并发数产生 1,245 个 RootProof 文件，总文件逻辑字节 196,710，实际分配
+5,099,520 字节（含对象头与文件块，不含额外目录开销）；不能只按小 payload 算空间。
+原始行、替补及排除原因：`build/shared-parallel/repeat-v4-v5-page4/`；空间统计：
+`build/shared-parallel/pilot-v5/root-proof-cost.json`。
+
 ## 尚需完成
 
-1. 批量同步和移除扫描的同规模性能测量。
-2. 同池有界 tracee-root 闭包证明的优化与回归。
-3. 根据热点改进后重复同图测试，并补充更大图的同工作量 1/2/4/6/8 对照。
-4. 在结果达到目标前，不将传输量下降或高 CPU 利用率当作接近线性的证明。
+1. 对当前最快版本重新采集全链路 CPU profile，定位剩余并行额外成本。
+2. 补充更多重复样本，以及更大图的同工作量 1/2/4/6/8 对照。
+3. 在结果达到目标前，不将传输量下降或高 CPU 利用率当作接近线性的证明。

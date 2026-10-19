@@ -1,5 +1,6 @@
 #include "page_snapshot.h"
 #include <algorithm>
+#include <array>
 #include <cstring>
 #include <list>
 #include <stdexcept>
@@ -60,21 +61,30 @@ class FlatMemory final : public SnapshotView::Memory {
 class PagedMemory final : public SnapshotView::Memory {
   const std::vector<PageRef>& pages_;
   mutable std::mutex mutex_;
-  mutable hash_type cached_key_ = 0;
-  mutable std::shared_ptr<const std::vector<uint8_t>> cached_page_;
+  struct CachedPage {
+    hash_type key = 0;
+    std::shared_ptr<const std::vector<uint8_t>> bytes;
+  };
+  mutable std::array<CachedPage, 4> cached_pages_{};
+  mutable size_t next_page_ = 0;
  public:
   explicit PagedMemory(const std::vector<PageRef>& pages) : pages_(pages) {}
   SnapshotView::OwnedSpan page(const RegionInfo& region, size_t index) const override {
     const auto& reference = pages_.at(region.offset + index);
     std::lock_guard lock(mutex_);
-    if (!cached_page_ || cached_key_ != reference.key) {
-      auto bytes = StateStore::instance().load_shared(reference.key);
-      require(bool(bytes), "Missing snapshot page");
-      require(bytes->size() == reference.length, "Snapshot page length mismatch");
-      cached_page_ = std::move(bytes); cached_key_ = reference.key;
+    for (const auto& cached : cached_pages_) {
+      if (cached.bytes && cached.key == reference.key) {
+        require(cached.bytes->size() == reference.length, "Snapshot page length mismatch");
+        return {reference.address, reference.length, cached.bytes->data(), cached.bytes};
+      }
     }
-    require(cached_page_->size() == reference.length, "Snapshot page length mismatch");
-    return {reference.address, reference.length, cached_page_->data(), cached_page_};
+    auto bytes = StateStore::instance().load_shared(reference.key);
+    require(bool(bytes), "Missing snapshot page");
+    require(bytes->size() == reference.length, "Snapshot page length mismatch");
+    auto& cached = cached_pages_[next_page_];
+    cached.bytes = std::move(bytes); cached.key = reference.key;
+    next_page_ = (next_page_ + 1) % cached_pages_.size();
+    return {reference.address, reference.length, cached.bytes->data(), cached.bytes};
   }
 };
 }
@@ -204,8 +214,9 @@ std::shared_ptr<const SnapshotView> SnapshotView::open(hash_type hash) {
   // StateStore validates content keys before publishing immutable loaded buffers.
   auto result = std::shared_ptr<const SnapshotView>(new SnapshotView(bytes, loaded_generation));
   const size_t reader_size = result->header_.version == PAGE_SNAPSHOT_VERSION ? sizeof(PagedMemory) : sizeof(FlatMemory);
+  const size_t cached_page_bytes = (result->header_.version == PAGE_SNAPSHOT_VERSION ? 4 : 1) * page_size;
   const size_t size = sizeof(SnapshotView) + reader_size + bytes->size() +
-      result->regions_.size() * sizeof(RegionInfo) + result->pages_.size() * sizeof(PageRef) + page_size;
+      result->regions_.size() * sizeof(RegionInfo) + result->pages_.size() * sizeof(PageRef) + cached_page_bytes;
   require(store.snapshot_generation()==loaded_generation,"Store changed while opening snapshot");
   if (size <= cache_limit) {
     std::lock_guard lock(cache_mutex);

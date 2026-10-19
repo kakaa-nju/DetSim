@@ -82,7 +82,9 @@ worker 压缩一次，生成磁盘记录并复用压缩结果填充 L2。
 `load_shared` 返回真正拥有缓冲区的 `shared_ptr<const vector<uint8_t>>`。
 淘汰、重载和关闭只移除缓存的所有权，不会清空调用者手上的数据。
 因此缓存预算不等于总RSS：调用者缓冲区、pending、索引、压缩上下文、分配器，
-以及页后端的工作图像、上次页owner和4MiB/256项解析缓存另计。
+以及页后端的工作图像、每 reader 的四页 owner 和 4MiB/256项解析缓存另计。
+四槽 FIFO 缓存按四页计入解析缓存预算；已返回的 OwnedSpan 独立持有 immutable owner，
+驱逐不会使其失效，存储 generation/poison 检查仍适用。
 
 解析缓存现在也允许同一 LRU 条目持有独立的序列化 tracee metadata 小块，
 与完整 SnapshotView 共用上述预算，未增加第二套缓存。大 full root 的 metadata

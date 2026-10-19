@@ -91,6 +91,46 @@ int main(int argc, char** argv) {
     require(*SnapshotView::load_metadata(key)==metadata,"Metadata API preserves exact saved manifest bytes");
     std::vector<uint8_t> output(bytes.size()); view->read_into(0x1003, output.data(), output.size());
     require(output==bytes, "Cross-page and adjacent-region read");
+    // Pointer-page A / pointee-page B alternation uses public SnapshotView only.
+    std::vector<std::vector<uint8_t>> cache_bytes(6, std::vector<uint8_t>(4096));
+    std::vector<PageRef> cache_pages;
+    for (size_t i=0;i<cache_bytes.size();++i) {
+      for (size_t j=0;j<4096;++j) cache_bytes[i][j]=uint8_t(i*29+j*7);
+      cache_pages.push_back({0x10000+i*4096,4096,save(cache_bytes[i])});
+    }
+    const std::vector<RegionInfo> cache_regions{region(0x10000,0x16000,0)};
+    const auto cache_root=save(encode_page_manifest(cache_regions,metadata,"cache4",regs,cache_pages));
+    store.wait_for_completion();
+    auto cache_view=SnapshotView::open(cache_root);
+    store.reset_stats();
+    std::vector<uint8_t> cache_output(4096);
+    for (int repeat=0;repeat<20;++repeat) {
+      for (size_t index : {size_t(0),size_t(1)}) {
+        cache_view->read_into(0x10000+index*4096,cache_output.data(),cache_output.size());
+        require(cache_output==cache_bytes[index],"Alternating page byte equality");
+      }
+    }
+    const auto alternating_loads=store.get_stats().load_requests;
+    require(alternating_loads==2,"Alternation load_requests");
+    cache_view->page(0,2); cache_view->page(0,3);
+    const auto cache_pin=cache_view->page(0,0); // A hit must not change FIFO order.
+    store.reset_stats();
+    cache_view->page(0,4); cache_view->page(0,0); cache_view->page(0,1);
+    require(store.get_stats().load_requests==3,"FIFO eviction and reload load_requests");
+    require(cache_pin.length==4096 && !memcmp(cache_pin.data,cache_bytes[0].data(),4096),
+        "OwnedSpan survives cache eviction");
+    for (size_t i=0;i<cache_bytes.size();++i) {
+      cache_view->read_into(0x10000+i*4096,cache_output.data(),cache_output.size());
+      require(cache_output==cache_bytes[i],"More-than-cache-capacity byte equality");
+    }
+    // Reusing one key with a shorter manifest reference must fail even on hit.
+    const std::vector<RegionInfo> mismatch_regions{region(0x20000,0x21000,0),region(0x22000,0x22001,1)};
+    const std::vector<PageRef> mismatch_pages{{0x20000,4096,cache_pages[0].key},{0x22000,1,cache_pages[0].key}};
+    auto mismatch_view=SnapshotView::open(save(encode_page_manifest(mismatch_regions,metadata,"length",regs,mismatch_pages)));
+    mismatch_view->page(0,0);
+    rejects([&]{mismatch_view->page(1,0);});
+    printf("page-cache alternation load_requests=%llu slots=4\n",(unsigned long long)alternating_loads);
+
     auto pinned = view->page(0,0); view->page(1,1);
     require(pinned.data[0]==bytes[0], "Pinned page ownership");
     rejects([&]{view->read_into(0x3003,output.data(),1);});
@@ -137,8 +177,15 @@ int main(int argc, char** argv) {
     require(output==bytes && old->format_version()==FLAT_SNAPSHOT_VERSION,"Legacy adapter");
     store.wait_for_completion(); store.shutdown();
     rejects([&]{view->page(0,0);});
+    rejects([&]{cache_view->page(0,0);});
     cfg.read_only=true; store.init(cfg); auto reopened=SnapshotView::open(key);
     reopened->read_into(0x1003,output.data(),output.size()); require(output==bytes,"Cold reopen");
+    auto cold_cache_view=SnapshotView::open(cache_root);
+    for (size_t i=0;i<cache_bytes.size();++i) {
+      cold_cache_view->read_into(0x10000+i*4096,cache_output.data(),cache_output.size());
+      require(cache_output==cache_bytes[i],"Cold reopened cache bytes");
+    }
+    rejects([&]{cache_view->page(0,0);});
     rejects([&]{view->metadata();}); store.shutdown();
     rejects([&]{SnapshotView::load_metadata(key);});
     // Cached flat bytes and pages must not bypass a poisoned store.
@@ -159,9 +206,12 @@ int main(int argc, char** argv) {
     auto warm_new=SnapshotView::open(key);
     warm_old->page(0,0); warm_new->page(0,0);
     require(SnapshotView::open(key)==warm_new, "Parsed cache not warmed");
+    auto warm_cache=SnapshotView::open(cache_root);
+    for (size_t i=0;i<4;++i) warm_cache->page(0,i);
     fail_sync=true;
     rejects([&]{store.wait_for_completion();});
     fail_sync=false;
+    for (size_t i=0;i<4;++i) rejects([&]{warm_cache->page(0,i);});
     for (const auto& poisoned : {warm_old,warm_new}) {
       rejects([&]{poisoned->read_into(0x1003,output.data(),1);});
       rejects([&]{poisoned->page(0,0);});

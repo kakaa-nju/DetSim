@@ -1496,3 +1496,21 @@ the same complete labeled graph. Absolute throughput improves at every count,
 but 8-worker whole-chain speedup falls to 3.98x because the 1-worker path benefits
 more. This is not near-linear scaling; further work remains. These proof caches
 are host optimization state, excluded from semantic identity and persistence.
+
+Follow-up v5 shares complete immutable-root certificates in the pool's typed
+Ready namespace, with distinct domain/version/NP/root/full-model bytes. Only
+recognized framework bootstrap identities enable it; cap0/free/v1 paths retain
+full validation. Successful SystemReady publication or completed import precedes
+certificate publication, and local caching follows success. Missing optional
+certificates do not break readonly old-pool imports (regression reproduced RED
+then GREEN); conflicting existing certificates and I/O/poison still fail. These
+files are pool-lifetime operational proofs, not semantic state identity.
+Four-slot immutable page-reader FIFO caching preserves ownership, length and
+generation/poison checks, with all four pages charged to the view-cache budget.
+Alternating-page regression reduces 40 Store loads to 2 and covers eviction,
+held spans, cold reopen and malformed lengths. Two interleaved fresh 1/8-worker
+comparisons retain complete labeled graphs and zero retries: combined median
+8-worker time falls from 8.2549s to 7.0050s (about 15.1%); same-version speedup
+is 4.52x, still below the scaling objective. Formal product gates and current
+limitations are recorded in the [scale report](shared-pool-scaling-2026-10-19.md).
+This does not establish larger-graph scaling or close model correctness gaps.
