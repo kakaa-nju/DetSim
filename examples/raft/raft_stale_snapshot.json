@@ -8,6 +8,7 @@
   ],
   "Addr": ["192.168.0.1", "192.168.0.2", "192.168.0.3"],
   "UserCheck": "./plugins/check.so",
+  "UserState": "./plugins/check.so",
   "ChooseFunc": "./plugins/choose.so",
   "CheckInterval": 1,
   "ChoosePoint": [

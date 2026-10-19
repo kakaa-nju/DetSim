@@ -17,6 +17,7 @@
   ],
   "ChooseFunc": "./plugins/choose.so",
   "UserCheck": "./plugins/check.so",
+  "UserState": "./plugins/check.so",
   "StateStore": {
     "hot_cache_mb": 512,
     "warm_cache_mb": 2048,

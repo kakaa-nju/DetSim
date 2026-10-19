@@ -12,6 +12,7 @@
 #include "net/emu.h"
 #include "state/state_store.h"
 #include "syscall/ckpt_policy.h"
+#include "user_state.h"
 #include <dlfcn.h>
 #include <filesystem>
 #include <fstream>
@@ -260,6 +261,44 @@ static void parse_user_check(const json &cfg, const fs::path &cfg_dir)
   LOG_INFO("User check plugin loaded");
 }
 
+/* Parse and load user-defined state plugin.
+ *
+ * Unlike UserCheck, this plugin owns extra state that DetSim snapshots and
+ * restores together with each tracee's state.  The plugin exports the
+ * optional hooks declared in core/user_state.h.
+ */
+static void parse_user_state(const json &cfg, const fs::path &cfg_dir)
+{
+  if (!cfg.contains("UserState"))
+    return;
+
+  std::string src = cfg["UserState"].get<std::string>();
+  std::string src_path = resolve_path(src, cfg_dir);
+  std::string obj_path = compile_plugin_if_needed(src_path, "user_state");
+
+  void *handle = dlopen(obj_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
+  if (!handle)
+  {
+    panic("%s", dlerror());
+  }
+
+  auto *size_fn =
+      reinterpret_cast<int (*)(int)>(dlsym(handle, "user_state_size"));
+  auto *save_fn =
+      reinterpret_cast<void (*)(int, void *)>(dlsym(handle, "user_state_save"));
+  auto *load_fn = reinterpret_cast<void (*)(int, const void *, int)>(
+      dlsym(handle, "user_state_load"));
+
+  if (!size_fn || !save_fn)
+  {
+    LOG_ERROR("UserState plugin %s does not export user_state_size/save",
+              obj_path.c_str());
+  }
+
+  detsim::user_state::install(size_fn, save_fn, load_fn);
+  LOG_INFO("User state plugin loaded");
+}
+
 /* Parse choose points */
 static void parse_choose_points(const json &cfg)
 {
@@ -446,6 +485,7 @@ void read_config(const char *cfg_file)
   parse_fsmap(cfg, cfg_dir);
   parse_assertions(cfg);
   parse_user_check(cfg, cfg_dir);
+  parse_user_state(cfg, cfg_dir);
   parse_choose_points(cfg);
   parse_choose_function(cfg, cfg_dir);
   parse_ckpt(cfg);

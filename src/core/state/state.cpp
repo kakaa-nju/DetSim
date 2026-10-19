@@ -14,6 +14,7 @@
 #include "state_store.h"
 #include "syscall_fmt.h"
 #include "sysstate_store.h"
+#include "user_state.h"
 #include "utils.h"
 #include <assert.h>
 #include <cstdlib>
@@ -855,7 +856,9 @@ void tracee_state::recover_running_state(int index, hash_type ts_hash) const
   /* Restore subsystems */
   ptmc_state.sock_states[index] = sock_state;
   ptmc_state.fs_states[index] = fs_state;
-  ptmc_state.raft_states[index] = raft_state;
+
+  /* Restore user-defined plugin state (e.g. Raft shadow state) */
+  detsim::user_state::restore(index, user_state);
 
   /* Restore FdManager state */
   *ptmc_state.fd_managers[index] = fd_manager_state;
@@ -1255,7 +1258,9 @@ tracee_state::tracee_state(int which, const struct syscall_info info[])
   /* Save subsystems */
   sock_state = ptmc_state.sock_states[which];
   fs_state = ptmc_state.fs_states[which];
-  raft_state = ptmc_state.raft_states[which];
+
+  /* Capture user-defined plugin state (e.g. Raft shadow state) */
+  detsim::user_state::capture(which, user_state);
 
   /* Save FdManager state */
   if (ptmc_state.fd_managers[which])
@@ -1582,7 +1587,6 @@ void cleanup_all()
     ptmc_state.sock_states[i] = SockState();
     ptmc_state.fs_states[i] = FileSystemState();
     ptmc_state.fd_managers[i].reset();
-    ptmc_state.raft_states[i] = raft_check_state();
   }
 
   /* 4. Clear global containers */

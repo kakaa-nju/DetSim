@@ -77,9 +77,6 @@ struct PTMC_STATE
   std::unordered_set<std::string> assertions;
   std::vector<int (*)()> user_checks;
 
-  /* Raft consensus checking state - stored per-process */
-  raft_check_state raft_states[NP];
-
   int error_bound = 5;
 
   // Constructor to ensure proper initialization

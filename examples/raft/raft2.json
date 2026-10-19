@@ -10,5 +10,6 @@
     "recvfrom", "gettimeofday"
   ],
   "SharedFiles": [],
-  "UserCheck": "./plugins/check.so"
+  "UserCheck": "./plugins/check.so",
+  "UserState": "./plugins/check.so"
 }

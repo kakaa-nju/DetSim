@@ -14,10 +14,33 @@
 
 #include "common.h"
 #include "debug.h"
-#include "monitor.h"
+#include "user_state.h"
 #include "utils/expr_eval.hpp"
+#include <algorithm>
 #include <cstring>
 #include <fmt/format.h>
+#include <map>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+/* Shadow state remembered by the checker between transitions. DetSim
+ * serializes it together with each tracee's state through the UserState
+ * plugin hooks below (see core/user_state.h). */
+struct raft_shadow_state
+{
+  long current_term = 0;
+  int is_leader = 0;
+  long last_log_term = 0;
+  long commit_idx = 0;
+  long applied_idx = 0;
+  long last_idx = 0;
+  long voted_for = -1;
+  long match_idx[3] = {0, 0, 0};
+  long next_idx[3] = {0, 0, 0};
+};
+
+static raft_shadow_state g_raft_shadow[NP];
 
 extern "C"
 {
@@ -305,7 +328,7 @@ extern "C"
     if (!success || current_term < 0)
       return 0;
 
-    long prev_term = ptmc_state.raft_states[node_id].current_term;
+    long prev_term = g_raft_shadow[node_id].current_term;
 
     if (current_term < prev_term)
     {
@@ -450,7 +473,7 @@ extern "C"
     if (!success)
       return 0;
 
-    long prev_commit_idx = ptmc_state.raft_states[node_id].commit_idx;
+    long prev_commit_idx = g_raft_shadow[node_id].commit_idx;
 
     if (commit_idx < prev_commit_idx)
     {
@@ -503,8 +526,8 @@ extern "C"
     if (!success)
       return 0;
 
-    long prev_term = ptmc_state.raft_states[node_id].current_term;
-    long prev_voted_for = ptmc_state.raft_states[node_id].voted_for;
+    long prev_term = g_raft_shadow[node_id].current_term;
+    long prev_voted_for = g_raft_shadow[node_id].voted_for;
 
     if (current_term == prev_term && prev_voted_for != -1 &&
         voted_for != prev_voted_for)
@@ -526,7 +549,7 @@ extern "C"
       return 0;
 
     bool success = false;
-    if (!ptmc_state.raft_states[node_id].is_leader)
+    if (!g_raft_shadow[node_id].is_leader)
       return 0;
 
     if (!is_node_leader(node_id, &success) || !success)
@@ -547,7 +570,7 @@ extern "C"
       if (!success)
         continue;
 
-      long prev_match = ptmc_state.raft_states[node_id].match_idx[j];
+      long prev_match = g_raft_shadow[node_id].match_idx[j];
       if (match_idx < prev_match)
       {
         detsim::ui::ui_printf(
@@ -771,7 +794,7 @@ extern "C"
 
   int check_log_consistency() { return 0; }
 
-  void save_raft_state_to_ptmc()
+  void update_raft_shadow()
   {
     for (int i = 0; i < NP; i++)
     {
@@ -782,23 +805,23 @@ extern "C"
 
       long term = get_node_term(i, &success);
       if (success)
-        ptmc_state.raft_states[i].current_term = term;
+        g_raft_shadow[i].current_term = term;
 
       bool is_leader = is_node_leader(i, &success);
       if (success)
-        ptmc_state.raft_states[i].is_leader = is_leader ? 1 : 0;
+        g_raft_shadow[i].is_leader = is_leader ? 1 : 0;
 
       long commit_idx = get_commit_idx(i, &success);
       if (success)
-        ptmc_state.raft_states[i].commit_idx = commit_idx;
+        g_raft_shadow[i].commit_idx = commit_idx;
 
       long applied_idx = get_last_applied_idx(i, &success);
       if (success)
-        ptmc_state.raft_states[i].applied_idx = applied_idx;
+        g_raft_shadow[i].applied_idx = applied_idx;
 
       long voted_for = get_voted_for(i, &success);
       if (success)
-        ptmc_state.raft_states[i].voted_for = voted_for;
+        g_raft_shadow[i].voted_for = voted_for;
 
       int node_count = get_node_count(i, &success);
       if (success && node_count > 0)
@@ -815,17 +838,17 @@ extern "C"
 
           long match_idx = eval<long>(match_expr.c_str(), i, &success);
           if (success)
-            ptmc_state.raft_states[i].match_idx[j] = match_idx;
+            g_raft_shadow[i].match_idx[j] = match_idx;
 
           long next_idx = eval<long>(next_expr.c_str(), i, &success);
           if (success)
-            ptmc_state.raft_states[i].next_idx[j] = next_idx;
+            g_raft_shadow[i].next_idx[j] = next_idx;
         }
       }
 
       long snap_term = get_snapshot_term(i, &success);
       if (success)
-        ptmc_state.raft_states[i].last_log_term = snap_term;
+        g_raft_shadow[i].last_log_term = snap_term;
     }
   }
 
@@ -850,8 +873,34 @@ extern "C"
     result |= check_log_consistency();
     result |= check_committed_entries_replicated_to_majority();
 
-    save_raft_state_to_ptmc();
+    update_raft_shadow();
 
     return result;
+  }
+
+  /* -------------------------------------------------------------------
+   * UserState plugin hooks: persist the shadow state with each checkpoint.
+   * ------------------------------------------------------------------- */
+
+  int user_state_size(int index)
+  {
+    if (index < 0 || index >= NP)
+      return 0;
+    return static_cast<int>(sizeof(raft_shadow_state));
+  }
+
+  void user_state_save(int index, void *buf)
+  {
+    if (index < 0 || index >= NP || buf == nullptr)
+      return;
+    memcpy(buf, &g_raft_shadow[index], sizeof(raft_shadow_state));
+  }
+
+  void user_state_load(int index, const void *buf, int size)
+  {
+    if (index < 0 || index >= NP || buf == nullptr)
+      return;
+    if (size == static_cast<int>(sizeof(raft_shadow_state)))
+      memcpy(&g_raft_shadow[index], buf, sizeof(raft_shadow_state));
   }
 }
