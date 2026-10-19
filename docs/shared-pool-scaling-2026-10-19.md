@@ -875,7 +875,20 @@ cleanup。原日志保留，README和verification.json分别列明该证据限�
 
 仅比较循环改用packed RegionInfo(33B)/PageRef(20B)整块memcmp的v2已通过
 原predicate/native断言及empty/count边界；无新缓存、状态字段或证明豁免。
-其独立同图与两轮吞吐对照正在运行，产品恢复仍为原实现。
+其独立参考及两轮共12个fresh reference-only会话已完成，均通过完整同图。
+`equivalent-memory-memcmp-pilot/paired-summary.json`记录：
+
+| worker | 原实现中位秒 | memcmp候选中位秒 |
+| --- | ---: | ---: |
+| 1 | 31.1192 | 30.4783 |
+| 8 | 6.6622 | 6.6359 |
+| 12 | 6.4326 | 6.0884 |
+
+8-worker改善仅约0.4%，不足以支持收益结论。12-worker中位改善约5.3%，
+但首轮为6.0566/6.0555秒，基本相同；次轮原实现6.8086秒、候选6.1212秒，
+中位差主要来自这一轮较慢的原实现。没有稳定的并行扩展性收益证据，
+两版等价映像捷径均不推广，产品恢复仍为原实现。下一项实验转向复用
+不可变saved-maps文本的解析结果，不减少live线程或/proc状态检查。
 
 ### 未实现的 status FD 缓存假设
 
