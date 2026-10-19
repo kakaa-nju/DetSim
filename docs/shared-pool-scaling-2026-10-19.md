@@ -732,3 +732,34 @@ fresh reference-only会话全部通过10457节点/18266边/零重试和相同can
 这也是不解读亚百分比差异的原因之一。
 下一步测固定产品的cycles/instructions/task-clock，并评估bounded roots局部性
 派发；后者只准备隔离候选，不授权跳过任何恢复校验。
+
+
+## 新产品硬件计数器：扩展损失主要不是指令量翻倍
+
+固定产品二进制、same-cpu、同图reference-only的1/6/8/12诊断通过。
+core事件cycles/instructions/task-clock/context-switches/cpu-migrations均计数，
+报告运行比例100%，无未解析记录；FIFO只包围完整parallel命令，排除prefix
+与独立oracle。派生值与质量原文在`product-counters/summary.json`及各会话
+`session/perf-stat-core-1/measurement.json`。包含coordinator、初始tracee及
+继承的worker/tracee线程，排除perf/controller；与前面的主线程阶段CPU范围不同。
+
+| worker | 全树CPU秒 | 指令/实际边（百万） | IPC（user+kernel） | 切换/实际边 |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 34.102 | 6.778 | 1.014 | 9.633 |
+| 6 | 44.457 | 7.144 | 0.840 | 10.224 |
+| 8 | 50.098 | 7.228 | 0.759 | 11.193 |
+| 12 | 57.048 | 7.410 | 0.687 | 14.709 |
+
+1到12的指令/边只增加约9.3%，CPU秒却增加约67.3%，IPC从1.014降至
+0.687；6物理核时IPC已降至0.840。额外指令和更低的每周期执行效率都存在，
+后者不能解释成“CPU没有充分利用”。这些计数尚不能区分缓存、分支预测、
+内核共享资源或其他微架构争用，不能单凭IPC指定根因。诊断受计数器采样
+及命令启动成本影响，不用于替换无探针吞吐排名。
+
+局部性派发候选已隔离构建，并严格通过原Frontier/候选原测试/候选扩展测试
+三组（原有限图oracle、窗口/稳定平分/BFS屏障/异常不耗lease等）。无字段或
+持久协议变化；只对BFS从现有合法候选的前32项按同node root重合评分。
+source roots来自已验证Edge metadata；最后驻留提示只在远端正常Done后更新，
+本地完成不更新，重启清空，提示从不授权省略恢复。每次评分不读磁盘；新增
+远端Task专属overlap统计，避免用本地完成节点美化指标。native同图与两轮
+baseline/candidate对照已启动，尚无正确性或收益结论，产品派发未修改。
