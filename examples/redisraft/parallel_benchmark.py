@@ -404,7 +404,8 @@ def run(args, work, report):
                 remaining_ms = min(3_600_000, max(1, int((session.started + session.timeout - time.monotonic()) * 1000)))
                 started = time.monotonic()
                 with ResourceSample(session, args.sample_resources) as resources:
-                    reply = checked(session, f"parallel {workers} {args.depth} --strategy {strategy} --storage {args.storage} --retries 0 --timeout-ms {remaining_ms}")
+                    placement = " --worker-placement same-cpu" if args.worker_placement == "same-cpu" else ""
+                    reply = checked(session, f"parallel {workers} {args.depth} --strategy {strategy} --storage {args.storage} --retries 0 --timeout-ms {remaining_ms}" + placement)
                 elapsed = time.monotonic() - started
                 matches = re.findall(r"(?m)^PARALLEL_RESULT (\{[^\n]+\})$", reply)
                 common.require(len(matches) == 1, "missing native parallel receipt")
@@ -489,6 +490,7 @@ def main():
     parser.add_argument("--seed", type=int, default=1)
     parser.add_argument("--workers", type=int, nargs='+', default=[1, 2, 4], help="explicit worker counts, including 8 for large cases")
     parser.add_argument("--strategies", choices=('dfs', 'bfs'), nargs='+', default=['dfs', 'bfs'])
+    parser.add_argument("--worker-placement", choices=("none", "same-cpu"), default="none")
     parser.add_argument("--storage", choices=('shared', 'durable'), default='shared')
     parser.add_argument("--reference-report", type=Path, help="locally verified same-workload graph; skips local serial and requires parallel-first")
     parser.add_argument("--parallel-first", action='store_true', help="one worker/strategy per fresh session; time parallel before serial oracle")
@@ -512,7 +514,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="run-", dir=args.output))
     report = {"passed": False, "artifacts": str(work), "backend": args.backend, "depth": args.depth,
-              "workers": args.workers, "strategies": args.strategies, "storage": args.storage, "sample_resources": args.sample_resources, "parallel_first": args.parallel_first, "reference_report": str(args.reference_report) if args.reference_report else None,
+              "workers": args.workers, "strategies": args.strategies, "storage": args.storage, "worker_placement": args.worker_placement, "sample_resources": args.sample_resources, "parallel_first": args.parallel_first, "reference_report": str(args.reference_report) if args.reference_report else None,
               "scope": __doc__, "timing": "command_seconds is complete command to prompt (including tail journal and driver polling); native seconds separately excludes final node journal; primary large-scale throughput uses command_seconds"}
     started = time.monotonic()
     try:

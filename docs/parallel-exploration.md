@@ -32,6 +32,9 @@ owned、停止状态、捕获边界及内核注册。失败后的 worker 整体�
 
 `parallel 8 12 --worker-placement same-cpu` 将每个 worker 及其控制的目标
 物理线程放到同一允许 CPU。默认 `--worker-placement none`，不调整 affinity。
+Raft 性能驱动 `examples/redisraft/parallel_benchmark.py` 同样接受
+`--worker-placement same-cpu`，在结果中记录该运行选项；默认none不向旧二进制
+传递新增参数，以保留历史版本对照。
 该选项同时支持 shared/durable，CPU 分配写入 `worker_spawn.host_cpu`，
 属于宿主执行安排，不进入模型身份或快照。worker 重启保留同一 slot 的 CPU。
 
