@@ -392,8 +392,9 @@ CAS 外 Ready 校验/发布 4.87%、wire 1.91%、CAS 外 Ready metadata 1.77%、
 可重叠的调用栈份额中，Ready 校验/发布 12.63%、页访问/迭代 27.94%、
 StateView::read 3.39%。单独 vfscanf 叶子占 worker CPU 3.49%，调用链显示它
 来自 capture_stopped/get_maps_item 与 restore_memory_mappings 的 sscanf。
-这是目标内存布局解析，与先前移除的协调器后代扫描不同；不能因为它耗时就
-不观察可能变化的映射。后续可先验证严格等价的解析器优化，避免贸然缓存布局。
+尤其 capture_stopped 已有 resident 快路径，主要是在反复解析保存的 maps_text，
+不能将这些样本全部解释成重新读取 /proc。这里是目标内存布局解析，与先前移除的
+协调器后代扫描不同；不能因为它耗时就不观察可能变化的映射。后续可先验证严格等价的解析器优化，避免贸然缓存布局。
 
 该 profile 深度比早期 v1 depth16 小，频率也不同，不能把两份百分比当作严格
 同工作量 A/B 时间差。当前样本用于定位剩余工作，不作已经达到硬件上限的证明。
