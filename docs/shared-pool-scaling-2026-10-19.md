@@ -377,8 +377,32 @@ v5 各并发数产生 1,245 个 RootProof 文件，总文件逻辑字节 196,710
 原始行、替补及排除原因：`build/shared-parallel/repeat-v4-v5-page4/`；空间统计：
 `build/shared-parallel/pilot-v5/root-proof-cost.json`。
 
+## 当前产品 v6 的 CPU profile
+
+冻结的 `tracer-shared-v6-np3` 完成 depth12/8-worker 同图搜索及随后的 native
+serial 节点集/首父边投影验证。499Hz cpu-clock/DWARF16KiB 共 26,028 个样本，
+全部被显式字段解码后的分析器接收，无丢样警告。最初默认 perf script 字段无法
+匹配旧分析器，零样本结果废弃；重解码并加入零样本拒绝后才生成下列数字。
+
+协调器占全部 CPU 样本 4.98%，worker 93.73%，tracee/其它 1.29%。worker 的
+互斥优先归类为：CAS 外 capture 32.72%、restore/adoption 24.73%、CAS 10.69%、
+CAS 外 Ready 校验/发布 4.87%、wire 1.91%、CAS 外 Ready metadata 1.77%、
+其它/未归类 21.75%；不是墙钟等待份额。worker 未知叶子 4.21%。
+
+可重叠的调用栈份额中，Ready 校验/发布 12.63%、页访问/迭代 27.94%、
+StateView::read 3.39%。单独 vfscanf 叶子占 worker CPU 3.49%，调用链显示它
+来自 capture_stopped/get_maps_item 与 restore_memory_mappings 的 sscanf。
+这是目标内存布局解析，与先前移除的协调器后代扫描不同；不能因为它耗时就
+不观察可能变化的映射。后续可先验证严格等价的解析器优化，避免贸然缓存布局。
+
+该 profile 深度比早期 v1 depth16 小，频率也不同，不能把两份百分比当作严格
+同工作量 A/B 时间差。当前样本用于定位剩余工作，不作已经达到硬件上限的证明。
+原始样本、显式解码及摘要位于 `build/shared-parallel/profile-v6/`。
+新的 depth20 大图运行已启动于 `build/shared-parallel/large-v6/`，仍未完成，
+不将旧版的大图通过结果当作本版已验证。
+
 ## 尚需完成
 
-1. 对当前最快版本重新采集全链路 CPU profile，定位剩余并行额外成本。
+1. 根据当前 profile 验证映射解析等后续优化，而非继续假设通信/存储仍主导。
 2. 补充更多重复样本，以及更大图的同工作量 1/2/4/6/8 对照。
 3. 在结果达到目标前，不将传输量下降或高 CPU 利用率当作接近线性的证明。
