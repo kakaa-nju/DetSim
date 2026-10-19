@@ -1012,3 +1012,33 @@ counted、running fraction=1.0、无未解析行；不混入上述无探针对�
 耗时下降，说明这处重复扫描不是足以解释当前扩展性损失的大头；不能从此
 推广到所有/proc扫描都不重要。证据在
 `build/shared-parallel/rseq-interval-counters/counter-summary.json`。
+
+## 主线程重复 GPR 写入：原生验证通过，但两轮收益不明确
+
+私有`duplicate-main-registers/`保留无条件物理leader header SETREGS，成功后
+才把本次写入值作为局部receipt返回；owned恢复立即消费。只有alive main、
+physical TID是同一leader、完整GPR与刚写header相等时省第二次SETREGS。
+XSTATE始终恢复，dead logical main的物理anchor写保留；独立调用入口默认
+无receipt。无全局寄存器缓存、快照字段或对象布局变化。
+
+原路径与候选均通过真实主线程/pthread sibling oracle：实际GPR/XMM0回读，
+匹配时主线程SETREGS 2→1且XSTATE写保留，不同GPR仍两写，dead-main anchor、
+无receipt路径、header/其他线程/XSTATE故障传播，以及受控后继GPR/XSTATE
+一致。六组mapping、state-I/O和page门禁通过。fixture的rseq注销顺序及
+include前置条件RED留存，只修测试，不作为产品缺陷。NP3 SHA256：
+`cd82ba1d298eb956bf0bdff2ffa115f7162759260c77582d1b152276e0e708fb`。
+
+独立native参考及两轮12个fresh reference-only会话完整同图、零重试，仍为
+10457节点/18266边。same-cpu、locality none、pages/shared，反转两轮顺序。
+
+| worker | 原实现两轮中位秒 | GPR候选两轮中位秒 |
+| --- | ---: | ---: |
+| 1 | 31.0257 | 31.3785 |
+| 8 | 7.0938 | 6.9584 |
+| 12 | 6.7616 | 6.7305 |
+
+样本不足且改善很小，未证明稳定的全链路收益，不推广。原始数据在
+`build/shared-parallel/main-registers-pilot/{summary,paired-summary}.json`。
+停止继续围绕单次ptrace重复调用堆叠微优化；下一步准备紧凑capture布局复用，
+并用全量编译保留帧指针/调试信息的分析版本，补强之前大量worker栈无法归类
+的证据。分析构建尚未完成，不把它当成已有瓶颈结论或产品性能结果。
