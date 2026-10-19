@@ -679,3 +679,32 @@ NP=1 production构建，same-cpu choices/mixed/pending × full/pages六例；
 不作为纯并行全链路吞吐。权威结果在
 `build/shared-parallel/product-placement-large16/reference12/run-f_g2gsiz/results.json`。
 后续fresh reference-only的1/2/4/6/8/12正在顺序运行，暂未形成完整加速比。
+
+
+## depth16 产品扩展矩阵完成
+
+六个全新reference-only会话均通过63418节点/112305边完整带标签图验证，
+零重试、正常退出。全链路时间为command到prompt加store收尾，不含独立
+参考生成。`product-placement-large16/scaling-summary.json` 保留各会话路径。
+
+| worker | 含收尾秒 | 同版加速比 | worker效率 | 实际边/秒 |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 185.5098 | 1.000 | 100.0% | 605.4 |
+| 2 | 93.7690 | 1.978 | 98.9% | 1197.7 |
+| 4 | 57.6095 | 3.220 | 80.5% | 1949.4 |
+| 6 | 43.8786 | 4.228 | 70.5% | 2559.4 |
+| 8 | 41.6209 | 4.457 | 55.7% | 2698.3 |
+| 12 | 38.0117 | 4.880 | 40.7% | 2954.5 |
+
+该图约为小图6倍边数，8/12-worker加速比仍约4.46/4.88，未达到8-worker
+5.6倍目标。固定启动与收尾不能独自解释当前扩展损失；这不等于已经证明
+某一个持续瓶颈是主因。每格仅一次，不能据此区分微小版本差异。
+
+分桶64实验已完成独立artifact构建，三组适配组件门禁全部通过：atomic并发
+发布/冲突/partial临时文件、类型与hash损坏、缓存、readonly、恒定flush及
+跨设备/poison；StateStore pending/globalhint/coldfallback/barrier；full/pages
+Ready完整闭包、actors、globalproof与冷只读重开。新布局拒绝flat/缺桶、
+symlink/非目录/异设备及构造失败FD泄漏也纳入。精确命令/对象hash/测试
+binaryhash在`pool-sharding64/{build-manifest.json,components-manifest.json}`，
+原始输出在components.log。源码仍未进产品；独立native同图参考与两轮
+baseline/candidate 1/8/12吞吐对照已启动，尚无收益结论。
