@@ -959,3 +959,56 @@ owner淘汰后存活、locale旁路、串行generation和poison。尚未实际�
 fresh全线程检查，只有resident/brk/maps完全匹配、未执行目标的早返回才向
 紧接的memory阶段传递局部证明；公开低层API和所有映射修复路径仍完整检查。
 pending信号、停驻与资源检查不变。此处尚是待验证实现，不计为产品收益。
+
+## 相邻恢复阶段的 rseq 扫描复用：隔离验证与四轮吞吐
+
+私有`rseq-stopped-interval/`实现上述局部证明，不新增快照字段、全局检查
+缓存或FD缓存。公开mapping入口丢弃证明，公开memory入口始终完整检查；
+仅owned调用相邻传递结果。所有映射修复路径均重查，即使实际未注入syscall。
+
+审查发现非classic C++ locale的ctype facet可在getline中调用用户代码。
+真实native回调执行只读brk(0)后FullImage仍有效，因此它不能单独证明未执行
+目标。新增合同断言实际拒绝初稿：callbacks=1、readonly_queries=1、
+FullImage前后都有效，却只scan1/reuse1。最终只在encoded.getloc()==classic
+时授予证明；原解析locale不变。相同测试变为scan2/reuse0，RED日志保留。
+这是局部无resume合同的RED→GREEN，不宣称该次brk查询改变了rseq注册。
+
+NP1/NP3专门native和sizeof/alignment/既有字段offset对照通过；NP1六组
+mapping（full/pages/verify-pages × normal/tiny）、page和state-I/O通过。
+覆盖classic owned一次扫描、两个公开入口分别扫描、真实kernel注册rseq
+被两个公开入口在首次检查拒绝、pending SIGUSR1仍由原barrier先拒绝，
+以及完整字节/maps/GPR/xstate和stdout内容/offset恢复。资源oracle不扩大到
+完整kernel/network图；未声称一般线程恢复正确性。实际源码与patch均保留
+classic guard，先前无guard源码/object单独标为被拒草案。
+
+候选NP3 SHA256：
+`56c3b59edc04d0c7251888f8e0414b5beca98a01c912e341a5f089cf4f716dc3`。
+独立native参考及四轮24个fresh reference-only会话全部完整同图，仍为
+10457节点/18266边、零重试；same-cpu、locality none、pages/shared，两轮
+baseline先、两轮candidate先。没有并发build或计数器采样。
+
+| worker | 原实现四轮中位秒 | 局部rseq复用四轮中位秒 |
+| --- | ---: | ---: |
+| 1 | 30.8664 | 31.2141 |
+| 8 | 6.7853 | 6.5476 |
+| 12 | 6.5766 | 6.3922 |
+
+8-worker两对更快、两对更慢；12-worker三对更快，但最后一对明显退化。
+中位8/12-worker分别改善约3.5%/2.8%，串行稍退，不能作为稳定收益结论。
+加速比分别约4.77/4.88，仍未达到8-worker 5.6目标。暂不推广；原始数据
+在`build/shared-parallel/rseq-interval-pilot/{summary,paired-summary}.json`。
+另行完成1/12-worker硬件计数器诊断，四个会话同图通过，所有请求事件报告
+counted、running fraction=1.0、无未解析行；不混入上述无探针对照。
+
+| worker/实现 | CPU秒 | 每边指令（百万） | IPC | 每边context switches |
+| --- | ---: | ---: | ---: | ---: |
+| 1 原实现 | 34.2827 | 6.7775 | 1.0083 | 9.5961 |
+| 1 候选 | 34.6667 | 6.7491 | 1.0033 | 9.6010 |
+| 12 原实现 | 56.8471 | 7.4260 | 0.6911 | 14.7692 |
+| 12 候选 | 57.7365 | 7.3936 | 0.6797 | 15.0368 |
+
+范围是搜索命令窗口内协调器/worker/目标树的继承计数，不含prefix/串行oracle，
+也不是仅主线程CPU。每格一次，仅作诊断。指令量只减少约0.4%，未显示CPU
+耗时下降，说明这处重复扫描不是足以解释当前扩展性损失的大头；不能从此
+推广到所有/proc扫描都不重要。证据在
+`build/shared-parallel/rseq-interval-counters/counter-summary.json`。
