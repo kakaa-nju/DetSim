@@ -9,8 +9,10 @@
 #include <fcntl.h>
 #include <cstdio>
 #include <cerrno>
+#include <climits>
 #include <cstring>
 #include <filesystem>
+#include <memory>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <sys/rseq.h>
@@ -35,10 +37,12 @@ extern "C" ssize_t __wrap_pread(int fd, void* buffer, size_t size, off_t offset)
 extern "C" uint64_t __real__Z17tracee_do_syscalliimmmmmm(int, int, uint64_t, uint64_t,
                                                         uint64_t, uint64_t, uint64_t, uint64_t);
 static unsigned guard_discards = 0;
+static unsigned mapping_syscalls = 0;
 static int discard_failure = 0;
 extern "C" uint64_t __wrap__Z17tracee_do_syscalliimmmmmm(int pid, int nr, uint64_t address,
         uint64_t size, uint64_t advice, uint64_t a4, uint64_t a5, uint64_t a6)
 {
+    ++mapping_syscalls;
     if (nr == SYS_madvise && address == guard_address && advice == MADV_DONTNEED) {
         ++guard_discards;
         if (discard_failure == 3) throw std::runtime_error("injected unexpected discard stop failure");
@@ -52,6 +56,50 @@ extern "C" uint64_t __wrap__Z17tracee_do_syscalliimmmmmm(int pid, int nr, uint64
     return __real__Z17tracee_do_syscalliimmmmmm(pid, nr, address, size, advice, a4, a5, a6);
 }
 static void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+static void check_mapping_parser()
+{
+    const auto parse = [](const std::string& text) {
+        std::unique_ptr<FILE, decltype(&fclose)> file(tmpfile(), fclose);
+        require(bool(file), "mapping parser temporary file");
+        require(fwrite(text.data(), 1, text.size(), file.get()) == text.size(), "mapping parser fixture write");
+        rewind(file.get());
+        std::vector<maps_item> result;
+        get_maps_item(result, file.get());
+        return result;
+    };
+    const auto rows = parse(
+        "FFFFFFFFFFFFE000-FFFFFFFFFFFFF000 r-xp FFFFFFFFFFFFFFFF ffffffff:FFFFFFFF 18446744073709551615 /tmp/backing (deleted)\n"
+        "1000-2000\trw-p\t0 00:00 0\t\n"
+        "3000-4000 ---p 00000000 0:0 0 [anon:label]\n");
+    require(rows.size() == 3 && rows[0].start == UINT64_C(0xffffffffffffe000) &&
+            rows[0].end == UINT64_C(0xfffffffffffff000) && rows[0].offset == UINT64_MAX &&
+            rows[0].inode == UINT64_MAX && rows[0].a == UINT_MAX && rows[0].b == UINT_MAX &&
+            !strcmp(rows[0].flags, "r-xp") && !strcmp(rows[0].name, "/tmp/backing") &&
+            !rows[1].name[0] && !strcmp(rows[2].name, "[anon:label]"),
+            "mapping parser boundary, whitespace, anonymous and first-token name behavior");
+    const std::string long_name(600, 'x');
+    const auto truncated = parse("1-2 rw-p 0 00:00 0 " + long_name + "\n");
+    require(truncated.size() == 1 && strlen(truncated[0].name) == 511 &&
+            std::string(truncated[0].name) == long_name.substr(0, 511), "mapping name width bound");
+    const auto prefixed = parse(" +1000-+2000 rw-p +0x100 +0xAB:+0xCD +9 /tmp/signed\n"
+                                "-2000--1000 rw-p -0x100 -1:-1 -1\n");
+    require(prefixed.size() == 2 && prefixed[0].start == 0x1000 && prefixed[0].end == 0x2000 &&
+            prefixed[0].offset == 0x100 && prefixed[0].a == 0xab && prefixed[0].b == 0xcd &&
+            prefixed[0].inode == 9 && prefixed[1].start == UINT64_C(0xffffffffffffe000) &&
+            prefixed[1].end == UINT64_C(0xfffffffffffff000) && prefixed[1].offset == UINT64_MAX - 255 &&
+            prefixed[1].a == UINT_MAX && prefixed[1].b == UINT_MAX && prefixed[1].inode == UINT64_MAX,
+            "mapping parser scanf-compatible signs and hexadecimal prefixes");
+    const auto unterminated = parse("0-1 rw-p 0 00:00 010");
+    require(unterminated.size() == 1 && unterminated[0].inode == 10 && !unterminated[0].name[0],
+            "mapping parser decimal inode and final row without newline");
+    for (const char* invalid : {"\n", "1-2 rw-p 0 00:00\n", "1-2 rw-p 0 gg:00 0\n",
+            "1-2 rw-pp 0 00:00 0\n", "2-1 rw-p 0 00:00 0\n", "1-1 rw-p 0 00:00 0\n"}) {
+        bool rejected = false;
+        try { (void)parse(invalid); } catch (const std::runtime_error&) { rejected = true; }
+        require(rejected, "malformed mapping must fail explicitly");
+    }
+
+}
 static int protection(pid_t pid, uintptr_t address)
 {
     std::string path = "/proc/" + std::to_string(pid) + "/maps";
@@ -72,6 +120,7 @@ int main(int argc, char** argv)
     auto cwd = std::filesystem::current_path();
     try {
         require(mkdtemp(directory) && chdir(directory) == 0, "temporary directory");
+        check_mapping_parser();
         StateStore::Config store_config;
         if (argc == 2 && !strcmp(argv[1], "--tiny-cache"))
             store_config.hot_cache_size = store_config.warm_cache_size = 1;
@@ -121,6 +170,31 @@ int main(int argc, char** argv)
         StateStore::instance().init(store_config);
         tracee_state saved;
         auto hash = saved.save_full_state_to_state_store(child);
+        {
+            // Saved maps are length-delimited, unlike the FILE/C-string entry point.
+            // A NUL inside mandatory permissions must retain sscanf's rejection.
+            const auto initial_view = SnapshotView::open(hash);
+            const auto initial_maps = initial_view->maps_text();
+            const auto permission = initial_maps.find_first_not_of(" \t", initial_maps.find(' '));
+            require(permission != std::string_view::npos && permission + 1 < initial_maps.size(), "saved maps permissions fixture");
+            std::vector<uint8_t> nul_snapshot;
+            require(StateStore::instance().load(hash, nul_snapshot), "load saved maps NUL fixture");
+            StateDataHeader nul_header;
+            memcpy(&nul_header, nul_snapshot.data(), sizeof(nul_header));
+            require(nul_header.maps_offset + permission + 1 < nul_snapshot.size(), "saved maps NUL offset");
+            nul_snapshot[nul_header.maps_offset + permission + 1] = 0;
+            const auto nul_hash = StateStore::instance().save(nul_snapshot.data(), nul_snapshot.size());
+            const auto calls_before_nul = mapping_syscalls;
+            bool nul_rejected = false;
+            try {
+                std::vector<maps_item> nul_maps;
+                saved.restore_memory_mappings(nul_hash, child, nul_maps);
+            } catch (const std::runtime_error& error) {
+                nul_rejected = std::string(error.what()) == "Invalid saved memory mapping text";
+            }
+            require(nul_rejected && mapping_syscalls == calls_before_nul,
+                    "embedded NUL in saved mandatory mapping must reject before kernel mapping changes");
+        }
         char* literal = static_cast<char*>(read_mem(child, hash, reinterpret_cast<uintptr_t>("read-only fixture"), 17));
         require(memcmp(literal, "read-only fixture", 17) == 0, "RO literal missing from snapshot"); free(literal);
         auto mutate = [&] {

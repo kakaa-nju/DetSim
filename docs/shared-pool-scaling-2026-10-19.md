@@ -402,6 +402,76 @@ StateView::read 3.39%。单独 vfscanf 叶子占 worker CPU 3.49%，调用链显
 新的 depth20 大图运行已启动于 `build/shared-parallel/large-v6/`，仍未完成，
 不将旧版的大图通过结果当作本版已验证。
 
+## 大图 v6 在途记录与解析器候选
+
+新大图的 parallel 命令已返回：depth20、8 workers、291,332 节点、521,196 条
+实际边、零重试；原生搜索 207.0018 秒，完整命令 208.5001 秒（约 2,500 边/秒、
+1,397 节点/秒，节点包含边界/预算叶子）。随后 native serial 参考仍在执行，
+后续原生参考验证已完成：new_node_sets_equal 与 serial_projection_edges_subset
+均为 true，tracer_exit=0，最终 passed=true；规范图 SHA 为
+30653c6934051b642fcc4aa0af48b72094cd610f59de2dc3f3fae7a26f59ef91，与 v1 大图相同。
+验证后收尾 0.4148 秒，整个会话 1495.1915 秒；该收尾包含 oracle 后的同步，
+不作为 pure-parallel 全链路基线。native oracle 实际执行 957,059 次 transition，
+不是拿耗时直接与 521,196 边的 parallel 算线性加速比。
+来源：`build/shared-parallel/large-v6/run-nw7tdq95/results.json` 在途报告。
+该阶段计时结束并记录后才启动下面的编译/组件测试，后续 serial oracle 仅用于
+验证覆盖，其受并行编译影响的墙钟不用于效率对照。
+
+下一候选仅替换 state.cpp 三处 maps 文本解析：一个私有 from_chars 行解析器，
+并以 string_view 遍历保存文本，避免重复复制 istringstream/逐行 string。
+不新增布局缓存或状态字段，不改变真实 /proc 读取和 resident 失效规则，
+保留 unsigned 符号、十六进制前缀、匿名记录、7项、511字节 first-token 名称；
+数值溢出明确拒绝。旧实现先通过新增词法回归。
+
+初版候选在保存文本含 NUL 时改变旧 sscanf 行为，独立审查发现后用真实快照
+副本复现 RED；修正入口 NUL 截断后测试 GREEN，要求在任何注入的映射 syscall
+前明确拒绝。NP1 映射 full/pages/verify 与 tiny-cache、state-io、actors/adoption，
+NP2 capture 等价、page/shared/v1 与15个 native parallel 场景均通过；
+make check 与 NP3 生产构建通过。候选未提交；大图参考结束后首轮全链路
+同图性能实验已启动，尚无最终判断。
+日志位于 `build/shared-parallel/maps-parser/`。不把减少 sscanf 调用等同于吞吐收益。
+
+## 计时口径补充：参考生成会话不是纯搜索收尾
+
+源码复核发现 `parallel_benchmark.py` 的首次 `--parallel-first`、无 reference
+模式，在 timed parallel 之后仍在同一个 tracer/store 执行 serial oracle，最后
+才 graceful shutdown。因此该行的 finalization_seconds 包含验证新增写入，
+search_and_finalization_seconds 不是隔离的 parallel-only 全链路耗时。此前
+大图 v1 的 408.9988 秒只可称为“并行命令加验证后收尾”，不应拿它作为纯并行
+全链路扩展性基线；parallel command_seconds 本身仍是已隔离记录的计时。
+
+两轮正式交错小图对照全部使用每个二进制自身已验证的 reference-report，跳过
+本地 oracle，故表中的 1/8 combined 中位数没有这项混合。早期首次 pilot 的
+combined 单次比值不具备相同的收尾条件，应以这张正式交错表为准。
+
+当前大图 v6 首次运行用于建立参考；其最终收尾同样不能充当 pure-parallel
+耗时。参考通过后必须另跑 fresh-session reference-only 的 8-worker 行，
+再与同条件 1/2/4/6-worker 行比较。保留真实持久化屏障，不通过跳过 flush
+改善统计。不修改或重启仍在运行的参考生成进程。
+
+## 解析器候选四轮结论：不合入优化
+
+四轮分别以正/反版本顺序运行，每格4个全新 reference-only 会话；全部通过
+完整参考图、10457/18266/零重试检查。原始16行保留在
+`build/shared-parallel/repeat-v6-v7/summary.json`，摘要为 four-round-summary.json。
+
+| 版本 | 1-worker 含收尾中位秒 | 8-worker 含收尾中位秒 | 同版加速比 |
+| --- | ---: | ---: | ---: |
+| v6 | 32.2624 | 7.1263 | 4.527 |
+| v7 解析候选 | 30.5911 | 7.1039 | 4.306 |
+
+单 worker 约快5.2%，8-worker 仅约快0.3%；各轮8-worker差异方向不一致，
+不能宣称稳定并行收益，更未改善扩展性。故不合入该解析器实现，生产 state.cpp
+已恢复 v6。候选原始源、patch、固定二进制、NUL RED/GREEN与性能记录归档，
+保留原解析器也通过的词法/保存文本NUL回归；候选专属溢出拒绝测试没有移植到
+仍使用 scanf 的生产代码，不冒充已实现的边界检查。
+
+下一实验针对并行额外成本，而非继续均匀微优化：在 Hello admission 完成、
+首次 Task 开始执行前，将每个 worker 与它控制的目标线程绑定到同一允许CPU，
+测试迁移/跨缓存交接成本。只准备独立 artifact，未改生产或放宽 manifest。
+受测程序仍必须符合当前虚拟CPU/rseq与CPU指令限制；不承诺任意程序的CPU位置
+观测均已虚拟化。另保留独立 DWARF cache-first 候选的组件证据，暂不混入。
+
 ## 尚需完成
 
 1. 根据当前 profile 验证映射解析等后续优化，而非继续假设通信/存储仍主导。
