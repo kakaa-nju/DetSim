@@ -1514,3 +1514,23 @@ comparisons retain complete labeled graphs and zero retries: combined median
 is 4.52x, still below the scaling objective. Formal product gates and current
 limitations are recorded in the [scale report](shared-pool-scaling-2026-10-19.md).
 This does not establish larger-graph scaling or close model correctness gaps.
+
+## Deferred DWARF cache-lifecycle finding (2026-10-19)
+
+While preparing isolated performance regressions, the unchanged baseline
+reproduced: dwarf_cleanup(); dwarf_type_size("ForwardAlias") caches a zero miss;
+a later successful dwarf_init(forward fixture) leaves that zero size cached,
+although dwarf_get_type_info reports the valid type. dwarf_init only invokes
+full cleanup when dbg is non-null. This is an unresolved lifecycle defect,
+separate from the scoped C18 indexing repair; no product fix is included in the
+scaling experiment. Evidence: build/shared-parallel/dwarf-fastpath/build-tests.log
+and its retained artifact sources. Normal cold/warm/reinit tests that do not
+create an unloaded-context size miss still pass in baseline and candidate.
+
+An additional artificial StateView fixture rejects both a named-pointer arrow
+and an explicit-cast arrow, despite a saved pointer slot and target field and a
+successful direct-member read. This is not yet localized to a product defect:
+pointer type descriptors and the failing AST stage need inspection. Do not infer
+that all arrow expressions are unsupported; actual Raft property observations
+continue to pass. Baseline failure evidence and fixture are retained in the same
+artifact directory.
