@@ -14,6 +14,8 @@
 尚未重测大图，不能直接沿用为发布版收益。
 本文件后续按实验顺序记录；开头的v1数据是历史基线，后续各节有独立二进制
 与计时范围，不能跨版本或混合后置oracle收尾拼接加速比。
+最新采样复核发现内核符号权限和wire函数归类问题，见末节；旧wire占比不能
+当作通信耗时，other/unattributed也不能直接当作栈展开失败比例。
 
 ## 测试对象与最初 v1 基线
 
@@ -1042,3 +1044,33 @@ include前置条件RED留存，只修测试，不作为产品缺陷。NP3 SHA256
 停止继续围绕单次ptrace重复调用堆叠微优化；下一步准备紧凑capture布局复用，
 并用全量编译保留帧指针/调试信息的分析版本，补强之前大量worker栈无法归类
 的证据。分析构建尚未完成，不把它当成已有瓶颈结论或产品性能结果。
+
+## 采样复核：内核符号权限与归类器修正
+
+随后完成独立全量分析构建`profile-full-fp/tracer-profile-fp`，SHA256：
+`8115a52dc572ceddfec31a5732593846e29cac33d8033a967eab91b1e7c60f0b`。
+全部56个生产对象实际以O3、-g、-fno-omit-frame-pointer及
+-fno-optimize-sibling-calls重编，关键函数RBP序言已审；不是只加链接参数。
+独立native参考及FP8、DWARF8、FP1三次采样均通过完整同图，199Hz、无lost
+警告。该分析构建不用于产品吞吐或加速比排名。
+
+普通用户读取/proc/kallsyms地址为零，root可见真实地址。对同一perf.data
+用root重新解码后，FP8/DWARF8的worker未知叶节点占比分别从约36.1%/36.5%
+降至4.44%/4.47%。原用户解码文件保留为*-user；原始采样未改，未调整
+kptr_restrict或其它宿主设置。此处修复的是符号解码权限，不代表消除了全部
+调用链截断。
+
+旧归类器在整段栈文本中搜索wire::，会匹配
+worker_loop(int, detsim::search::wire::Limits, int)的参数类型。DWARF8的9225个
+worker样本中，旧匹配1596个（17.30%），其中1565个仅因worker_loop参数
+命中；实际以detsim::search::wire::开头的函数帧只有31个（0.34%）。后者也
+只是能够识别的CPU样本，不能当作全部通信wall time或包含off-CPU等待的成本。
+旧wire比例明确撤回，不能据此主张通信占17%或迁移shmem即可解决扩展性。
+
+other/unattributed仍包含归类器漏列的已识别工作：例如StateView表达式求值
+虽有inclusive计数，却未进入旧exclusive分类。DWARF8中约14%的worker样本
+含StateView::evaluate，不能把这部分视为展开失败。归类必须按函数帧匹配，
+区分符号未知、调用链缺失和分类规则遗漏；inclusive组不得相加成耗时预算。
+可审计原始数据及用户/root解码对照保存在
+`build/shared-parallel/profile-full-fp-runs/`。此复核改变了热点证据的可信范围，
+不改变前述同图吞吐及硬件计数器结果。
