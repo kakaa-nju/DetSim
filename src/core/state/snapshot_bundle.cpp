@@ -229,6 +229,12 @@ Bundle SharedPublisher::export_bundle(hash_type key) {
         [&](hash_type root) { return proven_.contains(root); },
         [&](const auto& roots) { remember(roots); });
 }
+ReadyState SharedPublisher::import_bundle(const Bundle& bundle, const std::string& expected,
+                                         bool materialize_child) {
+    auto ready = import_shared_bundle(bundle, expected, pool_, materialize_child);
+    remember(ready.state.ts_hash);
+    return ready;
+}
 ReadyState load_shared_state(hash_type key, const std::string& expected, SharedObjectPool& pool) {
     const auto record = pool.load_ready(key);
     require(bool(record), "Shared snapshot is not ready");

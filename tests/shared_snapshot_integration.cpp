@@ -54,6 +54,15 @@ extern "C" void wrapped_publish_ready(SharedObjectPool* pool, hash_type key, con
         throw std::runtime_error("Injected failure at Ready publication boundary");
     real_publish_ready(pool, key, bytes);
 }
+static std::atomic<bool> fail_registration{false};
+extern "C" bool real_metadata_save(SysStateStore*, hash_type, const std::vector<uint8_t>&)
+    asm("__real__ZN13SysStateStore4saveEmRKSt6vectorIhSaIhEE");
+extern "C" bool wrapped_metadata_save(SysStateStore*, hash_type, const std::vector<uint8_t>&)
+    asm("__wrap__ZN13SysStateStore4saveEmRKSt6vectorIhSaIhEE");
+extern "C" bool wrapped_metadata_save(SysStateStore* store, hash_type key, const std::vector<uint8_t>& bytes) {
+    if (fail_registration.exchange(false)) return false;
+    return real_metadata_save(store, key, bytes);
+}
 static_assert(!std::is_copy_constructible_v<SharedPublisher> && !std::is_move_constructible_v<SharedPublisher>);
 static_assert(!std::is_copy_assignable_v<SharedPublisher> && !std::is_move_assignable_v<SharedPublisher>);
 static void require(bool value, const char* text) { if (!value) throw std::runtime_error(text); }
@@ -253,6 +262,78 @@ static void publisher_proofs(bool pages, const std::filesystem::path& directory)
     fail_sync = false;
     reset_calls(); rejects([&] { publisher.export_bundle(new_system(a)); }); hit_calls();
 }
+static void publisher_import_proofs(bool pages, const std::filesystem::path& directory) {
+    const std::string model = "bundle-fixture/model1";
+    const auto a = make_root(pages), b = make_root(pages, 'n'), c = make_root(pages, 'o');
+    SharedObjectPool pool(directory.string());
+    const auto ref_a = export_shared_bundle(new_system(a), pool);
+    const auto ref_b = export_shared_bundle(new_system(b), pool);
+    SharedPublisher imported(pool, 1);
+    const auto bare = imported.import_bundle(ref_a, model);
+    check_actors(bare);
+    for (const auto& child : bare.state.child) require(child.threads.empty(), "Bare import remains lazy");
+    reset_calls(); imported.export_bundle(new_system(a)); hit_calls();
+    imported.import_bundle(ref_b, model);
+    reset_calls(); imported.export_bundle(new_system(b)); hit_calls();
+    reset_calls(); imported.export_bundle(new_system(a)); full_calls(); // Successful import evicted a.
+    reset_calls(); const auto violation = imported.export_bundle(new_system(a, true)); hit_calls();
+    require(load_shared_state(violation.system_key, model, pool).actors.empty(), "Imported proofs must not cache actors");
+    reset_calls(); const auto exited = imported.export_bundle(new_system(a, false, true)); hit_calls();
+    require(load_shared_state(exited.system_key, model, pool).actors.size() == 2 * (NP - 1),
+            "Imported proof must respect current process status");
+    SharedPublisher disabled(pool, 0);
+    disabled.import_bundle(ref_a, model);
+    reset_calls(); disabled.export_bundle(new_system(a)); full_calls();
+
+    auto failed_import_preserves = [&](SharedObjectPool& target, auto attempt) {
+        SharedPublisher context(target, 1);
+        context.export_bundle(new_system(a));
+        rejects([&] { attempt(context); });
+        reset_calls(); context.export_bundle(new_system(a)); hit_calls();
+        reset_calls(); context.export_bundle(new_system(b)); full_calls();
+    };
+    failed_import_preserves(pool, [&](auto& context) { context.import_bundle(ref_b, "wrong model"); });
+    failed_import_preserves(pool, [&](auto& context) { context.import_bundle(ref_b, ""); });
+    auto wrong_metadata = ref_b; wrong_metadata.metadata.push_back(0);
+    failed_import_preserves(pool, [&](auto& context) { context.import_bundle(wrong_metadata, model); });
+    auto wrong_version = ref_b; wrong_version.version = 1;
+    failed_import_preserves(pool, [&](auto& context) { context.import_bundle(wrong_version, model); });
+    Bundle unready; unready.version = 2; unready.system_key = new_system(b);
+    require(SysStateStore::instance().load(unready.system_key, unready.metadata), "Read unready fixture metadata");
+    failed_import_preserves(pool, [&](auto& context) { context.import_bundle(unready, model); });
+    // A materialization request without this pool attached must fail before seeding.
+    require(!StateStore::instance().shared_pool(), "Fixture starts without an attached pool");
+    failed_import_preserves(pool, [&](auto& context) { context.import_bundle(ref_b, model, true); });
+    SharedObjectPool other((directory.string() + "-other"));
+    failed_import_preserves(other, [&](auto& context) { context.import_bundle(ref_b, model); });
+
+    StateStore::instance().attach_shared_pool(pool.path(), false);
+    SharedPublisher materialized(pool);
+    const auto full = materialized.import_bundle(ref_a, model, true);
+    check_state(full.state); check_actors(full);
+    reset_calls(); materialized.export_bundle(new_system(a)); hit_calls();
+    failed_import_preserves(pool, [&](auto& context) {
+        fail_registration = true;
+        context.import_bundle(ref_b, model, true);
+    });
+    require(!fail_registration.load(), "Registration failure must reach actual SysStateStore::save");
+    // Failed registration of an already-proven root cannot promote its LRU position.
+    SharedPublisher ordered(pool, 2);
+    ordered.export_bundle(new_system(a)); ordered.export_bundle(new_system(b));
+    fail_registration = true;
+    rejects([&] { ordered.import_bundle(ref_a, model); });
+    require(!fail_registration.load(), "Warm registration fault was exercised");
+    ordered.export_bundle(new_system(c));
+    reset_calls(); ordered.export_bundle(new_system(b)); hit_calls();
+    reset_calls(); ordered.export_bundle(new_system(a)); full_calls();
+
+    // Even cached Ready bytes/root proofs cannot bypass the pool fail-stop state.
+    pool.flush(); fail_sync = true;
+    rejects([&] { pool.flush(); }); fail_sync = false;
+    rejects([&] { materialized.import_bundle(ref_a, model); });
+    reset_calls(); rejects([&] { materialized.export_bundle(new_system(a)); }); hit_calls();
+    puts("shared publisher import: ready seeds, lazy/full import, bounded proofs, rejection and poison passed");
+}
 int main(int argc,char** argv) {
     try {
         if(argc==5 && !strcmp(argv[1],"--cold")) {
@@ -281,6 +362,7 @@ int main(int argc,char** argv) {
             SharedObjectPool pool(pool_path.string());
             rejects([&]{load_shared_state(bundle.system_key,"bundle-fixture/model1",pool);});
             publisher_proofs(pages, base/(suffix+"-publisher-pool"));
+            publisher_import_proofs(pages, base/(suffix+"-import-pool"));
             const auto ref=export_shared_bundle(bundle.system_key,pool);
             require(ref.version==2 && ref.blobs.empty() && ref.metadata==bundle.metadata,"Reference carries metadata only");
             const auto before=StateStore::instance().get_stats().load_requests;

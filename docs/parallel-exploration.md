@@ -76,7 +76,8 @@ Linux >=5.8 才提供所依赖的 writeback 错误报告。
 1024 个 tracee-root 的完整闭包证明。新系统状态引用已证明的 root 时，跳过其页读取
 和依赖发布，但仍重新解码 tracee metadata，结合本系统 metadata 的 property/status
 重新计算 actors。
-只有完整 Ready 发布成功后才更新证明和 LRU；miss/eviction 回到完整验证。
+完整 Ready 发布成功，或 Task 的 Ready 验证、可选 materialization 与本地 metadata
+登记全部成功后，才更新证明和 LRU；miss/eviction 回到完整验证。
 新上下文或新 Pool（即使路径相同）不继承证明，pool poison 仍拒绝命中路径。
 这些是宿主优化缓存，不进入状态身份或持久化格式。
 它不同于 resident-memory 对运行中进程字节的证明：只依赖池中对象的私有不可变生命周期，

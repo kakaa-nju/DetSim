@@ -78,7 +78,7 @@ int worker_loop(int fd, wire::Limits limits, int blob_fd) {
             for (int node = 0; node < NP; ++node)
                 if (!tracee_has_fixed_layout(ptmc_state.pids[node]))
                     throw std::runtime_error("Worker tracee does not have canonical fixed layout");
-            auto source = pool ? snapshot::import_shared_bundle(task.bundle, ptmc_state.model_identity, *pool, true).state
+            auto source = publisher ? publisher->import_bundle(task.bundle, ptmc_state.model_identity, true).state
                                : snapshot::import_bundle(task.bundle, ptmc_state.model_identity);
             channel.confirm_objects();
             // Drop the raw incoming closure before capture/exporting successors.

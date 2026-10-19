@@ -210,11 +210,90 @@ NP1/2/3 生产构建通过；独立源码审查未发现 P0/P1。
 这仍是单次 pilot；后续应交错重复测量，且要在大图上复核。
 
 离线读取该 case 的系统 metadata（含前缀/后置核对，共 10,755 个唯一记录），
-三个进程分别只有 2,951／368／1 个不同 tracee root，共 3,320 个。
+三个进程分别只有 775／396／368 个不同 tracee root，共 1,539 个。
+此处按 `serialize.cpp` 的 `ar(ts_hash, status, ...)` 顺序，从 schema header 后的
+offset12 读取三个 u64；先前草稿误从 offset24 读取，已纠正。
 这说明不同系统状态确实大量复用 root，也说明每 worker 的 1,024 项缓存仍可能
 淘汰和重复验证。尚不能据此量化跨 worker 重复验证的因果比例。
 下一步研究导入 Task 的 Ready 是否可以直接为本 worker 建立相同根的闭包证明，
 以复用已经完成的全局验证，而非盲目扩大缓存或减慢单 worker 基线。
+
+## v4：复用导入 Task 的 Ready
+
+`SharedPublisher::import_bundle` 先完成原有共享引用验证、可选 child materialization
+和本地系统 metadata 登记，全部成功后才记入 root proof。Ready 是同一私有池中
+已经完成闭包发布的证明，因此不新增磁盘证书格式或全局 registry。
+这仍是保存字节的证明，不证明当前 live memory，也不省略物理恢复。
+
+full/pages 组件覆盖成功种根、cap0/eviction、模型/引用/未 Ready/不同 Pool 拒绝、
+materialization 缺少绑定、真实 metadata save 调用的 false 注入及暖 pool poison；
+确认失败不提前种根/改变 LRU，actor 仍按当前系统状态计算。
+组件、严格 v1、NP2 15 原生场景、NP1 actual actors/adoption、`make check`、
+NP1/2/3 构建及独立实现审查通过。日志前缀为 `publisher-import-`。
+
+冻结 tracer SHA256：
+`264e357ce61d6ee2fe6d82bce4c06561bc17f65c3ab1f4b72167e6174596d216`。
+同配置五行单次 pilot 全部保持同图、状态/边数和零重试；
+来源：`build/shared-parallel/pilot-v4/summary.json`。
+
+| workers | 搜索命令秒 | 搜索＋关闭秒 | 含关闭加速 |
+| ---: | ---: | ---: | ---: |
+| 1 | 32.090 | 32.154 | 1.000× |
+| 2 | 17.044 | 17.258 | 1.863× |
+| 4 | 10.741 | 10.956 | 2.935× |
+| 6 | 8.433 | 8.648 | 3.718× |
+| 8 | 7.634 | 7.849 | 4.096× |
+
+与 v3 的差别很小，且没有重复样本；目前不声称该改动带来显著性能收益。
+它也没有让 8-worker 接近线性。正在用 CPU/指令/周期与迁移计数进一步区分
+额外工作、SMT/缓存和调度成本；测量窗口仅原生 parallel 命令，不混入前缀或后置串行核对。
+
+## v4 进一步诊断：CPU 成本与重复验证
+
+`perf stat` 的四个 fresh BFS 会话均通过完整参考图核对，五个事件均为单 PMU 且
+报告 100% running。每条边是相同的实际 18,266 次转换，包含 kernel/user 指令。
+每个配置只测一次；这些是计数诊断，不把带仪器的耗时用于无采样性能排名。
+
+| workers | CPU ms/边 | 指令/边（百万） | IPC | 迁移/边 |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 1.936 | 6.896 | 1.021 | 0.401 |
+| 4 | 2.500 | 7.471 | 0.851 | 0.685 |
+| 6 | 2.884 | 7.762 | 0.777 | 1.149 |
+| 8 | 3.182 | 8.013 | 0.729 | 1.164 |
+
+8-worker 每边多约 16.2% 指令、CPU 时间多约 64.4%，并伴随 IPC 下降约 28.6%。
+这些观测不能单独确定缓存或 SMT 的因果份额。
+一次额外对照只在启动 tracer 前限制其继承 CPU mask 为 0..5，即每物理核一个
+硬件线程，控制器立即恢复原 mask；不更改全机 SMT/调频。实际 mask 逐行验证，
+不同 bootstrap profile 的新图与原参考完整图同构，不声称任意内存等价。
+
+| workers | 限定 mask 后 CPU ms/边 | IPC | 指令/边（百万） |
+| ---: | ---: | ---: | ---: |
+| 1 | 1.953 | 1.037 | 6.915 |
+| 4 | 2.162 | 0.997 | 7.513 |
+| 6 | 2.364 | 0.943 | 7.780 |
+| 8 | 2.484 | 0.924 | 8.005 |
+
+指令量变化小于 0.6%，而高并发时单位边 CPU 成本下降。可用逻辑 CPU 同时减少，
+因此不能把 CPU 成本下降约 22% 说成墙钟也改善 22%。原始事件 runtime、报告的运行
+比例及失败证据（首轮 verbose 输出混入 JSON，修脚本后重跑）均保留在
+`build/shared-parallel/stat-v4/`，摘要为 `core-summary.json` 与 `physical-core-summary.json`。
+
+为验证软件重复工作，另建仅增加累计计数的诊断 binary，不改产品或协议。
+每个 worker 在 Done 前记录 root 验证/page 访问，全部 3,824 个 remote Done 的
+lease/source/emitted 与 journal 逐条相符，6,633 个协调器本地 Done 排除。
+1/8 worker 都通过同图、节点/边数和零重试检查。
+
+| 指标 | 1 worker | 8 workers |
+| --- | ---: | ---: |
+| root 完整验证次数 | 1,439 | 4,284 |
+| snapshot page 访问次数 | 933,911 | 2,780,316 |
+| 每边完整验证次数 | 0.07878 | 0.23453 |
+
+每次验证恰访问 649 页，总量增加约 2.977×；最后四分之一仍约 2×，
+因此不能只按一次性启动开销解释。page 访问不是物理读或唯一页计数。
+没有逐 root 身份/LRU 原因追踪，不能将全部额外指令都归因于这些验证。
+来源：`build/shared-parallel/root-count-v4/{report.md,summary.json,build-manifest.json}`。
 
 ## 尚需完成
 

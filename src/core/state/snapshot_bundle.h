@@ -36,6 +36,10 @@ public:
     SharedPublisher(SharedPublisher&&) = delete;
     SharedPublisher& operator=(SharedPublisher&&) = delete;
     Bundle export_bundle(hash_type system_key);
+    // A same-pool Ready certifies its roots. Seed proofs only after validation,
+    // optional materialization and local metadata registration all succeed.
+    ReadyState import_bundle(const Bundle& bundle, const std::string& expected_model_identity,
+                             bool materialize_child = false);
 private:
     void remember(const hash_type (&roots)[NP]);
     SharedObjectPool& pool_;
