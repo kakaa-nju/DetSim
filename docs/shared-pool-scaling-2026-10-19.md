@@ -931,3 +931,31 @@ owner淘汰后存活、locale旁路、串行generation和poison。尚未实际�
 原始命令、完整输出和逐轮数据见`saved-maps-pilot/{summary,paired-summary}.json`。
 下一项隔离实验仅扩大现有BFS root局部性选择窗口，检查更强复用是否抵消
 协调器额外评分开销；不放松恢复或状态图验证。
+
+## 局部性窗口32→256：匹配改善，但全链路无收益
+
+私有`worker-locality256/`仅把已有候选的scorer窗口参数改为256；保留原
+冻结对象和匹配的旧Report ABI。纯Frontier测试覆盖256边界、稳定tie、
+第256次评分抛异常时不消耗lease、BFS层界及216组扩展图。随后独立native
+参考和四轮24个fresh会话完整同图，10457节点/18266边、零重试。
+两轮32先、两轮256先，same-cpu、pages/shared。候选binary SHA256：
+`84973168310d80be2373390877a3eabe362e99ed9cc4ecf0fd391e116b33e617`。
+
+| worker | 窗口32四轮中位秒 | 窗口256四轮中位秒 |
+| --- | ---: | ---: |
+| 1 | 31.0435 | 31.3487 |
+| 8 | 6.5126 | 6.9146 |
+| 12 | 6.4102 | 6.4294 |
+
+12-worker远端有历史Task的平均selected root overlap由0.933–0.998提高到
+1.447–1.490（每Task最多3）；但协调器累计selection wall time从
+0.123–0.139秒增至0.595–0.687秒。这是wall时间，不是CPU时间或直接测得的
+恢复耗时。首轮候选评分数329280→2420348；更高overlap不等于省下整份
+内存重写。8-worker中位退化约6.2%，12-worker基本不变，故不推广、不继续
+盲目扩大窗口。原始逐轮数据与journal汇总在
+`build/shared-parallel/locality256-pilot/{summary,paired-summary,locality-metrics}.json`。
+
+下一项私有实验仅针对相邻restore阶段重复rseq检查：mapping阶段始终先做
+fresh全线程检查，只有resident/brk/maps完全匹配、未执行目标的早返回才向
+紧接的memory阶段传递局部证明；公开低层API和所有映射修复路径仍完整检查。
+pending信号、停驻与资源检查不变。此处尚是待验证实现，不计为产品收益。
