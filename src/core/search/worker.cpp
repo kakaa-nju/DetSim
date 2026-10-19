@@ -187,7 +187,12 @@ int worker_loop(int fd, wire::Limits limits, int blob_fd) {
                 prepare_thread_pool(node, ptmc_state.running_state.child[node]);
             for (int node = 0; node < NP; ++node)
                 adopt_snapshot_threads(node, source.ts_hash[node], source.child[node]);
-            source.recover_running_state();
+            // Expanded tasks restore before every actual action in state_transition.
+            // Avoid restoring twice before their first action; no-action tasks still
+            // validate and install their source before reporting completion.
+            if (classify_enumeration(source, enabled_actor_actions(source), task.ticket.may_expand) !=
+                EnumerationKind::Expanded)
+                source.recover_running_state();
             const auto summary = enumerate_state(source, task.ticket.may_expand,
                 [&](const ActorAction& actor, int choice, int count, const TransitionResult& result) {
                     wire::Edge edge;

@@ -600,3 +600,43 @@ wall明显超出CPU，也存在非运行时间，但差值不能直接命名为�
 读取时钟和逐Task输出有扰动，不据此更新headline版本收益。
 下一隔离实验保持同二进制/图参考，把新建session目录放到本机tmpfs，以区分
 文件系统/持久化路径与其余成本；不改原有存储位置，也不把tmpfs当持久存储。
+
+
+## 同二进制 tmpfs 隔离实验
+
+使用相同v3计时二进制、guest及已验证参考图，仅把新会话输出目录放入本机
+`/dev/shm`新建私有目录。三组均3824远程Task/18266边且同图通过；不移动或
+修改原存储。该目录不是持久存储。精确数据及目录位置保留于
+`build/shared-parallel/stage-pressure12-tmpfs/{phase-summary.json,output-path.txt}`。
+
+| worker | tmpfs含收尾秒 | 发布 wall/CPU 累计秒 | 枚举扣发布发送 CPU 累计秒 |
+| --- | ---: | ---: | ---: |
+| 1 | 29.9766 | 3.0126 / 2.9890 | 22.8340 |
+| 8 | 5.8443 | 4.7477 / 4.7074 | 32.4494 |
+| 12 | 5.3211 | 6.0925 / 5.7585 | 38.8761 |
+
+磁盘目录同轮12-worker为6.5455秒，tmpfs下降约18.7%，发布wall−CPU
+从约5.04累计秒缩到0.33秒；枚举CPU却从38.41到38.88，未改善。这支持
+文件系统发布路径和执行CPU成本是不同问题，但未确定具体锁/IO原因。
+实验也改变了metadata/store及worker目录所在文件系统，并非只替换CAS路径。
+先磁盘后tmpfs且每格单样本，不能当作稳定收益或通用推荐；包含计时/输出扰动。
+现有 state_store.packed_storage_path 配置可指定存储目录，无需为这项实验新增
+后端；若使用tmpfs，重启/内存压力/容量和持久性边界需由调用方明确接受。
+
+
+## 删除 expanded Task 首次重复恢复
+
+worker 的prepare/adopt后原先无条件恢复source，第一条实际转移又在
+`state_transition`无条件完整恢复source。现在仅classify为Expanded时删除
+worker层前一次恢复；非Expanded仍恢复，正常枚举结尾的load不变，反例原有
+提前返回语义不变。每条实际动作前的线程/信号/内核资源/内存恢复没有跳过。
+静态独立审查追踪actor、timeout、saved IO readiness及adoption，确认首动作前
+没有需要source已安装的live读取。没有引入恢复验证缓存或新身份字段。
+
+新鲜门禁：NP=2 production构建，same-cpu与none各15项原生并行测试；
+NP=1 production构建，same-cpu choices/mixed/pending × full/pages六例；
+`make CC=/usr/bin/gcc CXX=/usr/bin/g++ check`，均通过。日志在
+`build/shared-parallel/worker-restore-dedup/`。尚未测此删除的吞吐收益；
+首次edge的restore_time可能变大，因为原来未归入edge的工作转移到了这里，
+不能以该字段独立评判退化。专门的首次restore故障注入仍未新增，不能把已有
+错误路径和同图门禁夸大成该故障点的独立覆盖。
