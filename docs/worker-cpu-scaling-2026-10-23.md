@@ -89,3 +89,64 @@ namespace 的 proc/dev/sys 卸载均成功；最后复查无本实验进程、�
 
 下一项是 WSL 上 1 / 12 workers 的 on-CPU 栈对比，以及用简单路径为 oracle 的
 恢复局部性优化。当前没有新的生产优化合入，不宣称已经达到接近线性加速。
+
+## 后续 CPU 栈对比
+
+已用同一诊断二进制补采 WSL cpu-clock 199 Hz、frame-pointer 栈，各一次 1 / 12
+workers。两个运行仍通过相同图及零重试；只取 journal 中精确 worker main 的
+header PID，并裁剪到 TaskReceived→DoneSendBegin。这里不使用 sched payload
+的 PID 映射。原始样本总数与 perf 录制日志一致，日志未见丢失警告。
+
+任务内样本分别 5098 / 7219，kernel leaf 占比 39.45% / 40.68%。完整函数身份
+去重后的部分 inclusive 比例如下；各行重叠，不能相加：
+
+| 栈祖先 | 1 worker | 12 workers |
+| --- | ---: | ---: |
+| `tracee_state::capture_stopped` | 14.50% | 17.23% |
+| `save_paged_snapshot` | 8.91% | 10.90% |
+| `sys_state::recover_running_state` | 11.22% | 12.45% |
+| `verify_stopped_thread_set` | 6.77% | 5.93% |
+| `proc_pid_status` | 5.10% | 4.45% |
+| `dwarf_get_type_info` | 3.86% | 3.01% |
+| `detsim::search::wire::Channel::send` | 1.63% | 0.79% |
+
+内核 exclusive leaf 中，`rep_movs_alternative` 从 3.35% 增至 4.81%，
+`clear_page_rep` 从 0.04% 增至 1.12%；出现少量 `rwsem_spin_on_owner` 样本，
+但未见调度锁自旋主导的证据。unlock 函数不因名字含 spin 就算作自旋等待。
+这约束了下一步方向，但份额变化本身不是绝对耗时、指令量或因果证明。
+
+符号仍有重要限制：26.32% / 26.74% 的 leaf 在已知用户库中但函数未知，其中
+libc 占总 active 样本约 23% / 22%。保留原始栈、最近已知用户祖先和无祖先样本，
+没有把未知 libc 命名为 memcpy/malloc。FP 栈和缺少库内符号限制精细归因。
+五项分析器合成测试通过；原始记录位于 `build/shared-parallel/worker-cpu-wsl/`，
+分类、测试和限制位于 `build/shared-parallel/worker-cpu-wsl-analysis/`。
+远端两次采集均退出，proc/dev/sys 卸载成功；后续进程、挂载及输入摘要复查通过。
+
+## 局部性查找对照：局部快了，完整搜索没有稳定变快
+
+私有候选只将协调器 roots 查找表从 `std::map` 换为 `std::unordered_map`。
+此表只 emplace/at，没有有序遍历；候选窗口与 tie-break 不变，不混入其他改动。
+另以显式参数建立 256 窗口的 map/hash 对照，保留生产默认窗口 32 不变。
+三份候选均通过实际启用 BFS roots 的 full/pages、durable/shared 同图和 worker loss
+重派门禁。随后每个二进制独立建立 Raft native reference，再做正反顺序两轮计时。
+12 次运行全部保持 10457 / 18266、18266 尝试边、零重试及相同规范图。
+
+本机 12-worker、full-FP、roots 模式，两轮中位数：
+
+| 配置 | 搜索加延后关闭（秒） | locality selection（秒） |
+| --- | ---: | ---: |
+| map / 32 | 7.2034 | 0.1414 |
+| hash / 32 | 7.1930 | 0.0631 |
+| map / 256 | 7.2317 | 0.6543 |
+| hash / 256 | 7.2364 | 0.2748 |
+
+选取时间分别下降约 55.4% / 58.0%，完整计时变化仅 -0.14% / +0.07%，逐轮方向
+也不一致。减少树查找确实降低局部成本，但本组实验未证明完整探索收益，因此不合入。
+选取时间包含 Frontier lease 最终更新，不是仅查找函数时间。搜索加关闭是两个不连续
+区间，中间验证不计时，仍沿用之前报告的限制；两轮不足以建立精确稳定收益。
+
+构建与门禁在 `build/shared-parallel/roots-hash-lookup/`，原始计时在
+`build/shared-parallel/roots-hash-timing-20261023/`。另通过现有 DSH Web 实例的
+DeepSeek-V4.1-Flash 辅助会话编写独立 artifact audit，重新计算全部规范图及 ELF
+摘要、核对原始计数并重算中位数；主 agent 审查并重新运行。辅助脚本与核验结果在
+`build/shared-parallel/deepseek-helpers/roots-audit/`。它核验已有产物，不替代原生测试。
