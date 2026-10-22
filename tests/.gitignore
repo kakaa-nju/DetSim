@@ -22,3 +22,5 @@ pipe/pipe
 poll/poll
 simple_complex/simple_complex
 write/write
+userstate/userstate
+userstate/check.so
