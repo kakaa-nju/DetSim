@@ -1534,3 +1534,15 @@ pointer type descriptors and the failing AST stage need inspection. Do not infer
 that all arrow expressions are unsupported; actual Raft property observations
 continue to pass. Baseline failure evidence and fixture are retained in the same
 artifact directory.
+
+## Typed shared-pool cache keys (2026-10-23)
+
+Pool-local cache/LRU keys now use `(Kind, hash_type)` instead of formatted strings;
+file names are formatted only after a load cache miss. Existing validation,
+capacity, immutable ownership, read-only, conflict and poison rules remain.
+`check-shared-object-pool` adds same-numeric-key Blob/Ready warm/cold isolation,
+cache-hit I/O counters, rejected publication recovery and per-pool separation.
+Shared StateStore/snapshot integration and production NP3 native graph/failure
+gates pass. Matched full-FP Raft experiments show a small absolute improvement;
+this neither proves near-linear scaling nor closes general state/atom gaps.
+See [implementation, commands and measurement scope](typed-pool-cache-2026-10-23.md).

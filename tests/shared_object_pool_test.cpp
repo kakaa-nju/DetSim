@@ -145,6 +145,37 @@ int main() {
         auto ready=pool.load_ready(77);require(ready&&ready->size()==32768,"ready missing");
         require(std::all_of(ready->begin(),ready->end(),[&](uint8_t c){return c==(*ready)[0];}),"mixed ready payload");
         rejects([&]{pool.publish_blob(key+1,bytes.data(),bytes.size());});require(*pool.load_blob(key)==bytes,"caller error poisoned valid pool");
+        // Same numeric IDs in different typed namespaces must never alias,
+        // including warmed cache hits, re-publication and cold reopen.
+        {
+            const auto typed_dir=root/"typed-cache";
+            const std::vector<uint8_t> metadata{'r','e','a','d','y'};
+            const std::vector<uint8_t> other{'o','t','h','e','r'};
+            SharedObjectPool typed(typed_dir.string());
+            typed.publish_blob(key,bytes.data(),bytes.size());
+            typed.publish_ready(key,metadata);
+            for(int i=0;i<3;++i) {
+                const auto before_load_reads=read_calls.load(),before_load_locks=flock_calls.load();
+                require(*typed.load_blob(key)==bytes,"typed cached blob alias");
+                require(*typed.load_ready(key)==metadata,"typed cached ready alias");
+                require(read_calls==before_load_reads&&flock_calls==before_load_locks,"typed cached load touched disk");
+                const auto before_reads=read_calls.load(),before_locks=flock_calls.load();
+                typed.publish_ready(key,metadata);
+                typed.publish_blob(key,bytes.data(),bytes.size());
+                require(read_calls==before_reads&&flock_calls==before_locks,"typed cache hit touched disk");
+            }
+            rejects([&]{typed.publish_blob(key,other.data(),other.size());});
+            rejects([&]{typed.publish_ready(key,other);});
+            require(*typed.load_blob(key)==bytes&&*typed.load_ready(key)==metadata,"invalid blob poisoned typed cache");
+            SharedObjectPool different((root/"typed-other-pool").string());
+            different.publish_ready(key,other);
+            require(*different.load_ready(key)==other&&*typed.load_ready(key)==metadata,"cache escaped pool instance");
+            typed.flush();
+            SharedObjectPool cold(typed_dir.string(),false,true);
+            require(*cold.load_ready(key)==metadata&&*cold.load_blob(key)==bytes,"cold typed namespace alias");
+            rejects([&]{cold.publish_blob(key,bytes.data(),bytes.size());});
+            rejects([&]{cold.publish_ready(key,metadata);});
+        }
         {std::ofstream partial(dir/"blobs"/".tmp-partial");partial<<"bad";}
         require(!pool.load_blob(99),"temporary object visible");
         SharedObjectPool readonly(dir.string(),false,true);

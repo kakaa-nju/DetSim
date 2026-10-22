@@ -69,9 +69,19 @@ struct SharedObjectPool::Impl {
     Fd root, blobs, ready, barrier;
     std::mutex mutex;
     std::exception_ptr failure;
-    struct Entry { Buffer bytes; std::list<std::string>::iterator position; };
-    std::unordered_map<std::string, Entry> cache;
-    std::list<std::string> lru;
+    struct CacheKey {
+        Kind kind;
+        hash_type key;
+        bool operator==(const CacheKey&) const = default;
+    };
+    struct CacheHash {
+        size_t operator()(const CacheKey& value) const noexcept {
+            return std::hash<hash_type>{}(value.key) ^ (size_t(value.kind) << 1);
+        }
+    };
+    struct Entry { Buffer bytes; std::list<CacheKey>::iterator position; };
+    std::unordered_map<CacheKey, Entry, CacheHash> cache;
+    std::list<CacheKey> lru;
     size_t cache_bytes = 0;
     Impl(std::string path, bool create, bool readonly)
         : directory(std::filesystem::absolute(path).lexically_normal().string()), read_only(readonly),
@@ -96,8 +106,7 @@ struct SharedObjectPool::Impl {
     }
     void check() const { if (failure) std::rethrow_exception(failure); }
     int dir(Kind kind) const { return kind == Kind::Blob ? blobs.value : ready.value; }
-    std::string cache_key(Kind kind, hash_type key) const { return std::to_string(uint32_t(kind)) + ":" + filename(key); }
-    void remember(const std::string& key, Buffer bytes) {
+    void remember(CacheKey key, Buffer bytes) {
         if (bytes->size() > cache_limit || cache.contains(key)) return;
         while (cache_bytes > cache_limit - bytes->size() || cache.size() >= cache_entry_limit) {
             const auto found = cache.find(lru.back()); cache_bytes -= found->second.bytes->size();
@@ -109,11 +118,12 @@ struct SharedObjectPool::Impl {
     }
     Buffer load(Kind kind, hash_type key, bool cached = true) {
         if (!key) return {};
-        const auto name = filename(key), id = cache_key(kind, key);
+        const CacheKey id{kind, key};
         if (cached) {
             const auto found = cache.find(id);
             if (found != cache.end()) { lru.splice(lru.begin(), lru, found->second.position); return found->second.bytes; }
         }
+        const auto name = filename(key);
         Fd fd(openat(dir(kind), name.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW));
         if (fd.value < 0) { if (errno == ENOENT) return {}; io_error("open object"); }
         struct stat status{};
@@ -142,7 +152,7 @@ struct SharedObjectPool::Impl {
         // Private-pool lifetime contract: published objects are never modified
         // or removed externally. Only successful publication/cold validation
         // admits immutable owners to this bounded, pool-instance-local cache.
-        const auto id = cache_key(kind,key);
+        const CacheKey id{kind,key};
         const auto known = cache.find(id);
         if (known != cache.end()) {
             if (known->second.bytes->size() != size || std::memcmp(known->second.bytes->data(),bytes,size))
@@ -188,7 +198,7 @@ struct SharedObjectPool::Impl {
         fd.value = -1; // Linux close errors must not cause a retry on a reused fd.
         if (close(written)) io_error("close published object");
         if (size <= cache_limit)
-            remember(cache_key(kind,key), std::make_shared<const std::vector<uint8_t>>(
+            remember({kind,key}, std::make_shared<const std::vector<uint8_t>>(
                 static_cast<const uint8_t*>(bytes), static_cast<const uint8_t*>(bytes)+size));
     }
 };
