@@ -98,7 +98,7 @@ cap4 中位数增加约 2.15%，fullscan 增加约 8.57%；cap4 两轮方向不�
 更多同步发送可能推迟读取结果、发现 worker 错误和检查 deadline；通过当前门禁
 并不证明响应延迟不变。下一项应量化 worker Done 发出至协调器接收、再至下次
 Task 收到的间隔，与 frontier 可派性关联。这能补足当前 ticket 统计漏掉的实际
-空闲；目前尚无这组测量，不能预先归因于结果排空或通信带宽。
+空闲；该轮尚无这组测量，不能预先归因于结果排空或通信带宽。
 
 ## Worker 实际任务间隔：后续测量
 
@@ -154,3 +154,6 @@ gpunode 的 12 个物理核上复核；这里仍是 6 核 12 线程机器，不�
 源码与构建证据：`build/shared-parallel/worker-cycle-diagnostic/`；分析器与测试：
 `build/shared-parallel/worker-cycle-analysis/`；原始运行和汇总：
 `build/shared-parallel/worker-cycle-runs/`。这些是私有诊断，未改变生产执行代码。
+
+后续已完成[任务区间与调度事件对齐](worker-cpu-scaling-2026-10-23.md)，包括
+gpunode WSL 的独立 PID 域映射验证；不能混用两台机器的等待比例。
