@@ -122,6 +122,10 @@ libc 占总 active 样本约 23% / 22%。保留原始栈、最近已知用户祖
 分类、测试和限制位于 `build/shared-parallel/worker-cpu-wsl-analysis/`。
 远端两次采集均退出，proc/dev/sys 卸载成功；后续进程、挂载及输入摘要复查通过。
 
+后续[libc 符号补全](wsl-libc-symbols-2026-10-23.md)发现宿主/chroot 同路径 DSO
+的 Build ID 冲突，改用逐 worker 的实际映射和匹配 debug 文件解析原 IP；libc
+leaf 除一个地址外均可识别。原样本与窗口不变，不能据此补回丢失的调用栈。
+
 ## 局部性查找对照：局部快了，完整搜索没有稳定变快
 
 私有候选只将协调器 roots 查找表从 `std::map` 换为 `std::unordered_map`。
