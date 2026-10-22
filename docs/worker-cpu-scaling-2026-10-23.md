@@ -150,3 +150,6 @@ libc 占总 active 样本约 23% / 22%。保留原始栈、最近已知用户祖
 DeepSeek-V4.1-Flash 辅助会话编写独立 artifact audit，重新计算全部规范图及 ELF
 摘要、核对原始计数并重算中位数；主 agent 审查并重新运行。辅助脚本与核验结果在
 `build/shared-parallel/deepseek-helpers/roots-audit/`。它核验已有产物，不替代原生测试。
+
+另已完成[独立单-worker 搜索的并发对照](independent-search-control-2026-10-23.md)：
+没有共享 frontier 的独立任务也出现明显成本增长。此对照不是单图加速比或硬件上限。
