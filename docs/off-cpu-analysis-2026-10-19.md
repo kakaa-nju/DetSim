@@ -76,6 +76,9 @@ Shutdown；源码与冻结版本的worker.cpp相同。常见pidfd存活检查是
 阻塞与runnable等待应分别处理，并与同图下单位CPU成本膨胀共同解释加速比。
 之前仅据总CPU占用排除显著worker等待的推断应撤回。
 
+后续的[任务供应与搜索顺序实验](dispatch-scaling-2026-10-23.md)比较了两台主机的
+BFS/DFS，并记录协调器可见的可派任务与空闲槽位；该统计不等同于真实off-CPU时间。
+
 ## 系统背景与范围
 
 按sysperf连续采样5秒系统背景，CPU/磁盘/内存/网络记录在system-baseline。
