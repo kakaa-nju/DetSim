@@ -4,7 +4,7 @@
 CXXFLAGS = -O2 -gdwarf-4 -g -fPIC -shared \
            -I. -I../../src -I../../src/core -I../../src/utils -I../../src/subsys \
            -DNP=3 -D_FORTIFY_SOURCE=0
-CFLAGS = -gdwarf-4 -g
+CFLAGS = -gdwarf-4 -g --static
 
 .PHONY: all clean
 

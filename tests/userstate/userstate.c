@@ -17,11 +17,17 @@ int main(void)
 {
   struct timeval tv;
 
-  for (int i = 0; i < 8; i++)
+  for (int i = 0; i < 3; i++)
   {
     user_counter += 1;
     gettimeofday(&tv, 0);
   }
+  user_counter -= 1;
+  gettimeofday(&tv, 0);
+  user_counter += 2;
+  gettimeofday(&tv, 0);
+  user_counter -= 3;
+  gettimeofday(&tv, 0);
 
   return 0;
 }
