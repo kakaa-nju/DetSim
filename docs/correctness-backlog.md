@@ -1546,3 +1546,20 @@ Shared StateStore/snapshot integration and production NP3 native graph/failure
 gates pass. Matched full-FP Raft experiments show a small absolute improvement;
 this neither proves near-linear scaling nor closes general state/atom gaps.
 See [implementation, commands and measurement scope](typed-pool-cache-2026-10-23.md).
+
+## Thread enumeration I/O errors (2026-10-23, open)
+
+`src/utils/utils.cpp:get_thread_list` treats every null `readdir` result as EOF,
+without checking `errno`. A link-wrapped probe of the real helper injects EIO at
+the directory read boundary after one task entry; the helper returns that task
+list successfully. Evidence: `build/shared-parallel/proc-status-reuse/`
+`thread-list-error-evidence.json` (compile/link exit 0, regression exit 1,
+`FAIL: returned 1 tasks despite injected EIO`). No product fix yet.
+
+The stop barrier compares the returned vector to its expected set. It must not
+accept an incomplete enumeration merely because the returned prefix matches;
+this probe establishes the helper error-handling defect, not an end-to-end
+missed concurrent-thread execution. Closure requires rejecting enumeration
+errors, preserving normal EOF, closing descriptors on every failure path, and
+regression coverage through the stop-barrier caller. Keep this semantic fix
+separate from the in-flight descriptor-reuse performance comparison.
