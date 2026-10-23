@@ -2,6 +2,8 @@
 #include "common.h"
 #include "log_wrapper.h"
 #include <cstdio>
+#include <cerrno>
+#include <stdexcept>
 #include <dirent.h>
 #include <fcntl.h>
 #include <filesystem>
@@ -266,14 +268,23 @@ std::vector<pid_t> get_thread_list(pid_t pid)
   std::vector<pid_t> threads;
   std::string task_dir = fmt::format("/proc/{}/task", pid);
 
-  DIR *dir = opendir(task_dir.c_str());
+  const auto close_dir = [](DIR* value) { closedir(value); };
+  std::unique_ptr<DIR, decltype(close_dir)> dir(opendir(task_dir.c_str()), close_dir);
   if (!dir) {
     LOG_ERROR("Failed to open %s: %s", task_dir.c_str(), strerror(errno));
     return threads;
   }
 
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != NULL) {
+  for (;;) {
+    errno = 0;
+    const auto* entry = readdir(dir.get());
+    if (!entry) {
+      const int error = errno;
+      if (error)
+        throw std::runtime_error("Cannot enumerate process threads in " + task_dir +
+                                 ": " + strerror(error));
+      break;
+    }
     if (entry->d_name[0] == '.')
       continue;
 
@@ -283,7 +294,7 @@ std::vector<pid_t> get_thread_list(pid_t pid)
     }
   }
 
-  closedir(dir);
+  dir.reset();
   std::sort(threads.begin(), threads.end());
   return threads;
 }

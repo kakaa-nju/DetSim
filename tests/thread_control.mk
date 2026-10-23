@@ -4,6 +4,6 @@ check-thread-control: $(BUILD_DIR)/tests/thread_control_integration
 	$(BUILD_DIR)/tests/thread_control_integration
 
 $(BUILD_DIR)/tests/thread_control_integration: $(BUILD_DIR)/tests/thread_control_integration.o $(TRACER_OBJS_NO_MAIN) $(BUILD_DIR)/nr2call.o
-	$(LD) $^ $(LDFLAGS) $(LDLIBS) -Wl,--wrap=ptrace -o $@
+	$(LD) $^ $(LDFLAGS) $(LDLIBS) -Wl,--wrap=ptrace -Wl,--wrap=readdir -Wl,--wrap=closedir -o $@
 
 -include $(BUILD_DIR)/tests/thread_control_integration.d

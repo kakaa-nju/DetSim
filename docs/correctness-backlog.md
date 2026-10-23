@@ -1547,19 +1547,29 @@ gates pass. Matched full-FP Raft experiments show a small absolute improvement;
 this neither proves near-linear scaling nor closes general state/atom gaps.
 See [implementation, commands and measurement scope](typed-pool-cache-2026-10-23.md).
 
-## Thread enumeration I/O errors (2026-10-23, open)
+## Thread enumeration I/O errors (2026-10-23, fixed for read errors)
 
-`src/utils/utils.cpp:get_thread_list` treats every null `readdir` result as EOF,
-without checking `errno`. A link-wrapped probe of the real helper injects EIO at
-the directory read boundary after one task entry; the helper returns that task
-list successfully. Evidence: `build/shared-parallel/proc-status-reuse/`
-`thread-list-error-evidence.json` (compile/link exit 0, regression exit 1,
-`FAIL: returned 1 tasks despite injected EIO`). No product fix yet.
+`get_thread_list` previously treated every null `readdir` result as EOF. A
+link-wrapped probe injected EIO after one task entry and the helper returned that
+list successfully. A regression through `verify_stopped_thread_set` then failed
+against the original object with `thread barrier accepted a directory read error`.
 
-The stop barrier compares the returned vector to its expected set. It must not
-accept an incomplete enumeration merely because the returned prefix matches;
-this probe establishes the helper error-handling defect, not an end-to-end
-missed concurrent-thread execution. Closure requires rejecting enumeration
-errors, preserving normal EOF, closing descriptors on every failure path, and
-regression coverage through the stop-barrier caller. Keep this semantic fix
-separate from the in-flight descriptor-reuse performance comparison.
+The helper now resets errno before each read and throws on a nonzero-errno null
+result. A local RAII directory owner closes on success and every exception path.
+The existing opendir-failure behavior (empty list, rejected by a nonempty stop
+barrier) is unchanged. Successful enumeration still returns the sorted TID list.
+
+`check-thread-control` injects EIO after all expected entries in both the first
+and second barrier enumeration, requires the specific enumeration error, checks
+directory close counts and zero tracee resumes, and verifies that stale errno
+from a successful read does not turn normal EOF into failure. The original
+implementation fails this test; the fixed implementation passes. Evidence is in
+`build/shared-parallel/thread-list-read-error/{baseline,fixed}-results.json`.
+
+Commands passed: `make check CC=/usr/bin/gcc CXX=/usr/bin/g++`,
+`make NP=1 CC=/usr/bin/gcc CXX=/usr/bin/g++ -j3`, and
+`make NP=1 check-thread-control CC=/usr/bin/gcc CXX=/usr/bin/g++`.
+The baseline/fixed private harness additionally exercises NP3. These tests do
+not prove arbitrary concurrent thread creation cannot race with enumeration,
+and do not simulate allocation failure or closedir failure. Performance binaries
+remain frozen without this independent correctness change.

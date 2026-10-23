@@ -7,6 +7,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <dirent.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdexcept>
@@ -33,6 +34,24 @@ extern "C" long __wrap_ptrace(enum __ptrace_request request,pid_t pid,void* addr
         errno=EIO;return -1;
     }
     return __real_ptrace(request,pid,address,data);
+}
+
+// Inject an enumeration failure after all expected entries were returned:
+// accepting this prefix would let the physical-thread-set comparison pass.
+static int enumeration_fault = 0;
+static unsigned enumeration_ends = 0, enumeration_closes = 0;
+extern "C" dirent* __real_readdir(DIR*);
+extern "C" int __real_closedir(DIR*);
+extern "C" dirent* __wrap_readdir(DIR* dir) {
+    auto* entry = __real_readdir(dir);
+    if (enumeration_fault > 0 && !entry &&
+        ++enumeration_ends == static_cast<unsigned>(enumeration_fault)) errno = EIO;
+    if (enumeration_fault == -1 && entry) errno = EIO; // stale errno is not EOF failure
+    return entry;
+}
+extern "C" int __wrap_closedir(DIR* dir) {
+    if (enumeration_fault) ++enumeration_closes;
+    return __real_closedir(dir);
 }
 
 static void require(bool condition, const char *message)
@@ -103,6 +122,25 @@ static void run_case()
     // Deliberately reverse enumeration order: the gate compares sets, not slots.
     const std::array<pid_t, 2> tids{worker, child};
     verify_stopped_thread_set(child, tids);
+    for (int fault : {1, 2}) {
+        enumeration_fault = fault; enumeration_ends = enumeration_closes = 0;
+        capture_resumes = 0; track_capture_resumes = true;
+        bool failed = false;
+        try { verify_stopped_thread_set(child, tids); }
+        catch (const std::runtime_error& error) {
+            failed = std::string(error.what()).starts_with("Cannot enumerate process threads");
+        }
+        enumeration_fault = 0; track_capture_resumes = false;
+        require(failed, "thread barrier accepted a directory read error");
+        require(enumeration_ends == static_cast<unsigned>(fault) &&
+                enumeration_closes == static_cast<unsigned>(fault),
+                "directory failure leaked a handle or continued enumeration");
+        require(capture_resumes == 0, "directory failure resumed a tracee");
+    }
+    enumeration_fault = -1; enumeration_closes = 0;
+    verify_stopped_thread_set(child, tids);
+    enumeration_fault = 0;
+    require(enumeration_closes == 2, "normal EOF leaked a directory handle");
     rejected([&] { verify_stopped_thread_set(child, {}); });
     rejected([&] { verify_stopped_thread_set(-1, tids); });
     const std::array<pid_t, 2> duplicate{child, child};
