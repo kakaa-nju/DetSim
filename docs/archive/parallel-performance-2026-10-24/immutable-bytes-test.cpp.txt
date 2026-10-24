@@ -1,0 +1,36 @@
+#include "core/state/immutable_bytes.h"
+#include <memory>
+#include <span>
+#include <ranges>
+#include <iostream>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/wait.h>
+#include <sys/resource.h>
+#include <signal.h>
+using detsim::snapshot::ImmutableBytes;
+void check(bool b,const char* why){if(!b)throw std::runtime_error(why);}
+int main(){
+ static_assert(std::ranges::contiguous_range<const ImmutableBytes>);
+ try {
+  std::vector<uint8_t> source(5000);for(size_t i=0;i<source.size();++i)source[i]=uint8_t(i*37);
+  ImmutableBytes owned(source);source[0]^=1;check(owned[0]!=source[0],"owned bytes alias input");source[0]^=1;
+  check(owned==source && source==owned,"vector comparison adaptation");std::span<const uint8_t> view=owned;check(view.size()==source.size(),"span adaptation");
+  ImmutableBytes empty;check(empty.empty() && empty.begin()==empty.end(),"empty buffer");
+  char path[]="/tmp/detsim-mapped-bytes-XXXXXX";int fd=mkstemp(path);check(fd>=0,"temp file");
+  struct File{int fd;const char* path;~File(){if(fd>=0)close(fd);unlink(path);}}file{fd,path};
+  std::vector<uint8_t> encoded(17,0xa5);encoded.insert(encoded.end(),source.begin(),source.end());
+  check(write(fd,encoded.data(),encoded.size())==ssize_t(encoded.size()),"write fixture");
+  auto mapped=std::make_shared<const ImmutableBytes>(ImmutableBytes::map_file(fd,17,source.size()));
+  check(mapped->is_mapped() && *mapped==owned,"mapped payload differs");
+  for(auto [offset,length]:{std::pair<size_t,size_t>{encoded.size(),1},{0,SIZE_MAX},{0,0}}){bool fail=false;try{auto bad=ImmutableBytes::map_file(fd,offset,length);(void)bad;}catch(const std::invalid_argument&){fail=true;}check(fail,"invalid extent accepted");}
+  bool fail=false;try{auto bad=ImmutableBytes::map_file(-1,0,1);(void)bad;}catch(const std::system_error&){fail=true;}check(fail,"bad descriptor accepted");
+  auto moving=ImmutableBytes::map_file(fd,17,source.size());ImmutableBytes moved(std::move(moving));check(moving.empty() && moved==owned,"mapping move ownership");
+  auto child=fork();check(child>=0,"fork");if(child==0){rlimit lim{0,0};setrlimit(RLIMIT_CORE,&lim);signal(SIGSEGV,SIG_DFL);*const_cast<volatile uint8_t*>(mapped->data())=0;_exit(1);}int status=0;check(waitpid(child,&status,0)==child,"reap protection probe");check(WIFSIGNALED(status)&&WTERMSIG(status)==SIGSEGV,"mapping writable");
+  check(close(fd)==0,"close fixture");file.fd=-1;check(unlink(path)==0,"unlink fixture");
+  auto held=mapped;mapped.reset();check(*held==owned,"held mapping lost after close/unlink");
+  uintptr_t address=reinterpret_cast<uintptr_t>(held->data());size_t page=size_t(sysconf(_SC_PAGESIZE));void* base=reinterpret_cast<void*>(address-address%page);held.reset();unsigned char residency=0;errno=0;check(mincore(base,page,&residency)==-1 && errno==ENOMEM,"last owner did not unmap");
+  check(moved==owned,"independent mapping was unmapped");
+  std::cout<<"PASS owned isolation, mmap bounds, readonly protection, move and close/unlink lifetime\n";return 0;
+ }catch(const std::exception& e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}
+}

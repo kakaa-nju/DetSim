@@ -1,0 +1,347 @@
+{
+  "hardware_threads": {
+    "source": "build/shared-parallel/hardware-threads/audit.json",
+    "data": {
+      "passed": true,
+      "rows": [
+        {
+          "name": "r0-baseline12",
+          "workers": 12,
+          "report": "/work/results/hardware-threads-timing-d16-20261024/r0-baseline12/run-pmzxieh7/results.json",
+          "native_search_seconds": 17.523712795
+        },
+        {
+          "name": "r0-baseline24",
+          "workers": 24,
+          "report": "/work/results/hardware-threads-timing-d16-20261024/r0-baseline24/run-pxlwx0kq/results.json",
+          "native_search_seconds": 15.82574656
+        },
+        {
+          "name": "r1-baseline24",
+          "workers": 24,
+          "report": "/work/results/hardware-threads-timing-d16-20261024/r1-baseline24/run-epzditlf/results.json",
+          "native_search_seconds": 16.206922896
+        },
+        {
+          "name": "r1-baseline12",
+          "workers": 12,
+          "report": "/work/results/hardware-threads-timing-d16-20261024/r1-baseline12/run-8z9om_46/results.json",
+          "native_search_seconds": 18.571051299
+        }
+      ],
+      "median_seconds": {
+        "12": 18.047382047,
+        "24": 16.016334728
+      },
+      "throughput_24_over_12": 1.126810993494616,
+      "scope": "same graph, native automatic search only; 24 software workers versus12, not24 physical cores; no same-boot W1 speedup claim"
+    }
+  },
+  "same_boot_single": {
+    "source": "build/shared-parallel/hardware-threads/single-audit.json",
+    "data": {
+      "passed": true,
+      "single_worker_seconds": 144.780495353,
+      "rows": [
+        {
+          "name": "baseline1",
+          "workers": 1,
+          "report": "/work/results/hardware-threads-single-d16-20261024/baseline1/run-qsyww5b6/results.json",
+          "native_search_seconds": 144.780495353
+        }
+      ],
+      "relative_speedup": {
+        "12": 8.022243612727571,
+        "24": 9.039552295313392
+      },
+      "scope": "same WSL boot and inputs; single W1 sample versus two W12/W24 samples; not a precise scaling curve"
+    }
+  },
+  "command_cpu": {
+    "source": "build/shared-parallel/command-cpu/audit.json",
+    "data": {
+      "passed": true,
+      "rows": [
+        {
+          "workers": 12,
+          "command_seconds": 17.981969499,
+          "native_search_seconds": 17.728746612,
+          "coordinator_cpu_seconds": 11.29,
+          "coordinator_reaped_cpu_seconds": 192.79,
+          "initial_live_descendant_cpu_seconds": 0.0,
+          "total_accounted_cpu_seconds": 204.07999999999998,
+          "ticks_per_second": 100,
+          "scope": "self + waited descendants + stable initially-live process subtrees; whole command incl cleanup; not per-worker wall time or exact search-only CPU",
+          "coordinator_average_cores": 0.6278511372532274,
+          "total_average_cores": 11.349146155060996
+        },
+        {
+          "workers": 24,
+          "command_seconds": 16.369182559,
+          "native_search_seconds": 16.139078814,
+          "coordinator_cpu_seconds": 11.48,
+          "coordinator_reaped_cpu_seconds": 272.09,
+          "initial_live_descendant_cpu_seconds": 0.0,
+          "total_accounted_cpu_seconds": 283.57,
+          "ticks_per_second": 100,
+          "scope": "self + waited descendants + stable initially-live process subtrees; whole command incl cleanup; not per-worker wall time or exact search-only CPU",
+          "coordinator_average_cores": 0.7013178549767068,
+          "total_average_cores": 17.32340628360146
+        }
+      ],
+      "child_cpu_ratio_24_over_12": 1.411328388401888,
+      "total_cpu_ratio_24_over_12": 1.3895041160329284,
+      "scope": "whole-command guest CPU accounting including reaping; not raw hardware execution or exact native-search CPU"
+    }
+  },
+  "host24_cpu": {
+    "source": "build/shared-parallel/host24-cpu/audit.json",
+    "data": {
+      "passed": true,
+      "summary": {
+        "sample12": {
+          "workers": 12,
+          "native_search_seconds_diagnostic": 17.650942067,
+          "command_seconds": 17.878142663,
+          "accepted_intervals": 12,
+          "covered_seconds": 16.2702362,
+          "coverage_fraction": 0.9100630030026738,
+          "covered_vm_cpu_seconds": 192.6396593027927,
+          "weighted_busy_vps": 11.840003853342504,
+          "median_busy_vps": 11.853287861418165,
+          "median_host_performance_context": 104.8674284623391
+        },
+        "sample24": {
+          "workers": 24,
+          "native_search_seconds_diagnostic": 15.928794347,
+          "command_seconds": 16.161551141,
+          "accepted_intervals": 11,
+          "covered_seconds": 15.140501900000002,
+          "coverage_fraction": 0.9368223240398186,
+          "covered_vm_cpu_seconds": 261.14030539299654,
+          "weighted_busy_vps": 17.24779714158594,
+          "median_busy_vps": 17.74719140918791,
+          "median_host_performance_context": 104.23899371069183
+        }
+      },
+      "scope": "whole-VM samples wholly within CLI parallel command, not exact native-only interval or worker-only CPU; coverage incomplete; do not divide covered CPU by full graph work to infer per-edge CPU"
+    }
+  },
+  "journal_pairs": {
+    "source": "build/shared-parallel/journal-batching/combined.json",
+    "data": {
+      "pairs": [
+        {
+          "round": 0,
+          "baseline": 19.046220533,
+          "candidate": 18.444074151,
+          "time_change_percent": -3.1615006292545322
+        },
+        {
+          "round": 1,
+          "baseline": 18.606074478,
+          "candidate": 18.180009442,
+          "time_change_percent": -2.2899243819741955
+        },
+        {
+          "round": 2,
+          "baseline": 17.450633664,
+          "candidate": 17.714518232,
+          "time_change_percent": 1.5121775694849626
+        },
+        {
+          "round": 3,
+          "baseline": 17.729996262,
+          "candidate": 16.997521588,
+          "time_change_percent": -4.131273707992156
+        }
+      ],
+      "baseline_median": 18.16803537,
+      "candidate_median": 17.947263837,
+      "pooled_median_time_change_percent": -1.2151645926699706,
+      "decision": "not promoted: small mixed paired effect with live journal visibility tradeoff"
+    }
+  },
+  "mapped_timing": {
+    "source": "build/shared-parallel/mapped-pool-timing/audit.json",
+    "data": {
+      "passed": true,
+      "rows": [
+        {
+          "name": "r0-baseline",
+          "variant": "baseline",
+          "report": "/work/results/mapped-pool-timing-d16-20261024/r0-baseline/run-1zvyf2fc/results.json",
+          "native_seconds": 15.628767094
+        },
+        {
+          "name": "r0-owned",
+          "variant": "owned",
+          "report": "/work/results/mapped-pool-timing-d16-20261024/r0-owned/run-c2xk_9a5/results.json",
+          "native_seconds": 18.110618906
+        },
+        {
+          "name": "r0-raw-heap",
+          "variant": "raw-heap",
+          "report": "/work/results/mapped-pool-timing-d16-20261024/r0-raw-heap/run-5m0i91l3/results.json",
+          "native_seconds": 18.236211516
+        },
+        {
+          "name": "r0-mapped",
+          "variant": "mapped",
+          "report": "/work/results/mapped-pool-timing-d16-20261024/r0-mapped/run-trm9hqcw/results.json",
+          "native_seconds": 20.118061553
+        },
+        {
+          "name": "r0-mapped-large",
+          "variant": "mapped-large",
+          "report": "/work/results/mapped-pool-timing-d16-20261024/r0-mapped-large/run-x0eeh15w/results.json",
+          "native_seconds": 18.158996461
+        },
+        {
+          "name": "r1-baseline",
+          "variant": "baseline",
+          "report": "/work/results/mapped-pool-timing-d16-20261024/r1-baseline/run-ta9ffu1c/results.json",
+          "native_seconds": 16.626781526
+        },
+        {
+          "name": "r1-owned",
+          "variant": "owned",
+          "report": "/work/results/mapped-pool-timing-d16-20261024/r1-owned/run-3vtkv5hz/results.json",
+          "native_seconds": 18.73258304
+        },
+        {
+          "name": "r1-raw-heap",
+          "variant": "raw-heap",
+          "report": "/work/results/mapped-pool-timing-d16-20261024/r1-raw-heap/run-soy21wc9/results.json",
+          "native_seconds": 18.632132686
+        },
+        {
+          "name": "r1-mapped",
+          "variant": "mapped",
+          "report": "/work/results/mapped-pool-timing-d16-20261024/r1-mapped/run-0symi3m7/results.json",
+          "native_seconds": 20.173659612
+        },
+        {
+          "name": "r1-mapped-large",
+          "variant": "mapped-large",
+          "report": "/work/results/mapped-pool-timing-d16-20261024/r1-mapped-large/run-6yelmwow/results.json",
+          "native_seconds": 18.126208876
+        }
+      ],
+      "median_native_seconds": {
+        "baseline": 16.12777431,
+        "owned": 18.421600973,
+        "raw-heap": 18.434172101,
+        "mapped": 20.1458605825,
+        "mapped-large": 18.1426026685
+      },
+      "time_change_vs_baseline_percent": {
+        "baseline": 0.0,
+        "owned": 14.222834589009082,
+        "raw-heap": 14.300781661917995,
+        "mapped": 24.914078007704955,
+        "mapped-large": 12.492910179495187
+      },
+      "scope": "two reversed-order rounds, W24 only; native automatic search; no PSS or scaling-ratio claim"
+    }
+  },
+  "mapped_footprint": {
+    "source": "build/shared-parallel/mapped-pool-runs/evidence/footprint.json",
+    "data": [
+      {
+        "variant": "mapped",
+        "report": "/home/asaaoi/exp/detsim-scaling-20261019-3fb4274f/rootfs/work/results/mapped-pool-reference-d16-20261024/mapped/run-xlh7xr2_/results.json",
+        "groups": {
+          "blobs": {
+            "totals": {
+              "objects": 5895,
+              "raw_bytes": 98381957,
+              "file_bytes": 98712077,
+              "allocated_bytes": 113745920,
+              "codec0": 5895
+            },
+            "size_buckets": {
+              "gt4KiB": 3988,
+              "4KiB": 1907
+            }
+          },
+          "ready": {
+            "totals": {
+              "objects": 67405,
+              "raw_bytes": 31608330,
+              "file_bytes": 35383010,
+              "allocated_bytes": 276090880,
+              "codec0": 67405
+            },
+            "size_buckets": {
+              "lt4KiB": 67405
+            }
+          }
+        }
+      },
+      {
+        "variant": "raw-heap",
+        "report": "/home/asaaoi/exp/detsim-scaling-20261019-3fb4274f/rootfs/work/results/mapped-pool-reference-d16-20261024/raw-heap/run-6qjrjuhk/results.json",
+        "groups": {
+          "blobs": {
+            "totals": {
+              "objects": 5895,
+              "raw_bytes": 98381957,
+              "file_bytes": 98712077,
+              "allocated_bytes": 113745920,
+              "codec0": 5895
+            },
+            "size_buckets": {
+              "gt4KiB": 3988,
+              "4KiB": 1907
+            }
+          },
+          "ready": {
+            "totals": {
+              "objects": 67405,
+              "raw_bytes": 31608330,
+              "file_bytes": 35383010,
+              "allocated_bytes": 276090880,
+              "codec0": 67405
+            },
+            "size_buckets": {
+              "lt4KiB": 67405
+            }
+          }
+        }
+      },
+      {
+        "variant": "owned",
+        "report": "/home/asaaoi/exp/detsim-scaling-20261019-3fb4274f/rootfs/work/results/mapped-pool-reference-d16-20261024/owned/run-mi3h980x/results.json",
+        "groups": {
+          "blobs": {
+            "totals": {
+              "objects": 5895,
+              "raw_bytes": 98381957,
+              "file_bytes": 32321518,
+              "allocated_bytes": 40542208,
+              "codec1": 5893,
+              "codec0": 2
+            },
+            "size_buckets": {
+              "gt4KiB": 3988,
+              "4KiB": 1907
+            }
+          },
+          "ready": {
+            "totals": {
+              "objects": 67405,
+              "raw_bytes": 31608330,
+              "file_bytes": 35383010,
+              "allocated_bytes": 276090880,
+              "codec0": 67405
+            },
+            "size_buckets": {
+              "lt4KiB": 67405
+            }
+          }
+        }
+      }
+    ]
+  }
+}

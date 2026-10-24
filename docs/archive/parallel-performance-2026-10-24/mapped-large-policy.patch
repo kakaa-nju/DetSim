@@ -1,0 +1,20 @@
+--- a/src/core/state/shared_object_pool.cpp
++++ b/src/core/state/shared_object_pool.cpp
+@@ -147,7 +147,7 @@
+                     "compressed object declared size mismatch");
+         } else require(h.stored_size == h.raw_size, "invalid raw object size");
+         Buffer data;
+-        if (mapped_pool && !h.codec) {
++        if (mapped_pool && !h.codec && h.raw_size >= 4096) {
+             data = std::make_shared<const ImmutableBytes>(
+                 ImmutableBytes::map_file(fd.value, sizeof(Header), size_t(h.raw_size)));
+         } else {
+@@ -210,7 +210,7 @@
+         if (unlink(full.c_str())) io_error("remove temporary object");
+         cleanup.path.clear();
+         Buffer published;
+-        if (mapped_pool && !codec && size <= cache_limit && !cache.contains(id))
++        if (mapped_pool && !codec && size >= 4096 && size <= cache_limit && !cache.contains(id))
+             published = std::make_shared<const ImmutableBytes>(
+                 ImmutableBytes::map_file(fd.value, sizeof(Header), size));
+         const int written = fd.value;

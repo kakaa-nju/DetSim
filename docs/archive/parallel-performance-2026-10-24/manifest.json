@@ -1,0 +1,51 @@
+{
+  "archive_base_commit": "9e24a1cd14132ee77c8389756bf02d93f3848887",
+  "status": "design/prototype archive; goal paused; no experiments run for archiving",
+  "files": {
+    "README.md": {
+      "bytes": 3552,
+      "sha256": "80eb8e197732a6a6b1959abca6fd1769ed73c07e2d825382bd85a9bf93e74a0d"
+    },
+    "immutable-bytes-test.cpp.txt": {
+      "bytes": 3078,
+      "sha256": "07a71c9ab39972f999efde4e0c18d7d5d82c10ae95295dc67239ab8e8a96d4f1"
+    },
+    "journal-batching.patch": {
+      "bytes": 828,
+      "sha256": "286fd0d2032cf59303b6b044f7f234d63d968217232dd22dbaeeb298ec9a7881"
+    },
+    "journal-test.cpp.txt": {
+      "bytes": 3852,
+      "sha256": "af61f9874cc4833d7c25d90490bd59bd380adbf7899013b20bbeab2239929ce1"
+    },
+    "key-results.json": {
+      "bytes": 12185,
+      "sha256": "56817aedeb092ddfecc32cd4310b513827b9e90a36fca85791e35d6d68f9d2fa"
+    },
+    "mapped-large-policy.patch": {
+      "bytes": 1057,
+      "sha256": "88a4cc3930b2f1fda9dfa70fbe9f6a4de95e6b513f4c9290c0296ee6ed6c290a"
+    },
+    "mapped-pool.patch": {
+      "bytes": 25997,
+      "sha256": "cd8d995cd0dfb77dc48a9131f5ff7a2ac29cc964956c0b51838649a4c46397bf"
+    },
+    "verification-adaptations.patch": {
+      "bytes": 8990,
+      "sha256": "47d4eb1a9f4f29994f3ef6654cacb7d1c4fcb6b299b039921de771815f49c8ab"
+    }
+  },
+  "not_in_git": {
+    "resource_evidence": {
+      "path": "build/shared-parallel/mapped-pool-resources/evidence.tar",
+      "bytes": 232949760,
+      "sha256": "a6b92ddfc99ad0b6a62d69ba10d2ca3425b7e2fd8ea6c7ff6afdf8b872ca7ddb",
+      "status": "downloaded; NOT independently audited"
+    },
+    "rebuilt_original": {
+      "path": "build/shared-parallel/rebuilt-typed-baseline",
+      "status": "build manifest says built, link exit0; no graph/timing comparison",
+      "binary_sha256": "7d2bf2447b70016574c52e22a851da059ae85651b076d9955f0fcbdaec0b2b6c"
+    }
+  }
+}

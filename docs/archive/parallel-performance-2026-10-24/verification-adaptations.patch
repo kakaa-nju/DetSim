@@ -1,0 +1,128 @@
+--- a/tests/shared_object_pool_test.cpp
++++ b/tests/shared_object_pool_test.cpp
+@@ -204,9 +204,14 @@
+             bounded.publish_blob(a,big.data(),big.size());auto retained=bounded.load_blob(a);
+             std::fill(big.begin(),big.end(),'b');auto b=XXHash64::hash(big.data(),big.size());bounded.publish_blob(b,big.data(),big.size());
+             require(*bounded.load_blob(b)==big,"recent cache content changed");
++            require(bounded.load_blob(b)->is_mapped()==bool(DETSIM_EXPERIMENT_POOL_MAPPED && DETSIM_EXPERIMENT_POOL_RAW),"unexpected buffer backing");
+             corrupt(object(location,"blobs",a),0);rejects([&]{bounded.load_blob(a);});
+-            require(retained->front()=='a'&&retained->back()=='a',"eviction mutated retained owner");
++            require((*retained)[0]=='a'&&(*retained)[retained->size()-1]=='a',"eviction mutated retained owner");
++            #if DETSIM_EXPERIMENT_POOL_RAW
++            require(std::filesystem::file_size(object(location,"blobs",b))>big.size(),"raw object lacks header/payload");
++#else
+             require(std::filesystem::file_size(object(location,"blobs",b))<big.size()/10,"large compressible object stored raw");
++#endif
+         }
+         filesystem_barriers(root);
+         pool.flush(); fail_sync=true;rejects([&]{pool.flush();});fail_sync=false;rejects([&]{pool.load_blob(key);});
+--- a/tests/shared_store_integration.cpp
++++ b/tests/shared_store_integration.cpp
+@@ -19,11 +19,11 @@
+ static std::mutex gate_mutex;
+ static std::condition_variable gate_cv;
+ static bool hold_compression=false,compression_entered=false;
+-extern "C" std::vector<uint8_t> real_compress(StateStorePacked*,const std::vector<uint8_t>&)
+-    asm("__real__ZN16StateStorePacked8compressERKSt6vectorIhSaIhEE");
+-extern "C" std::vector<uint8_t> wrap_compress(StateStorePacked*,const std::vector<uint8_t>&)
+-    asm("__wrap__ZN16StateStorePacked8compressERKSt6vectorIhSaIhEE");
+-extern "C" std::vector<uint8_t> wrap_compress(StateStorePacked* store,const std::vector<uint8_t>& bytes){
++extern "C" std::vector<uint8_t> real_compress(StateStorePacked*,std::span<const uint8_t>)
++    asm("__real__ZN16StateStorePacked8compressESt4spanIKhLm18446744073709551615EE");
++extern "C" std::vector<uint8_t> wrap_compress(StateStorePacked*,std::span<const uint8_t>)
++    asm("__wrap__ZN16StateStorePacked8compressESt4spanIKhLm18446744073709551615EE");
++extern "C" std::vector<uint8_t> wrap_compress(StateStorePacked* store,std::span<const uint8_t> bytes){
+     std::unique_lock lock(gate_mutex);compression_entered=true;gate_cv.notify_all();
+     gate_cv.wait(lock,[]{return !hold_compression;});lock.unlock();return real_compress(store,bytes);
+ }
+--- a/tests/shared_snapshot_integration.cpp
++++ b/tests/shared_snapshot_integration.cpp
+@@ -360,7 +360,7 @@
+     const auto key = *added.begin();
+     const auto bytes = pool.load_ready(key);
+     require(bytes && XXHash64::hash(bytes->data(), bytes->size()) == key, "Root certificate descriptor-derived key");
+-    return {key, *bytes};
++    return {key, std::vector<uint8_t>(bytes->begin(), bytes->end())};
+ }
+ static Bundle reference_for(hash_type key) {
+     Bundle ref; ref.version = 2; ref.system_key = key;
+@@ -445,7 +445,7 @@
+         require(!invalid.load_ready(key), "Invalid descriptor rejected before SystemReady");
+     }
+     SharedObjectPool wrong_type(directory.string() + "-type");
+-    wrong_type.publish_ready(proof_a.key, *pool.load_ready(ref_a.system_key));
++    const auto wrong_type_bytes=pool.load_ready(ref_a.system_key); wrong_type.publish_ready(proof_a.key, std::vector<uint8_t>(wrong_type_bytes->begin(),wrong_type_bytes->end()));
+     SharedPublisher reject_type(wrong_type);
+     rejects([&] { reject_type.export_bundle(state(a, model)); });
+     const auto colliding_system = state(a, model);
+@@ -554,7 +554,7 @@
+             rejects([&]{import_shared_bundle(bad,"bundle-fixture/model1",pool);});
+             bad=ref;bad.version=1;rejects([&]{import_shared_bundle(bad,"bundle-fixture/model1",pool);});
+             bad=ref;bad.blobs=bundle.blobs;rejects([&]{import_shared_bundle(bad,"bundle-fixture/model1",pool);});
+-            const auto record=*pool.load_ready(ref.system_key);
++            const auto ready_bytes=pool.load_ready(ref.system_key); const std::vector<uint8_t> record(ready_bytes->begin(),ready_bytes->end());
+             SharedObjectPool invalid((base/(suffix+"-invalid-ready")).string());
+             auto corrupt=record;corrupt.back()^=1;invalid.publish_ready(ref.system_key,corrupt);
+             rejects([&]{load_shared_state(ref.system_key,"bundle-fixture/model1",invalid);});
+--- a/tests/capture_integration.cpp
++++ b/tests/capture_integration.cpp
+@@ -66,6 +66,8 @@
+         StateStore::Config config;
+         if (argc > 1) config.hot_cache_size = config.warm_cache_size = 1;
+         StateStore::instance().init(config);
++        if (getenv("DETSIM_TEST_MAPPED_POOL")) StateStore::instance().attach_shared_pool((std::filesystem::current_path()/"shared-objects").string(),true);
++        bool mapped_cold_checked=false;
+         syscall_info info[NP][MAX_THREADS_PER_PROCESS]{};
+         ptmc_state.cursor = -1;
+         auto_mode = 1;
+@@ -118,6 +120,7 @@
+         }
+         ptmc_state.cursor = -1;
+         sys_state source(info);
++        if (getenv("DETSIM_TEST_MAPPED_POOL")) require(StateStore::instance().load_shared(source.ts_hash[0])->is_mapped(),"shared capture did not use mapped backing");
+         ptmc_state.running_state = source;
+         ptmc_state.cursor = 0;
+         ptmc_state.running_state.monitor_states["other-branch"] = {9};
+@@ -125,6 +128,23 @@
+         require(ptmc_state.running_state.monitor_states == source.monitor_states &&
+                 ptmc_state.running_state.ss_hash == source.ss_hash,
+                 "restore did not select the source monitor/product identity");
++        if (getenv("DETSIM_TEST_MAPPED_POOL") && argc > 1) {
++            auto& store=StateStore::instance();
++            const auto held=store.load_shared(source.ts_hash[0]);
++            require(held && held->is_mapped() && store.get_l1_usage()==0,"cold oracle needs disabled L1 and mapped source");
++            const auto generation=store.snapshot_generation();
++            store.attach_shared_pool((std::filesystem::current_path()/"shared-objects").string(),true);
++            const auto fresh=store.load_shared(source.ts_hash[0]);
++            require(store.snapshot_generation()>generation && fresh && fresh->is_mapped() &&
++                    fresh->data()!=held->data() && *fresh==*held,"cold mapped reopen changed bytes or reused old owner");
++            source.recover_running_state();
++            // Registration caches are host bookkeeping and must rebind after a
++            // generation change before measuring ordinary capture save counts.
++            sys_state warmed(info,&source);
++            require(warmed.ss_hash==source.ss_hash,"cold restore/registration changed source identity");
++            ptmc_state.running_state=warmed;
++            mapped_cold_checked=true;
++        }
+         const auto before = StateStore::instance().get_stats();
+         sys_state reused(info, &source);
+         require(StateStore::instance().get_stats().save_calls == before.save_calls + NP,
+@@ -459,7 +479,7 @@
+         source.recover_running_state();
+         sys_state crash_predecessor(info,&source);
+         require(crash_predecessor.ss_hash==source.ss_hash,"crash predecessor restore identity drift");
+-        if (argc > 1) require(StateStore::instance().get_stats().disk_reads > 0, "oracle did not exercise cache eviction");
++        if (argc > 1) { if (getenv("DETSIM_TEST_MAPPED_POOL")) require(mapped_cold_checked,"oracle did not exercise mapped cold reopen"); else require(StateStore::instance().get_stats().disk_reads > 0, "oracle did not exercise cache eviction"); }
+         // A later node's failure must be detected before any earlier image,
+         // status, budget, or store record changes.
+         require(ptrace(PTRACE_POKEDATA,children[0],&guest_value,456)==0,"edit preflight witness");
+--- a/tests/shared_object_pool.mk
++++ b/tests/shared_object_pool.mk
+@@ -8,6 +8,6 @@
+ 	$(CXX) $(PROJECT_CPPFLAGS) $(CPPFLAGS) $(CXXFLAGS) -Wall -Wextra -Werror -MMD -MP -MF $@.d -MT $@ tests/shared_object_pool_test.cpp src/core/state/shared_object_pool.cpp -pthread -lzstd -lxxhash -Wl,--wrap=fsync -Wl,--wrap=write -Wl,--wrap=read -Wl,--wrap=flock -Wl,--wrap=fstat -Wl,--wrap=syncfs -o $@
+ 
+ $(BUILD_DIR)/tests/shared_store_integration: $(BUILD_DIR)/tests/shared_store_integration.o $(TRACER_OBJS_NO_MAIN) $(BUILD_DIR)/nr2call.o
+-	$(LD) $^ $(LDFLAGS) $(LDLIBS) -Wl,--wrap=fsync -Wl,--wrap=syncfs -Wl,--wrap=_ZN16StateStorePacked8compressERKSt6vectorIhSaIhEE -o $@
++	$(LD) $^ $(LDFLAGS) $(LDLIBS) -Wl,--wrap=fsync -Wl,--wrap=syncfs -Wl,--wrap=_ZN16StateStorePacked8compressESt4spanIKhLm18446744073709551615EE -o $@
+ 
+ -include $(BUILD_DIR)/tests/shared_object_pool_test.d $(BUILD_DIR)/tests/shared_store_integration.d

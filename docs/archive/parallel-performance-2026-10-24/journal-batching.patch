@@ -1,0 +1,22 @@
+--- a/src/core/search/parallel.cpp
++++ b/src/core/search/parallel.cpp
+@@ -165,10 +165,18 @@
+ };
+ class Journal {
+     std::ofstream output_;
++    unsigned pending_ = 0;
+ public:
+     explicit Journal(const fs::path& path) : output_(path) { require(bool(output_), "Cannot create parallel journal"); }
+     void write(json record) {
+-        output_ << record.dump() << '\n'; output_.flush();
++        const auto& event = record.at("event").get_ref<const json::string_t&>();
++        const bool deferred = event == "node" ||
++            (event == "edge" && !record.value("violation", false));
++        output_ << record.dump() << '\n';
++        if (!deferred || ++pending_ >= 64) {
++            output_.flush();
++            pending_ = 0;
++        }
+         require(bool(output_), "Cannot persist parallel journal");
+     }
+ };

@@ -1,0 +1,563 @@
+--- /dev/null
++++ b/src/core/state/immutable_bytes.h
+@@ -0,0 +1,88 @@
++#pragma once
++#include <algorithm>
++#include <cstdint>
++#include <iterator>
++#include <limits>
++#include <span>
++#include <stdexcept>
++#include <system_error>
++#include <utility>
++#include <variant>
++#include <vector>
++#include <cerrno>
++#include <sys/mman.h>
++#include <sys/stat.h>
++
++namespace detsim::snapshot {
++// Host-side byte ownership only; never serialized as model state.
++class ImmutableBytes {
++    struct Mapping {
++        void* base = MAP_FAILED;
++        size_t mapped_size = 0, offset = 0, length = 0;
++        Mapping(void* p, size_t n, size_t off, size_t len) noexcept
++            : base(p), mapped_size(n), offset(off), length(len) {}
++        Mapping(const Mapping&) = delete;
++        Mapping& operator=(const Mapping&) = delete;
++        Mapping(Mapping&& other) noexcept
++            : base(std::exchange(other.base, MAP_FAILED)), mapped_size(other.mapped_size),
++              offset(other.offset), length(other.length) {}
++        Mapping& operator=(Mapping&& other) noexcept {
++            if (this != &other) {
++                if (base != MAP_FAILED) munmap(base, mapped_size);
++                base = std::exchange(other.base, MAP_FAILED);
++                mapped_size = other.mapped_size; offset = other.offset; length = other.length;
++            }
++            return *this;
++        }
++        ~Mapping() { if (base != MAP_FAILED) munmap(base, mapped_size); }
++    };
++    std::variant<std::vector<uint8_t>, Mapping> storage_;
++    explicit ImmutableBytes(Mapping mapping) : storage_(std::move(mapping)) {}
++public:
++    using value_type = uint8_t;
++    using const_iterator = const uint8_t*;
++    ImmutableBytes() = default;
++    explicit ImmutableBytes(std::vector<uint8_t> bytes) : storage_(std::move(bytes)) {}
++    template<std::input_iterator It>
++    ImmutableBytes(It first, It last) : storage_(std::vector<uint8_t>(first,last)) {}
++    ImmutableBytes(const ImmutableBytes&) = delete;
++    ImmutableBytes& operator=(const ImmutableBytes&) = delete;
++    ImmutableBytes(ImmutableBytes&&) noexcept = default;
++    ImmutableBytes& operator=(ImmutableBytes&&) noexcept = default;
++    // Caller guarantees file contents remain immutable while any owner is held.
++    // The mapping retains the inode independently of the descriptor/path lifetime.
++    static ImmutableBytes map_file(int fd, size_t offset, size_t length) {
++        struct stat info{};
++        if (fstat(fd, &info)) throw std::system_error(errno,std::generic_category(),"inspect immutable mapping");
++        if (!S_ISREG(info.st_mode) || info.st_size <= 0 ||
++            uintmax_t(info.st_size) > std::numeric_limits<size_t>::max())
++            throw std::invalid_argument("immutable mapping needs a nonempty regular file");
++        const auto size = static_cast<size_t>(info.st_size);
++        if (!length || offset > size || length > size-offset)
++            throw std::invalid_argument("immutable mapping payload outside file");
++        void* base = mmap(nullptr,size,PROT_READ,MAP_SHARED,fd,0);
++        if (base == MAP_FAILED) throw std::system_error(errno,std::generic_category(),"map immutable bytes");
++        return ImmutableBytes(Mapping(base,size,offset,length));
++    }
++    bool is_mapped() const noexcept { return std::holds_alternative<Mapping>(storage_); }
++    const uint8_t* data() const noexcept {
++        if (const auto* bytes = std::get_if<std::vector<uint8_t>>(&storage_)) return bytes->data();
++        const auto& m = std::get<Mapping>(storage_);
++        return m.base == MAP_FAILED ? nullptr : static_cast<const uint8_t*>(m.base)+m.offset;
++    }
++    size_t size() const noexcept {
++        if (const auto* bytes = std::get_if<std::vector<uint8_t>>(&storage_)) return bytes->size();
++        const auto& m = std::get<Mapping>(storage_);return m.base == MAP_FAILED ? 0 : m.length;
++    }
++    bool empty() const noexcept { return size()==0; }
++    const_iterator begin() const noexcept { return data(); }
++    const_iterator end() const noexcept { return empty() ? data() : data()+size(); }
++    const uint8_t& operator[](size_t i) const noexcept { return data()[i]; }
++    friend bool operator==(const ImmutableBytes& a, std::span<const uint8_t> b) {
++        return a.size()==b.size() && std::equal(a.begin(),a.end(),b.begin());
++    }
++    friend bool operator==(const ImmutableBytes& a, const ImmutableBytes& b) {
++        return a.size()==b.size() && std::equal(a.begin(),a.end(),b.begin());
++    }
++};
++}
+--- a/src/core/state/shared_object_pool.h
++++ b/src/core/state/shared_object_pool.h
+@@ -1,5 +1,6 @@
+ #pragma once
+ #include "types.h"
++#include "immutable_bytes.h"
+ #include <memory>
+ #include <cstddef>
+ #include <string>
+@@ -16,7 +17,7 @@
+ // publication proofs only within this pool instance; reopen validates cold files.
+ class SharedObjectPool {
+ public:
+-    using Buffer = std::shared_ptr<const std::vector<uint8_t>>;
++    using Buffer = std::shared_ptr<const ImmutableBytes>;
+     explicit SharedObjectPool(std::string dir, bool create = true, bool read_only = false);
+     ~SharedObjectPool();
+     SharedObjectPool(const SharedObjectPool&) = delete;
+--- a/src/core/state/shared_object_pool.cpp
++++ b/src/core/state/shared_object_pool.cpp
+@@ -18,6 +18,14 @@
+ namespace detsim::snapshot {
+ namespace {
+ constexpr uint64_t magic = 0x314c4f4f50535344ULL;
++#ifndef DETSIM_EXPERIMENT_POOL_RAW
++#define DETSIM_EXPERIMENT_POOL_RAW 0
++#endif
++#ifndef DETSIM_EXPERIMENT_POOL_MAPPED
++#define DETSIM_EXPERIMENT_POOL_MAPPED 0
++#endif
++constexpr bool raw_pool = DETSIM_EXPERIMENT_POOL_RAW;
++constexpr bool mapped_pool = DETSIM_EXPERIMENT_POOL_MAPPED;
+ constexpr size_t cache_limit = size_t{64} << 20;
+ constexpr size_t cache_entry_limit = 16'384;
+ enum class Kind : uint32_t { Blob = 1, Ready = 2 };
+@@ -138,11 +146,18 @@
+             require(ZSTD_getFrameContentSize(encoded.data(), encoded.size()) == h.raw_size,
+                     "compressed object declared size mismatch");
+         } else require(h.stored_size == h.raw_size, "invalid raw object size");
+-        auto data = std::make_shared<std::vector<uint8_t>>(size_t(h.raw_size));
+-        if (!h.codec) exact(fd.value, data->data(), data->size(), false);
+-        else {
+-            const auto size = ZSTD_decompress(data->data(), data->size(), encoded.data(), encoded.size());
+-            require(!ZSTD_isError(size) && size == data->size(), "invalid compressed object");
++        Buffer data;
++        if (mapped_pool && !h.codec) {
++            data = std::make_shared<const ImmutableBytes>(
++                ImmutableBytes::map_file(fd.value, sizeof(Header), size_t(h.raw_size)));
++        } else {
++            std::vector<uint8_t> decoded(size_t(h.raw_size));
++            if (!h.codec) exact(fd.value, decoded.data(), decoded.size(), false);
++            else {
++                const auto size = ZSTD_decompress(decoded.data(), decoded.size(), encoded.data(), encoded.size());
++                require(!ZSTD_isError(size) && size == decoded.size(), "invalid compressed object");
++            }
++            data = std::make_shared<const ImmutableBytes>(std::move(decoded));
+         }
+         const auto checksum = XXHash64::hash(data->data(), data->size());
+         require(checksum == h.checksum && (kind != Kind::Blob || checksum == key), "object checksum/key mismatch");
+@@ -167,7 +182,7 @@
+         FileLock exclusion(barrier.value, LOCK_SH);
+         std::vector<uint8_t> encoded;
+         uint32_t codec = 0;
+-        if (size >= 4096) {
++        if (!raw_pool && size >= 4096) {
+             encoded.resize(ZSTD_compressBound(size));
+             const auto compressed = ZSTD_compress(encoded.data(), encoded.size(), bytes, size, 1);
+             require(!ZSTD_isError(compressed), "compression failed");
+@@ -194,12 +209,19 @@
+         }
+         if (unlink(full.c_str())) io_error("remove temporary object");
+         cleanup.path.clear();
++        Buffer published;
++        if (mapped_pool && !codec && size <= cache_limit && !cache.contains(id))
++            published = std::make_shared<const ImmutableBytes>(
++                ImmutableBytes::map_file(fd.value, sizeof(Header), size));
+         const int written = fd.value;
+         fd.value = -1; // Linux close errors must not cause a retry on a reused fd.
+         if (close(written)) io_error("close published object");
+-        if (size <= cache_limit)
+-            remember({kind,key}, std::make_shared<const std::vector<uint8_t>>(
+-                static_cast<const uint8_t*>(bytes), static_cast<const uint8_t*>(bytes)+size));
++        if (size <= cache_limit) {
++            if (!published && !cache.contains(id))
++                published = std::make_shared<const ImmutableBytes>(
++                    static_cast<const uint8_t*>(bytes), static_cast<const uint8_t*>(bytes)+size);
++            if (published) remember(id, std::move(published));
++        }
+     }
+ };
+ SharedObjectPool::SharedObjectPool(std::string dir, bool create, bool read_only) {
+--- a/src/core/state/state_store.h
++++ b/src/core/state/state_store.h
+@@ -1,6 +1,7 @@
+ // Immutable snapshot buffers, bounded LRU caches, and asynchronous persistence.
+ #ifndef __STATE_STORE_H
+ #define __STATE_STORE_H
++#include "immutable_bytes.h"
+ #include "types.h"
+ #include <atomic>
+ #include <condition_variable>
+@@ -78,9 +79,9 @@
+   // Load data: check L1 -> L2 -> disk
+   ssize_t load(hash_type hash, std::vector<uint8_t> &out_data);
+ 
+-  // Load data returning shared_ptr for zero-copy access (returns nullptr if not
+-  // found)
+-  std::shared_ptr<const std::vector<uint8_t>> load_shared(hash_type hash);
++  // Load data returning the immutable owner for zero-copy access (returns
++  // nullptr if not found)
++  std::shared_ptr<const detsim::snapshot::ImmutableBytes> load_shared(hash_type hash);
+ 
+   // Check existence
+   bool exists(hash_type hash);
+@@ -181,7 +182,7 @@
+   size_t get_io_queue_capacity() const { return max_io_queue_size_; }
+ 
+   private:
+-  using Buffer = std::shared_ptr<const std::vector<uint8_t>>;
++  using Buffer = std::shared_ptr<const detsim::snapshot::ImmutableBytes>;
+   struct CacheEntry {
+     Buffer bytes;
+     size_t original_size;
+--- a/src/core/state/state_store.cpp
++++ b/src/core/state/state_store.cpp
+@@ -11,6 +11,7 @@
+ #include <algorithm>
+ #include <chrono>
+ #include <cstring>
++#include <span>
+ #include <sstream>
+ #include <stdexcept>
+ 
+@@ -198,7 +199,7 @@
+         std::vector<uint8_t> local;
+         if (StateStorePacked::instance().load(hash, local) < 0)
+           throw std::runtime_error("unreadable existing local state");
+-        existing = std::make_shared<const std::vector<uint8_t>>(std::move(local));
++        existing = std::make_shared<const detsim::snapshot::ImmutableBytes>(std::move(local));
+       }
+       if (!existing) existing = shared_pool_->load_blob(hash);
+       if (existing && (existing->size() != len || std::memcmp(existing->data(), data, len)))
+@@ -206,9 +207,11 @@
+       const bool known = bool(existing);
+       // Never return a cache/reference hit before ensuring global publication.
+       shared_pool_->publish_blob(hash, data, len);
+-      if (!existing && len <= config_.hot_cache_size)
+-        existing = std::make_shared<const std::vector<uint8_t>>(
+-            static_cast<const uint8_t*>(data), static_cast<const uint8_t*>(data)+len);
++      if (!existing && len <= config_.hot_cache_size) {
++        // Retain the published mapped owner for L1 instead of a private heap copy.
++        existing = shared_pool_->load_blob(hash);
++        if (!existing) throw std::runtime_error("published shared snapshot is unreadable");
++      }
+       if (existing)
+         insert_cache(hot_cache_, hot_lru_, hot_memory_usage_, config_.hot_cache_size, hash, existing, len);
+       if (reference_equal) ++stats_.save_reference_hits;
+@@ -252,7 +255,9 @@
+     // Compare duplicate content, including disk-only entries: hashes are keys,
+     // not permission to silently discard different state bytes.
+     if (auto compressed = find_cache(warm_cache_, warm_lru_, hash)) {
+-      auto bytes = StateStorePacked::instance().decompress(*compressed, warm_cache_.at(hash).original_size);
++      auto bytes = StateStorePacked::instance().decompress(
++          std::span<const uint8_t>(compressed->data(), compressed->size()),
++          warm_cache_.at(hash).original_size);
+       if (bytes.size() != len || memcmp(bytes.data(), data, len))
+         throw std::runtime_error("snapshot hash collision");
+       ++stats_.save_dedup_warm; return hash;
+@@ -268,7 +273,7 @@
+         len <= config_.max_pending_bytes && pending_bytes_ <= config_.max_pending_bytes - len)) break;
+     space_cv_.wait(lock);
+   }
+-  auto bytes = std::make_shared<const std::vector<uint8_t>>(
++  auto bytes = std::make_shared<const detsim::snapshot::ImmutableBytes>(
+       static_cast<const uint8_t *>(data), static_cast<const uint8_t *>(data) + len);
+   pending_.emplace(hash, bytes);
+   try { io_queue_.push_back(hash); }
+@@ -297,7 +302,8 @@
+     }
+     try {
+       auto &packed = StateStorePacked::instance();
+-      auto compressed = std::make_shared<const std::vector<uint8_t>>(packed.compress(*bytes));
++      auto compressed = std::make_shared<const detsim::snapshot::ImmutableBytes>(
++          packed.compress(std::span<const uint8_t>(bytes->data(), bytes->size())));
+       if (compressed->empty() || packed.save(compressed->data(), compressed->size(), hash, true, bytes->size()) != hash)
+         throw std::runtime_error("snapshot persistence failed");
+       std::lock_guard lock(mutex_);
+@@ -351,11 +357,13 @@
+       } catch (...) { std::lock_guard lock(mutex_); record_failure(std::current_exception()); throw; }
+     }
+     original_size = packed.get_original_size(hash);
+-    compressed = std::make_shared<const std::vector<uint8_t>>(std::move(bytes));
++    compressed = std::make_shared<const detsim::snapshot::ImmutableBytes>(std::move(bytes));
+     std::lock_guard lock(mutex_); check_ready(); ++stats_.disk_reads;
+     insert_cache(warm_cache_, warm_lru_, warm_memory_usage_, config_.warm_cache_size, hash, compressed, original_size);
+   }
+-  auto bytes = std::make_shared<const std::vector<uint8_t>>(packed.decompress(*compressed, original_size));
++  auto bytes = std::make_shared<const detsim::snapshot::ImmutableBytes>(
++      packed.decompress(std::span<const uint8_t>(compressed->data(), compressed->size()),
++                        original_size));
+   if (bytes->empty() || XXHash64::hash(bytes->data(), bytes->size()) != hash)
+     throw std::runtime_error("snapshot content hash mismatch");
+   {
+@@ -364,14 +372,15 @@
+   }
+   return bytes;
+ }
+-std::shared_ptr<const std::vector<uint8_t>> StateStore::load_shared(hash_type hash) {
++std::shared_ptr<const detsim::snapshot::ImmutableBytes> StateStore::load_shared(hash_type hash) {
+   ensure_initialized(); std::shared_lock lifecycle(lifecycle_mutex_);
+   return load_buffer(hash);
+ }
+ ssize_t StateStore::load(hash_type hash, std::vector<uint8_t> &out_data) {
+   auto bytes = load_shared(hash);
+   if (!bytes) {out_data.clear(); return -1;}
+-  out_data = *bytes; return static_cast<ssize_t>(out_data.size());
++  out_data.assign(bytes->begin(), bytes->end());
++  return static_cast<ssize_t>(out_data.size());
+ }
+ bool StateStore::exists(hash_type hash) {
+   ensure_initialized(); std::shared_lock lifecycle(lifecycle_mutex_);
+@@ -446,7 +455,7 @@
+       auto &packed = StateStorePacked::instance();
+       if (packed.load_compressed(hash, data) < 0) throw std::runtime_error("prefetch state disappeared");
+       auto size = packed.get_original_size(hash);
+-      auto bytes = std::make_shared<const std::vector<uint8_t>>(std::move(data));
++      auto bytes = std::make_shared<const detsim::snapshot::ImmutableBytes>(std::move(data));
+       std::lock_guard lock(mutex_);
+       insert_cache(warm_cache_, warm_lru_, warm_memory_usage_, config_.warm_cache_size, hash, bytes, size);
+       prefetch_inflight_.erase(hash);
+--- a/src/core/state/state_store_packed.h
++++ b/src/core/state/state_store_packed.h
+@@ -16,6 +16,7 @@
+ #include <atomic>
+ #include <cstdint>
+ #include <mutex>
++#include <span>
+ #include <string>
+ #include <unordered_map>
+ #include <vector>
+@@ -134,8 +135,8 @@
+   void save_segments_info();
+ 
+   /* Compression - shared with StateStore */
+-  std::vector<uint8_t> compress(const std::vector<uint8_t> &data);
+-  std::vector<uint8_t> decompress(const std::vector<uint8_t> &data,
++  std::vector<uint8_t> compress(std::span<const uint8_t> data);
++  std::vector<uint8_t> decompress(std::span<const uint8_t> data,
+                                   size_t original_size);
+ 
+   private:
+--- a/src/core/state/state_store_packed.cpp
++++ b/src/core/state/state_store_packed.cpp
+@@ -443,7 +443,7 @@
+     std::rethrow_exception(error);
+ }
+ std::vector<uint8_t>
+-StateStorePacked::compress(const std::vector<uint8_t> &data)
++StateStorePacked::compress(std::span<const uint8_t> data)
+ {
+   if (data.empty())
+     return {};
+@@ -461,7 +461,7 @@
+   return std::vector<uint8_t>(result.get(), result.get() + n);
+ }
+ std::vector<uint8_t>
+-StateStorePacked::decompress(const std::vector<uint8_t> &data, size_t size)
++StateStorePacked::decompress(std::span<const uint8_t> data, size_t size)
+ {
+   if (!size || size > UINT32_MAX || !context.d)
+     fail("invalid decompression size/context");
+--- a/src/core/state/page_snapshot.h
++++ b/src/core/state/page_snapshot.h
+@@ -2,6 +2,7 @@
+ #define DETSIM_PAGE_SNAPSHOT_H
+ #include "state.h"
+ #include "state_store.h"
++#include "immutable_bytes.h"
+ #include <span>
+ #include <string_view>
+ #include <mutex>
+@@ -31,7 +32,7 @@
+     uint64_t address;
+     uint32_t length;
+     const uint8_t* data;
+-    std::shared_ptr<const std::vector<uint8_t>> owner;
++    std::shared_ptr<const detsim::snapshot::ImmutableBytes> owner;
+   };
+   // Backend dispatch occurs once per chunk, never once per byte.
+   class Memory;
+@@ -39,7 +40,7 @@
+   // Independently owned serialized bytes, acquired only from a fully validated
+   // snapshot root; referenced pages retain their existing lazy validation. Large
+   // roots need not stay resident for metadata-only observations.
+-  static std::shared_ptr<const std::vector<uint8_t>> load_metadata(hash_type hash);
++  static std::shared_ptr<const detsim::snapshot::ImmutableBytes> load_metadata(hash_type hash);
+   const std::vector<RegionInfo>& regions() const { check_generation(); return regions_; }
+   std::span<const uint8_t> metadata() const;
+   std::string_view maps_text() const;
+@@ -53,9 +54,9 @@
+   OwnedSpan page(size_t region, size_t index) const;
+   void read_into(uint64_t address, void* destination, size_t length) const;
+  private:
+-  explicit SnapshotView(std::shared_ptr<const std::vector<uint8_t>> data, uint64_t generation);
++  explicit SnapshotView(std::shared_ptr<const detsim::snapshot::ImmutableBytes> data, uint64_t generation);
+   void check_generation() const;
+-  std::shared_ptr<const std::vector<uint8_t>> data_;
++  std::shared_ptr<const detsim::snapshot::ImmutableBytes> data_;
+   uint64_t generation_;
+   StateDataHeader header_{};
+   std::vector<RegionInfo> regions_;
+--- a/src/core/state/page_snapshot.cpp
++++ b/src/core/state/page_snapshot.cpp
+@@ -18,7 +18,7 @@
+ struct CacheEntry {
+   hash_type hash;
+   std::shared_ptr<const SnapshotView> view;
+-  std::shared_ptr<const std::vector<uint8_t>> metadata;
++  std::shared_ptr<const detsim::snapshot::ImmutableBytes> metadata;
+   size_t bytes;
+ };
+ std::mutex cache_mutex;
+@@ -49,9 +49,9 @@
+ };
+ namespace {
+ class FlatMemory final : public SnapshotView::Memory {
+-  std::shared_ptr<const std::vector<uint8_t>> data_;
++  std::shared_ptr<const detsim::snapshot::ImmutableBytes> data_;
+  public:
+-  explicit FlatMemory(std::shared_ptr<const std::vector<uint8_t>> data) : data_(std::move(data)) {}
++  explicit FlatMemory(std::shared_ptr<const detsim::snapshot::ImmutableBytes> data) : data_(std::move(data)) {}
+   SnapshotView::OwnedSpan page(const RegionInfo& region, size_t index) const override {
+     const uint64_t address = index == 0 ? region.start : (region.start / page_size + index) * page_size;
+     return {address, uint32_t(chunk_length(address, region.end)),
+@@ -63,7 +63,7 @@
+   mutable std::mutex mutex_;
+   struct CachedPage {
+     hash_type key = 0;
+-    std::shared_ptr<const std::vector<uint8_t>> bytes;
++    std::shared_ptr<const detsim::snapshot::ImmutableBytes> bytes;
+   };
+   mutable std::array<CachedPage, 4> cached_pages_{};
+   mutable size_t next_page_ = 0;
+@@ -119,7 +119,7 @@
+   return result;
+ }
+ 
+-SnapshotView::SnapshotView(std::shared_ptr<const std::vector<uint8_t>> data, uint64_t generation)
++SnapshotView::SnapshotView(std::shared_ptr<const detsim::snapshot::ImmutableBytes> data, uint64_t generation)
+     : data_(std::move(data)), generation_(generation) {
+   require(data_->size() >= sizeof(header_), "Truncated state snapshot header");
+   memcpy(&header_, data_->data(), sizeof(header_));
+@@ -238,10 +238,10 @@
+   require(store.snapshot_generation()==loaded_generation,"Store changed while opening snapshot");
+   return result;
+ }
+-std::shared_ptr<const std::vector<uint8_t>> SnapshotView::load_metadata(hash_type hash) {
++std::shared_ptr<const detsim::snapshot::ImmutableBytes> SnapshotView::load_metadata(hash_type hash) {
+   auto& store=StateStore::instance();
+   const uint64_t generation=store.snapshot_generation();
+-  std::shared_ptr<const std::vector<uint8_t>> result;
++  std::shared_ptr<const detsim::snapshot::ImmutableBytes> result;
+   std::shared_ptr<const SnapshotView> view;
+   {
+     std::lock_guard lock(cache_mutex);
+@@ -261,8 +261,8 @@
+   // validation path, including layout/region tables and the content key.
+   if (!view) view=open(hash);
+   const auto bytes=view->metadata();
+-  result=std::make_shared<const std::vector<uint8_t>>(bytes.begin(),bytes.end());
+-  const size_t size=sizeof(CacheEntry)+sizeof(std::vector<uint8_t>)+result->size();
++  result=std::make_shared<const detsim::snapshot::ImmutableBytes>(bytes.begin(),bytes.end());
++  const size_t size=sizeof(CacheEntry)+sizeof(detsim::snapshot::ImmutableBytes)+result->size();
+   require(store.snapshot_generation()==generation,"Store changed while loading snapshot metadata");
+   if (size<=cache_limit) {
+     std::lock_guard lock(cache_mutex);
+--- a/src/core/state/resident_memory.h
++++ b/src/core/state/resident_memory.h
+@@ -1,4 +1,5 @@
+ #pragma once
++#include "immutable_bytes.h"
+ #include <cstdint>
+ #include <cstddef>
+ #include <memory>
+@@ -22,7 +23,7 @@
+         uint64_t address;
+         uint32_t length;
+         const uint8_t* data;
+-        std::shared_ptr<const std::vector<uint8_t>> owner;
++        std::shared_ptr<const detsim::snapshot::ImmutableBytes> owner;
+         uint64_t key = 0;
+     };
+     struct Pages {
+--- a/src/core/state/page_capture.cpp
++++ b/src/core/state/page_capture.cpp
+@@ -1,4 +1,5 @@
+ #include "page_capture.h"
++#include "immutable_bytes.h"
+ #include "snapshot_memory.h"
+ #include "resident_memory.h"
+ #include <sys/mman.h>
+@@ -13,7 +14,7 @@
+ namespace {
+ struct SavedPage {
+     PageRef ref;
+-    std::shared_ptr<const std::vector<uint8_t>> bytes;
++    std::shared_ptr<const detsim::snapshot::ImmutableBytes> bytes;
+ };
+ struct Scratch {
+     uint64_t generation = 0;
+--- a/src/core/state/state.cpp
++++ b/src/core/state/state.cpp
+@@ -14,6 +14,7 @@
+ #include "snapshot_memory.h"
+ #include "page_restore_stats.h"
+ #include "resident_memory.h"
++#include "immutable_bytes.h"
+ #include <stdexcept>
+ #include <climits>
+ #include "cereal/archives/binary.hpp"
+@@ -601,7 +602,7 @@
+   size_t iov_count = 0, queued_bytes = 0;
+   // Loading another page can evict a previous page from the store's cache.
+   // Own every queued buffer until the corresponding write completes.
+-  std::vector<std::shared_ptr<const std::vector<uint8_t>>> owners;
++  std::vector<std::shared_ptr<const detsim::snapshot::ImmutableBytes>> owners;
+   owners.reserve(MAX_IOV_BATCH);
+   auto flush = [&] {
+     if (!iov_count) return;
+--- a/src/core/state/snapshot_bundle.cpp
++++ b/src/core/state/snapshot_bundle.cpp
+@@ -1,3 +1,4 @@
++#include <span>
+ #include "snapshot_bundle.h"
+ #include "page_snapshot.h"
+ #include "shared_object_pool.h"
+@@ -62,7 +63,7 @@
+         if (!seen.insert(key).second) return;
+         auto bytes = StateStore::instance().load_shared(key);
+         require(bytes && !bytes->empty(), "Missing snapshot bundle dependency");
+-        bundle.blobs.push_back({key, *bytes});
++        bundle.blobs.push_back({key, std::vector<uint8_t>(bytes->begin(), bytes->end())});
+     });
+     return bundle;
+ }
+@@ -111,13 +112,13 @@
+     const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+     out.insert(out.end(), bytes, bytes + sizeof(value));
+ }
+-template<class T> T take(const std::vector<uint8_t>& bytes, size_t& offset) {
++template<class T> T take(std::span<const uint8_t> bytes, size_t& offset) {
+     require(offset <= bytes.size() && sizeof(T) <= bytes.size() - offset, "Truncated shared ready record");
+     T result; std::memcpy(&result, bytes.data() + offset, sizeof(result));
+     offset += sizeof(result); return result;
+ }
+ struct DecodedReady { ReadyState ready; std::vector<uint8_t> metadata; };
+-DecodedReady decode_ready(hash_type key, const std::vector<uint8_t>& bytes,
++DecodedReady decode_ready(hash_type key, std::span<const uint8_t> bytes,
+                           const std::string& expected) {
+     require(!expected.empty(), "Empty shared snapshot execution model");
+     require(bytes.size() >= sizeof(uint64_t), "Truncated shared ready checksum");
+--- a/src/subsys/fs/fsstate.cpp
++++ b/src/subsys/fs/fsstate.cpp
+@@ -130,7 +130,7 @@
+   if (store.snapshot_generation() != generation)
+     throw std::runtime_error("Store changed while loading virtual file content");
+   auto next = std::make_shared<Payload>();
+-  next->restored = std::move(value);
++  next->restored = std::make_shared<const std::vector<uint8_t>>(value->begin(), value->end());
+   next->key = key;
+   next->generation = generation;
+   payload_ = std::move(next);

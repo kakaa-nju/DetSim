@@ -1,0 +1,37 @@
+#include <filesystem>
+#include <fstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+#include <iostream>
+#include <unistd.h>
+#include <nlohmann/json.hpp>
+namespace fs=std::filesystem;using json=nlohmann::json;
+void require(bool b,const std::string& message){if(!b)throw std::runtime_error(message);}
+#include JOURNAL_HEADER
+std::vector<json> read(const fs::path& p){std::ifstream f(p);std::vector<json> out;std::string s;while(std::getline(f,s))out.push_back(json::parse(s));return out;}
+int main(int argc,char**){
+ char pattern[]="/tmp/detsim-journal-XXXXXX";auto* temp=mkdtemp(pattern);if(!temp)return 2;fs::path dir(temp);
+ struct Cleanup{fs::path p;~Cleanup(){std::error_code ec;fs::remove_all(p,ec);}}cleanup{dir};
+ try {
+  const bool batch=argc>1;std::vector<json> expected;
+  {Journal j(dir/"events");
+   for(int i=0;i<63;++i){json r={{"event","edge"},{"index",i},{"text","quoted\"line\n"}};expected.push_back(r);j.write(r);}
+   require(batch?read(dir/"events").empty():read(dir/"events")==expected,"ordinary records were not buffered as expected");
+   json r={{"event","edge"},{"index",63}};expected.push_back(r);j.write(r);require(read(dir/"events")==expected,"64-record bound failed");
+   r={{"event","edge"},{"index",64}};expected.push_back(r);j.write(r);
+   r={{"event","done"},{"worker",1}};expected.push_back(r);j.write(r);require(read(dir/"events")==expected,"Done did not expose preceding edges");
+   r={{"event","edge"},{"violation",true}};expected.push_back(r);j.write(r);require(read(dir/"events")==expected,"violation edge not immediately visible");
+   for(auto event:{"worker_spawn","lease","worker_lost","transport","bootstrap_environment","compatibility_mismatch","summary"}){r={{"event",event}};expected.push_back(r);j.write(r);require(read(dir/"events")==expected,"critical event not immediately visible");}
+  }
+  {Journal j(dir/"nodes");std::vector<json> nodes;for(int i=0;i<13;++i){json r={{"event","node"},{"state",i}};nodes.push_back(r);j.write(r);}require(batch?read(dir/"nodes").empty():read(dir/"nodes")==nodes,"ordinary nodes were not buffered as expected");json last={{"event","summary"}};nodes.push_back(last);j.write(last);require(read(dir/"nodes")==nodes,"summary did not flush final nodes");}
+  {Journal j(dir/"violation-tail");std::vector<json> rows;for(int i=0;i<63;++i){json r={{"event","edge"},{"index",i}};rows.push_back(r);j.write(r);}json r={{"event","edge"},{"violation",true}};rows.push_back(r);j.write(r);require(read(dir/"violation-tail")==rows,"violation did not flush 63 pending records");}
+  {Journal j(dir/"destructor");j.write({{"event","edge"}});}require(read(dir/"destructor").size()==1,"ofstream destructor did not close/flush regular file");
+  if(batch){Journal j("/dev/full");for(int i=0;i<63;++i)j.write({{"event","edge"}});bool full=false;try{j.write({{"event","edge"}});}catch(const std::runtime_error&){full=true;}require(full,"64th-record flush failure swallowed");}
+  bool failed=false;try{Journal j(dir/"missing"/"x");}catch(const std::runtime_error&){failed=true;}require(failed,"constructor error swallowed");
+  failed=false;try{Journal j("/dev/full");j.write({{"event","worker_spawn"}});}catch(const std::runtime_error&){failed=true;}require(failed,"critical write error swallowed");
+  failed=false;try{Journal j("/dev/full");j.write({{"event","node"}});j.write({{"event","summary"}});}catch(const std::runtime_error&){failed=true;}require(failed,"final flush error swallowed");
+  failed=false;try{Journal j("/dev/full");j.write({{"event","edge"},{"payload",std::string(16384,'x')}});}catch(const std::runtime_error&){failed=true;}require(failed,"large buffered write error swallowed");
+  std::cout<<"PASS journal visibility, bounded batches, JSON equivalence and IO failures\n";return 0;
+ }catch(const std::exception& e){std::cerr<<"FAIL "<<e.what()<<'\n';return 1;}
+}
