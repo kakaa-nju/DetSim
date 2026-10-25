@@ -1,0 +1,409 @@
+{
+  "date": "2026-10-26",
+  "host": {
+    "system": "Linux",
+    "node": "tilnel",
+    "release": "6.12.105+deb13-amd64",
+    "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+  "coordinator_allowed_cpus": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "base_source_commit": "62ea4b3",
+  "next_source_commit": "fc2a31b",
+  "binary_sha256": {
+    "base": "258d0dd9159c2128c7d0a6e9979f5b0275d50a275fe8c84ae27c786ef9d7cb0a",
+    "next": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4"
+  },
+  "execution_inputs_without_tracer": {
+    "binary_sha256": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+    "plugins_sha256": [
+      "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce"
+    ],
+    "seed_shim_sha256": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+    "seed": 1,
+    "backend": "pages",
+    "depth": 16,
+    "rounds": 100,
+    "storage": "shared"
+  },
+  "nodes": 63418,
+  "edges": 112305,
+  "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+  "summary": [
+    {
+      "workers": 1,
+      "base_seconds": [
+        182.141533018,
+        180.85887194
+      ],
+      "next_seconds": [
+        150.281669761,
+        151.603022578
+      ],
+      "base_median": 181.500202479,
+      "next_median": 150.9423461695,
+      "time_reduction_pct": 16.8362656857287,
+      "throughput_increase_pct": 20.244720640015213,
+      "base_edges_per_s": 618.7596402984396,
+      "next_edges_per_s": 744.0258009100218,
+      "base_worker_speedup": 1.0,
+      "next_worker_speedup": 1.0
+    },
+    {
+      "workers": 6,
+      "base_seconds": [
+        40.886966598,
+        38.719414395
+      ],
+      "next_seconds": [
+        34.530993962,
+        33.01518981
+      ],
+      "base_median": 39.8031904965,
+      "next_median": 33.773091886,
+      "time_reduction_pct": 15.149787078074162,
+      "throughput_increase_pct": 17.854742559118964,
+      "base_edges_per_s": 2821.507487191894,
+      "next_edges_per_s": 3325.2803853162736,
+      "base_worker_speedup": 4.559941055352328,
+      "next_worker_speedup": 4.469307893958927
+    },
+    {
+      "workers": 12,
+      "base_seconds": [
+        33.140892425,
+        33.77085275
+      ],
+      "next_seconds": [
+        27.398740226,
+        27.355144569
+      ],
+      "base_median": 33.4558725875,
+      "next_median": 27.376942397500002,
+      "time_reduction_pct": 18.16999444298232,
+      "throughput_increase_pct": 22.204562152109087,
+      "base_edges_per_s": 3356.8097710283646,
+      "next_edges_per_s": 4102.174682964429,
+      "base_worker_speedup": 5.425062580696618,
+      "next_worker_speedup": 5.513484448989589
+    }
+  ],
+  "runs": [
+    {
+      "variant": "base",
+      "phase": "reference",
+      "repeat": null,
+      "workers": 6,
+      "seconds": 41.753936807,
+      "command_seconds": 42.01895856205374,
+      "finalization_seconds": 0.1141130281612277,
+      "report": "build/parallel-after-serial-20261026/base-reference/run-tcl28bva/results.json",
+      "report_sha256": "06293e5cc07c4de5a6e84bdeed8aa2bd0f3057d520e9562b9cf3377dbc7aa17a",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "258d0dd9159c2128c7d0a6e9979f5b0275d50a275fe8c84ae27c786ef9d7cb0a",
+      "worker_cpus": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5
+      ]
+    },
+    {
+      "variant": "next",
+      "phase": "reference",
+      "repeat": null,
+      "workers": 6,
+      "seconds": 32.780724892,
+      "command_seconds": 33.037988441064954,
+      "finalization_seconds": 0.11432040994986892,
+      "report": "build/parallel-after-serial-20261026/next-reference/run-6nzmkxyc/results.json",
+      "report_sha256": "e50250746d6017ab576b3defda3e50ffccb230e17c028075ff0f0cbb1dcf7be3",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "worker_cpus": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5
+      ]
+    },
+    {
+      "variant": "base",
+      "phase": "timing",
+      "repeat": 1,
+      "workers": 1,
+      "seconds": 182.141533018,
+      "command_seconds": 182.41686699609272,
+      "finalization_seconds": 0.1643291579093784,
+      "report": "build/parallel-after-serial-20261026/r1-w01-base/run-8ibrfamt/results.json",
+      "report_sha256": "ccd7a8be070b6ee877c62c6f026518d5f86b8b82c2190c1658bb78ac840be088",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "258d0dd9159c2128c7d0a6e9979f5b0275d50a275fe8c84ae27c786ef9d7cb0a",
+      "worker_cpus": [
+        0
+      ]
+    },
+    {
+      "variant": "next",
+      "phase": "timing",
+      "repeat": 1,
+      "workers": 1,
+      "seconds": 150.281669761,
+      "command_seconds": 150.54059510398656,
+      "finalization_seconds": 0.2146738979499787,
+      "report": "build/parallel-after-serial-20261026/r1-w01-next/run-dxmci78c/results.json",
+      "report_sha256": "1ed217e2b01c54294a43fd5bb56fe670c2361cc58b816ec6cb8869da018bf29d",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "worker_cpus": [
+        0
+      ]
+    },
+    {
+      "variant": "base",
+      "phase": "timing",
+      "repeat": 1,
+      "workers": 6,
+      "seconds": 40.886966598,
+      "command_seconds": 41.148990453919396,
+      "finalization_seconds": 0.5151842990890145,
+      "report": "build/parallel-after-serial-20261026/r1-w06-base/run-puf3t9zv/results.json",
+      "report_sha256": "cac5021b5707cfb6505f097f8e0ec67d5bd76bde7a94a0f8b980effd492e7dc1",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "258d0dd9159c2128c7d0a6e9979f5b0275d50a275fe8c84ae27c786ef9d7cb0a",
+      "worker_cpus": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5
+      ]
+    },
+    {
+      "variant": "next",
+      "phase": "timing",
+      "repeat": 1,
+      "workers": 6,
+      "seconds": 34.530993962,
+      "command_seconds": 34.805065269814804,
+      "finalization_seconds": 0.4149185288697481,
+      "report": "build/parallel-after-serial-20261026/r1-w06-next/run-189lb_ov/results.json",
+      "report_sha256": "151b7790002cb5e64896ea5d84a5af09f1d9337f997fa656d1f50173e302d183",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "worker_cpus": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5
+      ]
+    },
+    {
+      "variant": "base",
+      "phase": "timing",
+      "repeat": 1,
+      "workers": 12,
+      "seconds": 33.140892425,
+      "command_seconds": 33.425558818969876,
+      "finalization_seconds": 0.4646935500204563,
+      "report": "build/parallel-after-serial-20261026/r1-w12-base/run-vgo86kvl/results.json",
+      "report_sha256": "90b3519dca1f7d63c27cbfd17206eec349278c735bc2c6b948ba563cee3c2c75",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "258d0dd9159c2128c7d0a6e9979f5b0275d50a275fe8c84ae27c786ef9d7cb0a",
+      "worker_cpus": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5,
+        6,
+        9,
+        7,
+        10,
+        8,
+        11
+      ]
+    },
+    {
+      "variant": "next",
+      "phase": "timing",
+      "repeat": 1,
+      "workers": 12,
+      "seconds": 27.398740226,
+      "command_seconds": 27.655174458166584,
+      "finalization_seconds": 0.765450740000233,
+      "report": "build/parallel-after-serial-20261026/r1-w12-next/run-xnlo51h4/results.json",
+      "report_sha256": "9e177ab55cba194f65c12fa4dacf4b252bb56a635733429783c4104956145f72",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "worker_cpus": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5,
+        6,
+        9,
+        7,
+        10,
+        8,
+        11
+      ]
+    },
+    {
+      "variant": "next",
+      "phase": "timing",
+      "repeat": 2,
+      "workers": 12,
+      "seconds": 27.355144569,
+      "command_seconds": 27.62539456412196,
+      "finalization_seconds": 0.7652421318925917,
+      "report": "build/parallel-after-serial-20261026/r2-w12-next/run-x4166snq/results.json",
+      "report_sha256": "4e6c8dc9e638bb37cf8f5e143740c10f3fc06b3370b367a5dc76ae17523c23cc",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "worker_cpus": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5,
+        6,
+        9,
+        7,
+        10,
+        8,
+        11
+      ]
+    },
+    {
+      "variant": "base",
+      "phase": "timing",
+      "repeat": 2,
+      "workers": 12,
+      "seconds": 33.77085275,
+      "command_seconds": 34.041559730889276,
+      "finalization_seconds": 0.3647967171855271,
+      "report": "build/parallel-after-serial-20261026/r2-w12-base/run-cgdr_xwg/results.json",
+      "report_sha256": "93c9a062a75bf75752ec516fad45cd861ef6857a04ea6581179fb6c6a3e9118a",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "258d0dd9159c2128c7d0a6e9979f5b0275d50a275fe8c84ae27c786ef9d7cb0a",
+      "worker_cpus": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5,
+        6,
+        9,
+        7,
+        10,
+        8,
+        11
+      ]
+    },
+    {
+      "variant": "next",
+      "phase": "timing",
+      "repeat": 2,
+      "workers": 6,
+      "seconds": 33.01518981,
+      "command_seconds": 33.2659801710397,
+      "finalization_seconds": 0.31455376790836453,
+      "report": "build/parallel-after-serial-20261026/r2-w06-next/run-z8nsfzgp/results.json",
+      "report_sha256": "c8185a83a4bfdbbc2f813cc01ff222d2f401dd5a107439795fcbb5bd4bff684b",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "worker_cpus": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5
+      ]
+    },
+    {
+      "variant": "base",
+      "phase": "timing",
+      "repeat": 2,
+      "workers": 6,
+      "seconds": 38.719414395,
+      "command_seconds": 38.97901595197618,
+      "finalization_seconds": 0.615034424001351,
+      "report": "build/parallel-after-serial-20261026/r2-w06-base/run-uzoj2ger/results.json",
+      "report_sha256": "0c13a1d3c189d06e2c06df48eb3ffff6cc41dac53074417a943e5d5c4f56330c",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "258d0dd9159c2128c7d0a6e9979f5b0275d50a275fe8c84ae27c786ef9d7cb0a",
+      "worker_cpus": [
+        0,
+        3,
+        1,
+        4,
+        2,
+        5
+      ]
+    },
+    {
+      "variant": "next",
+      "phase": "timing",
+      "repeat": 2,
+      "workers": 1,
+      "seconds": 151.603022578,
+      "command_seconds": 151.87075225496665,
+      "finalization_seconds": 0.21432480914518237,
+      "report": "build/parallel-after-serial-20261026/r2-w01-next/run-9xl_by7h/results.json",
+      "report_sha256": "94de13eff52056abf180511e5ae06a19c411de6f1d348c86df42664eec7a8e6a",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "worker_cpus": [
+        0
+      ]
+    },
+    {
+      "variant": "base",
+      "phase": "timing",
+      "repeat": 2,
+      "workers": 1,
+      "seconds": 180.85887194,
+      "command_seconds": 181.12807379290462,
+      "finalization_seconds": 0.21435003890655935,
+      "report": "build/parallel-after-serial-20261026/r2-w01-base/run-n2y98xo8/results.json",
+      "report_sha256": "9b47d65448bb217d1aa5a414f321510855f5f0b1aa54306d744155edd49bc516",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_copy_sha256": "258d0dd9159c2128c7d0a6e9979f5b0275d50a275fe8c84ae27c786ef9d7cb0a",
+      "worker_cpus": [
+        0
+      ]
+    }
+  ],
+  "scope": "native parallel BFS receipt.seconds; references excluded from timing summary; two reversed-order repetitions; serial reference is node/first-parent witness, complete graph additionally compared",
+  "measured_driver_sha256": "9d85bbc1f97f0b010f4a330cfed31b18c163209181565f85c2d2055c4801f884"
+}

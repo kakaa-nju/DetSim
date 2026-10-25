@@ -1,5 +1,9 @@
 # Developing DetSim
 
+[单实例BFS验收](serial-bfs-performance-2026-10-25.md)及
+[优化对并行的影响](parallel-after-serial-2026-10-26.md)记录最新性能测量；
+请按报告中的硬件、负载与统计口径读取。
+
 [并行性能优化归档](archive/parallel-performance-2026-10-24.md)汇总已测路线、未采用
 原型、暂停时的待核验数据和恢复入口；其中的历史结果不替代当前版本验证。
 

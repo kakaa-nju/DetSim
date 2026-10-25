@@ -520,7 +520,7 @@ def main():
     work = Path(tempfile.mkdtemp(prefix="run-", dir=args.output))
     report = {"passed": False, "artifacts": str(work), "backend": args.backend, "depth": args.depth,
               "workers": args.workers, "strategies": args.strategies, "storage": args.storage, "worker_placement": args.worker_placement, "worker_locality": args.worker_locality, "sample_resources": args.sample_resources, "parallel_first": args.parallel_first, "reference_report": str(args.reference_report) if args.reference_report else None,
-              "scope": __doc__, "timing": "command_seconds is complete command to prompt (including tail journal and driver polling); native seconds separately excludes final node journal; primary large-scale throughput uses command_seconds"}
+              "scope": __doc__, "timing": "primary search throughput uses native receipt.seconds; command_seconds additionally includes tail journal and driver polling; prefix, reference validation and shutdown are separate"}
     started = time.monotonic()
     try:
         run(args, work, report)
