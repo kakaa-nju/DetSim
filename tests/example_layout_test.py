@@ -40,7 +40,8 @@ class ExampleLayoutTest(unittest.TestCase):
         launchers += [EXAMPLES / "redisraft" / name for name in ("quorum.py", "repair.py")]
         launchers += [EXAMPLES / "redis/run.py", EXAMPLES / "two_debits/zero_guard_benchmark.py"]
         launchers += [EXAMPLES / "redisraft" / name for name in
-                      ("benchmark.py", "soft_dirty_benchmark.py", "page_snapshot_benchmark.py")]
+                      ("benchmark.py", "soft_dirty_benchmark.py", "page_snapshot_benchmark.py",
+                       "serial_benchmark.py")]
         probe = """import runpy,sys
 sys.argv=[sys.argv[1],'--help']
 try: runpy.run_path(sys.argv[0],run_name='__main__')

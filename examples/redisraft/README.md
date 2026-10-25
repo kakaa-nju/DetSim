@@ -90,5 +90,11 @@ coverage. Python does not enumerate the frontier. See the
 [single-instance BFS report](../../docs/serial-bfs-performance-2026-10-25.md).
 
 ```sh
-python3 examples/redisraft/serial_benchmark.py --seconds 60
+python3 examples/redisraft/serial_benchmark.py --seconds 300 --cpu 2
 ```
+
+`--cpu` pins the tracer and its descendants while restoring the driver's original
+affinity; omit it to inherit the caller's mask. Use an allowed CPU on your host.
+The recorded acceptance runs use ordinary NP3 O3, pages, seed1 and100prefix rounds;
+two300-second windows reached1011.66 and1026.24 cumulative visits/s. This is
+case/host-specific throughput, not unique-state throughput or exhaustive coverage.

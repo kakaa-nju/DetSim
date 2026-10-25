@@ -1,4 +1,79 @@
-# 单实例 BFS 吞吐优化（2026-10-25，进行中）
+# 单实例 BFS 吞吐优化（2026-10-25 至 26）
+
+## 最终验收：目标已达到
+
+2026-10-26核验完成。`examples/redisraft` 的三节点Raft C库案例，单个tracer运行
+原生 `bfs --quiet`，普通O3编译、pages后端、tracer及其子进程固定到CPU2，
+Python驱动保持原亲和性。**不需要PGO、LTO或多个探索worker。**
+机器为AMD Ryzen5 2600、Linux6.12.105+deb13-amd64；hot/warm cache为32/64MiB，
+seed1，确定性前缀100轮，初始model budget2，原有选择及性质插件保持开启。
+
+| 原生搜索秒数 | 累计访问 | 累计访问/s | 新保存身份（含预算边界） | 新保存身份/s |
+|---|---:|---:|---:|---:|
+| 120.029240 | 121999 | **1016.41** | 68320 | 569.19 |
+| 300.009176 | 303506 | **1011.66** | 169789 | 565.95 |
+| 300.010851 | 307882 | **1026.24** | 172255 | 574.16 |
+
+三次都正常中断并收尾，tracer exit0；两次300秒使用同一二进制，均超过1000。
+计时包含原生搜索和其中的恢复/保存/性质检查；排除启动、确定性前缀、检查tree、
+构建和退出后的清理。此处是累计访问口径，不是唯一状态吞吐或穷尽安全证明。
+所测为Raft库，非完整Redis服务；速度也不是对其他机器或任意程序的保证。
+
+二进制SHA256：`9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4`。
+最终产品源码提交：`9240b1d`。测量时先冻结二进制，后将已验证源码
+分批提交；原始JSON的checkout_commit仅记录启动时HEAD，不能代替二进制身份。
+[验收数据及输入摘要](serial-bfs-performance-2026-10-25-results.json)保存精确数字、
+原始报告哈希、编译配置与各次输入身份；大体积原始材料留在build目录。
+
+复现（此机CPU2在允许集合内）：
+
+```sh
+make -j4 NP=3 CC=/usr/bin/gcc CXX=/usr/bin/g++ tracer \
+  build/release/np3/examples/redisraft/choose.so \
+  build/release/np3/examples/redisraft/check.so \
+  build/release/np3/examples/redisraft/seed.so
+python3 examples/redisraft/serial_benchmark.py --cpu 2 --seconds 300
+```
+
+重复比较时用 `--binary PATH_TO_RAFT_CASE` 固定第一轮生成的目标。`--cpu` 仅限制
+新启动的tracer及后代，恢复driver原亲和性；不改宿主调度/ASLR策略。
+驱动会记录真实tracer退出码，仅在采集及收尾均成功时写passed=true。
+
+## 最终实现与验证
+
+采用的改动：队列携带已知组件引用，省去重复解码；BFS引用已取出的不可变源状态；
+统一快速映射解析；从一次系统元数据编码计算身份并持久化；StateView复用已验证
+快照；按物理carrier池保留status及task目录句柄。每次仍重新读取信号和枚举线程，
+前后两次集合检查、GETREGS、rseq、robust检查均保留。另修复扫描器函数声明的
+返回类型。没有修改搜索计数、动作枚举、model budget、检查插件或快照格式。
+
+已验证：
+
+- `make check CC=/usr/bin/gcc CXX=/usr/bin/g++`，含14项构建契约、5项目录/启动器检查；
+  最终普通O3 NP3生产构建，哈希与两次长测完全一致。
+- NP1：check-thread-control、check-pending-status-reader、check-thread-carrier、
+  check-thread-identity、check-thread-signal-mask、check-thread-robust、
+  check-thread-lifecycle、check-adoption、check-mappings、check-state-io。
+- NP2：check-identity、check-state-view、check-capture、check-plugins。
+- `tests/tracer_scenarios.py`：40个native场景；`tests/native_search_actors.py`：
+  28行full/pages BFS/DFS及重放；`tests/parallel_actor_scenarios.py`通过。
+- `examples/redisraft/run.py --backend all --variant all`：健康full/pages均pass，
+  缺陷full/pages均violation，四组均三次同进程哈希一致重放、tracer exit0。
+- 无rewind的reader变体确实失败；正常reader连续20次通过。独立复跑发现并修复了
+  测试的退出通知竞态：先等待内核task集合移除worker，再断言旧描述符不可读。
+- retained屏障第一/第二次枚举出错及worker运行时均拒绝、零resume；warm StateView
+  在store poison和shutdown/reopen后均拒绝；身份及payload与独立旧编码完全一致。
+
+精确日志：`build/serial-bfs-700/final-{np1,np2,scenarios,actors,parallel-actors,check}.log`、
+`final-raft-cases.log`、`task-directory-{red,repeat}.log`及各case结果JSON。源码经独立
+只读架构复核，指出的retained屏障及store-poison测试缺口已补上并通过。
+
+资源取舍：每pool新增每carrier一个status fd及一个task目录句柄；每StateView最多
+持有每节点一个完整快照根，大型full镜像的峰值内存未做专门量化。reader沿用串行
+控制线程契约；未认证同一reader/View对象的并发读取。原有model/atom支持边界
+仍见correctness-backlog与model-checking-contract，不能由性能结果宣称全部闭合。
+
+以下为历史实验过程，其中“尚未达标”等表述属于当时阶段。
 
 目标（用户更新）：提升单一实例在 `examples/redisraft` 上的 BFS 探索能力，
 原生 CLI **累计访问速度达到1000 states/s以上**。此前700的目标已被替换。
@@ -17,7 +92,7 @@ Redis 模块。使用原生 `bfs --quiet`，Python只构造前缀、启动、定
 
 最终应有多轮足够长的无采样测量、明确机器/构建/输入身份、不同缓存压力及正确性
 回归。固定时长中断只能证明该窗口吞吐，不能证明搜索完成、性质成立或固定工作量
-等价。当前仅建立基线，尚不声明本轮完成或达成性能改进。
+等价。当时仅建立基线；最终结果见文首验收。
 
 ## 基线
 
@@ -134,3 +209,71 @@ NP=3每个队列项从8字节增长至40字节；在长测约3.5万项的frontie
 CXX=/usr/bin/g++` 也通过，包括14项构建契约和5项案例目录检查。
 仍需更长/重复性能测量。新目标1000 visits/s尚未达到；下一步以profile为依据
 削减不必要的状态复制和表达式类型处理。
+
+## 后续候选（尚待最终组合验证）
+
+- BFS源状态：队列弹出的optional在整次展开中拥有源状态；逐边改用const引用，
+  消除同一源状态的重复深拷贝。初测60秒825.36 visits/s，较预取版增幅很小，
+  单轮不足以量化该微优化的收益。
+- 映射解析：复用 `build/shared-parallel/maps-parser/candidate.patch` 的生产部分，
+  将3处scanf解析统一为from_chars/string_view；仍读取相同的/proc或已保存文本。
+  该候选原先因没有改善并行扩展性而未合入，但当时单worker已约快5.2%。
+  当前重新加入溢出回归，旧代码明确RED，新代码NP1映射full/pages/verify、tiny及
+  state-I/O GREEN。当前两次无采样60秒为896.77、864.75 visits/s，仍须长测确认。
+- DWARF：复用归档的exact-hit/const-reference候选及其测试。旧/新版本DWARF与
+  StateView组件均通过；交错两轮分别为maps896.77/dwarf887.53、
+  dwarf892.52/maps864.75。未见稳定优势，已撤回生产DWARF/AST改动，最终也移除该候选独有的新增
+  类型/只读观察测试，原始补丁和测试日志仍留档。不能将候选的编译通过当作性能改善。
+- StateView：只读保存视图首次read后持有该节点的已验证SnapshotView，避免每个
+  字段重复访问全局LRU和store锁。metadata-only查询不提前加载完整根；stopped_live
+  不缓存内存读取。每次saved read及read_into继续检查store generation。
+  新测试在旧实现因重复open计数失败；新实现验证full/pages、分支/节点/copy、
+  缺失根、关闭/重开及真实live原始读取均通过。每个视图最多持有NP个完整快照根，
+  full模式的大镜像可能增加这段观察生命周期内的峰值内存，尚未测量其大规模峰值。
+
+组件红/绿与独立复核日志：`maps-red.log`、`maps-green.log`、
+`dwarf-baseline-tests.log`、`dwarf-candidate-tests.log`、`view-notes.md`、
+`view-verify-build.log`。PGO只列入后续实验计划，尚未产生性能结果。
+
+## 编译与调度放置候选
+
+后续单轮60秒（均相同目标/插件、同前缀和budget，含StateView复用）：
+
+| tracer构建 / 放置 | 原生累计访问/s |
+|---|---:|
+| 普通O3 / 默认亲和性 | 903.60 |
+| PGO use / 默认亲和性 | 914.05 |
+| PGO use / taskset -c2 | 965.53 |
+| LTO / taskset -c2 | 927.62 |
+
+均未达到1000。PGO先用原生BFS训练60秒，原子更新profile计数，再完整重编译use；
+训练速度不计入优化结论。编译没有missing-profile/coverage-mismatch警告。PGO目录
+显式指定为 `build/serial-bfs-700/pgo/{objects,profiles}`，编译保持普通O3/SSE4.2/
+AVX2/BMI/BMI2，不使用fast-math或关闭检查。LTO使用单独build目录和-flto=4，
+没有观察到稳定额外收益。taskset仅限制这次driver/tracer/tracees，不改变宿主策略。
+
+LTO揭示了原有扫描器声明错误：expr_ast.cpp把yy_scan_string和yylex_destroy返回值
+声明为void，而生成代码分别返回yy_buffer_state*及int。现已改成正确声明。
+`-Werror=odr -Werror=lto-type-mismatch` 的旧实现链接RED（exit2），修复后GREEN；
+记录在 `lto-odr-red.log` / `lto-odr-green.log`。未改生成的lexer/parser文件。
+
+下一项为归档的PendingStatusReader：只复用绑定物理carrier的CLOEXEC fd，每次重新
+rewind/read到EOF；不缓存pending结果。并尝试用string_view/from_chars替代逐行
+字符串流解析。完整物理线程枚举、GETREGS、rseq、robust及信号校验必须保留。
+实现及reader红/绿回归委托给DSH独立会话；父任务在其完成前不运行CPU实验。
+尚未采信新实现或宣称其收益。之后需独立审查、线程生命周期/capture/实际BFS门禁，
+再跑普通O3和进程级绑核的长窗口对照。**目标仍为1000累计访问/s，尚未达成。**
+
+
+## 最后两项热路径调整与阶段补充
+
+PendingStatusReader复用status FD后，from_chars解析替代字符串流；普通O3初测
+966.28 visits/s。仅把tracer/后代绑CPU2、driver保持原亲和性，120秒985.18/s；
+O2+mtune=native为981.36/s，未采用。元数据合并编码已通过旧格式oracle，但单轮
+984.16/s没有显示可独立归因的吞吐改善，不将它包装成显著收益。
+
+之后复用pool的 `/proc/<pid>/task` DIR：每次rewind并读到EOF，仍执行前后两次
+完整枚举。[POSIX rewinddir语义](https://man7.org/linux/man-pages/man3/rewinddir.3p.html)
+要求流反映当前目录状态。直接成员列表刷新、线程退出/增长、move/关闭、错误路径
+及无rewind负例通过。其最终性能即文首三次数据。独立静态复核确认没有缓存线程
+集合或pending结果。最终未采用PGO、LTO、O2/native调优及DWARF快路径。

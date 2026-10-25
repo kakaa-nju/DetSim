@@ -5,6 +5,7 @@ A time-limited run is interrupted, never described as an exhaustive proof.
 The CLI's visits/s and newly discovered identities/s are reported separately.
 """
 import argparse
+from contextlib import ExitStack
 import json
 import os
 from pathlib import Path
@@ -82,6 +83,8 @@ def main():
     parser.add_argument('--seconds', type=float, default=30)
     parser.add_argument('--rounds', type=int, default=100)
     parser.add_argument('--seed', type=int, default=1)
+    parser.add_argument('--cpu', type=int,
+                        help='pin tracer and its children to this allowed CPU; leave driver unpinned')
     parser.add_argument('--perf', type=Path, help='optional perf executable for CPU sampling')
     parser.add_argument('--perf-sudo', action='store_true', help='run only perf through sudo -n')
     parser.add_argument('--sample-interval', type=float, default=0,
@@ -89,9 +92,13 @@ def main():
     args = parser.parse_args()
     if args.seconds <= 0 or args.rounds < 0 or args.sample_interval < 0:
         parser.error('seconds must be positive and rounds nonnegative')
+    driver_affinity = os.sched_getaffinity(0)
+    if args.cpu is not None and args.cpu not in driver_affinity:
+        parser.error('cpu must belong to the current allowed CPU set')
     args.output.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix='run-', dir=args.output)).resolve()
     print(work, flush=True)
+    (work / 'driver-source.py').write_bytes(Path(__file__).read_bytes())
     if args.binary is None:
         owned, _ = raft_case.build_variant(work / 'target', 'healthy', ['/usr/bin/gcc'])
         args.binary = owned / 'raft-case'
@@ -103,6 +110,7 @@ def main():
                   inputs_sha256={str(p): common.digest(p) for p in
                                  [binary, tracer, *plugins, shim, Path(__file__)]})
     report['cpu_affinity'] = sorted(os.sched_getaffinity(0))
+    report['tracer_cpu_affinity'] = [args.cpu] if args.cpu is not None else sorted(driver_affinity)
     report['cpu_model'] = next((line.split(':', 1)[1].strip()
         for line in Path('/proc/cpuinfo').read_text().splitlines()
         if line.startswith('model name')), 'unknown')
@@ -118,6 +126,8 @@ def main():
         os.environ['LD_PRELOAD'] = str(shim) + (':' + old_preload if old_preload else '')
         os.environ['DETSIM_BENCH_SEED'] = str(args.seed)
         common.MODEL_ADDRESS_SPACE_LIMIT = 3 * 1024**3
+        if args.cpu is not None:
+            os.sched_setaffinity(0, {args.cpu})
         session = common.Session(tracer, [str(binary), '0'], plugins, work / 'session',
             args.backend, args.seconds + 180, choices=True,
             tracees=[[str(binary), str(node)] for node in range(3)],
@@ -125,6 +135,8 @@ def main():
             runtime_profile={'fixed_layout': True, 'startup_syscall': startup_boundary(binary)},
             target_cwd=work)
     finally:
+        if args.cpu is not None:
+            os.sched_setaffinity(0, driver_affinity)
         common.MODEL_ADDRESS_SPACE_LIMIT = old_limit
         for name, value in [('LD_PRELOAD', old_preload), ('DETSIM_BENCH_SEED', old_seed)]:
             if value is None:
@@ -135,6 +147,11 @@ def main():
     profiler = None
     perf_log = None
     samples = None
+    completed = False
+    def stop_profiler():
+        if profiler and profiler.poll() is None:
+            profiler.send_signal(signal.SIGINT)
+            profiler.wait(timeout=15)
     try:
         setup.checked(session)
         last = [''] * 3
@@ -206,21 +223,28 @@ def main():
             'model-budget-cut successors; generated_new_nodes counts all saved new identities '
             'relative to the deterministic prefix, including budget cuts')
         report['evidence_scope'] = 'native BFS; tree is first-parent witnesses, not every edge'
-        (work / 'result.json').write_text(json.dumps(report, indent=2))
-        print(json.dumps(metrics, indent=2), flush=True)
-        print('all saved new identities/s:', report['generated_new_nodes_per_s'], flush=True)
+        completed = True
     finally:
-        if samples:
-            samples.close()
-        if profiler and profiler.poll() is None:
-            profiler.send_signal(signal.SIGINT)
-            profiler.wait(timeout=15)
-        if perf_log:
-            perf_log.close()
-        if timer:
-            timer.cancel()
-            timer.join()
-        session.close()
+        try:
+            # Every cleanup runs even if a sampler or profiler fails. Cancel the
+            # timer before joining it; close the owned tracer after observers.
+            with ExitStack() as cleanup:
+                cleanup.callback(session.close, timeout=30)
+                if perf_log:
+                    cleanup.callback(perf_log.close)
+                cleanup.callback(stop_profiler)
+                if samples:
+                    cleanup.callback(samples.close)
+                if timer:
+                    cleanup.callback(timer.join)
+                    cleanup.callback(timer.cancel)
+        finally:
+            report['tracer_exit'] = session.proc.returncode
+            report['passed'] = completed and report['tracer_exit'] == 0 and sys.exc_info()[0] is None
+            (work / 'result.json').write_text(json.dumps(report, indent=2))
+    common.require(report['passed'], 'benchmark tracer did not finish successfully')
+    print(json.dumps(metrics, indent=2), flush=True)
+    print('all saved new identities/s:', report['generated_new_nodes_per_s'], flush=True)
 
 
 if __name__ == '__main__':

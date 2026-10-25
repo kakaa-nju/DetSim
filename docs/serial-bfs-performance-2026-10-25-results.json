@@ -1,0 +1,109 @@
+{
+  "goal": "single-instance native BFS cumulative visits above1000/s",
+  "accepted_date": "2026-10-26",
+  "host": {
+    "system": "Linux",
+    "node": "tilnel",
+    "release": "6.12.105+deb13-amd64",
+    "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+  "tracer_cpu_affinity": [
+    2
+  ],
+  "driver_cpu_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11
+  ],
+  "backend": "pages",
+  "nodes": 3,
+  "rounds": 100,
+  "seed": 1,
+  "model_budget": 2,
+  "tracer_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+  "scope": "RedisLabs Raft C library fixture; native serial BFS, no parallel workers; interrupted windows are not exhaustive safety proofs",
+  "runs": [
+    {
+      "run": "build/serial-bfs-700/run-0_e71vey",
+      "native_elapsed_s": 120.02924,
+      "state_visits": 121999,
+      "state_visits_per_s": 1016.410669,
+      "admitted_new_states": 37333,
+      "all_saved_new_states": 68320,
+      "all_saved_new_states_per_s": 569.194639572824,
+      "tracer_exit": 0,
+      "completion": "interrupted",
+      "report_sha256": "6dcd43ca1d92fb4cf85fc1e94155011e17a9f1b44b3773deb21640737db89628",
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/tracer-taskdir": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ffb5fca9d55420001023a6c97e9bc54fc3f67b698cc063521d288947cc337461"
+      }
+    },
+    {
+      "run": "build/serial-bfs-700/run-4t5a6nlu",
+      "native_elapsed_s": 300.009176,
+      "state_visits": 303506,
+      "state_visits_per_s": 1011.655723,
+      "admitted_new_states": 89818,
+      "all_saved_new_states": 169789,
+      "all_saved_new_states_per_s": 565.9460229309785,
+      "tracer_exit": 0,
+      "completion": "interrupted",
+      "report_sha256": "05083e1bc1be891e897a14b95f5ca6a2b6752423620e4d86b837d3c386702734",
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/tracer-taskdir": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ffb5fca9d55420001023a6c97e9bc54fc3f67b698cc063521d288947cc337461"
+      }
+    },
+    {
+      "run": "build/serial-bfs-700/run-6blw621h",
+      "native_elapsed_s": 300.010851,
+      "state_visits": 307882,
+      "state_visits_per_s": 1026.236214,
+      "admitted_new_states": 91193,
+      "all_saved_new_states": 172255,
+      "all_saved_new_states_per_s": 574.1625658733257,
+      "tracer_exit": 0,
+      "completion": "interrupted",
+      "report_sha256": "1b6738282063057392b4ad86c4639fb1239cdf1c3e84f6d470fb3df9f9e72df9",
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/tracer": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ffb5fca9d55420001023a6c97e9bc54fc3f67b698cc063521d288947cc337461"
+      }
+    }
+  ],
+  "source_commit": "9240b1d1bb114b212a9f27deec4aa5ecc35e7795",
+  "compiler": "g++ (Debian 14.2.0-19) 14.2.0",
+  "build_configuration": [
+    "CC=/usr/bin/gcc",
+    "CXX=/usr/bin/g++",
+    "CPPFLAGS=",
+    "PROJECT_CPPFLAGS=-I. -Isrc -Isrc/core -Isrc/core/engine -Isrc/core/syscall -Isrc/core/scheduler -Isrc/core/state -Isrc/subsys -Isrc/subsys/fs -Isrc/subsys/net -Isrc/subsys/sync -Isrc/utils -Isrc/ui -Isrc/ui/cli -Ithird_party -Ithird_party/cereal/include -DNP=3",
+    "CFLAGS=-O3 -g",
+    "CXXFLAGS=-std=gnu++20 -fno-stack-protector -O3 -msse4.2 -mavx2 -mbmi -mbmi2 "
+  ]
+}
