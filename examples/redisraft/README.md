@@ -79,3 +79,16 @@ recorded DFS-window CPU samples, not wall-clock shares.
 `soft_dirty_benchmark.py` and the page comparison's optional `--soft-dirty` flag
 retain the historical explicit unsafe delta experiment. They do not establish
 sound incremental capture and are not enabled by the normal case runner.
+
+## Single-instance BFS measurement
+
+`serial_benchmark.py` prepares the same three-node healthy fixture and runs native
+`bfs --quiet` for a configurable interval (default30seconds), then interrupts it.
+It reports CLI state visits, CLI admitted new states, and all newly saved identities
+including model-budget boundaries separately. An interrupted window is not exhaustive
+coverage. Python does not enumerate the frontier. See the
+[single-instance BFS report](../../docs/serial-bfs-performance-2026-10-25.md).
+
+```sh
+python3 examples/redisraft/serial_benchmark.py --seconds 60
+```
