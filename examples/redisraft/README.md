@@ -98,3 +98,11 @@ affinity; omit it to inherit the caller's mask. Use an allowed CPU on your host.
 The recorded acceptance runs use ordinary NP3 O3, pages, seed1 and100prefix rounds;
 two300-second windows reached1011.66 and1026.24 cumulative visits/s. This is
 case/host-specific throughput, not unique-state throughput or exhaustive coverage.
+
+
+An opt-in saved-observation memo is being evaluated toward1500visits/s:
+`DETSIM_OBSERVATION_CACHE=on` enables it, `verify` recomputes every hit, and the
+default is `off`. Modes are captured when a saved view is constructed; live reads
+remain uncached. `DETSIM_OBSERVATION_CACHE_STATS=1` emits process-lifetime counters,
+including setup. See the [ongoing1500/s report](../../docs/serial-bfs-1500-2026-10-26.md)
+for bounds, validation and current results; the1500/s target is not yet met.

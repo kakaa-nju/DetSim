@@ -10,9 +10,63 @@
 #include <algorithm>
 #include <cstring>
 #include <iterator>
+#include <list>
+#include <unordered_map>
+#include <cstdlib>
+#include <cstdio>
+#include <utility>
 #include <sys/stat.h>
 namespace detsim {
-StateView::StateView(const sys_state& state) {
+namespace {
+struct MemoValue { int64_t value; bool symbols; };
+struct MemoRoot {
+  size_t node;
+  hash_type key;
+  std::string executable;
+  std::shared_ptr<const SnapshotView> owner;
+  std::unordered_map<std::string,MemoValue,ExpressionStringHash,std::equal_to<>> values;
+};
+struct ObservationMemo {
+  static constexpr size_t max_roots=16, max_values=256, max_expression=1024;
+  static constexpr size_t max_root_bytes=64*1024, max_executable=4096;
+  uint64_t store=0, symbols=0;
+  std::list<MemoRoot> roots;
+  ObservationMemoStats stats;
+  void sync(uint64_t store_epoch, uint64_t symbol_epoch) {
+    if (store!=store_epoch || symbols!=symbol_epoch) {
+      roots.clear(); store=store_epoch; symbols=symbol_epoch;
+    }
+  }
+  auto find(size_t node, hash_type key, const std::string& executable) {
+    return std::find_if(roots.begin(),roots.end(),[&](const auto& root) {
+      return root.node==node && root.key==key && root.executable==executable;
+    });
+  }
+  ~ObservationMemo() {
+    const char* report=std::getenv("DETSIM_OBSERVATION_CACHE_STATS");
+    if (report && !std::strcmp(report,"1"))
+      std::fprintf(stderr,"OBSERVATION_CACHE_PROCESS {\"lookups\":%llu,\"hits\":%llu,\"misses\":%llu,\"admitted\":%llu,\"nonlocal\":%llu,\"roots\":%zu}\n",
+        (unsigned long long)stats.lookups,(unsigned long long)stats.hits,
+        (unsigned long long)stats.misses,(unsigned long long)stats.admitted,
+        (unsigned long long)stats.nonlocal,roots.size());
+  }
+};
+thread_local ObservationMemo memo;
+}
+ObservationMemoStats observation_memo_stats() {
+  auto result=memo.stats; result.roots=memo.roots.size(); return result;
+}
+void clear_observation_memo() {
+  memo.roots.clear(); memo.stats={}; memo.store=memo.symbols=0;
+}
+StateView::MemoMode StateView::read_memo_mode() {
+  const char* mode=std::getenv("DETSIM_OBSERVATION_CACHE");
+  if (!mode || !std::strcmp(mode,"off")) return MemoMode::off;
+  if (!std::strcmp(mode,"on")) return MemoMode::on;
+  if (!std::strcmp(mode,"verify")) return MemoMode::verify;
+  throw std::runtime_error("DETSIM_OBSERVATION_CACHE must be off, on or verify");
+}
+StateView::StateView(const sys_state& state) : memo_mode_(read_memo_mode()) {
   store_generation_=StateStore::instance().snapshot_generation();
   for (size_t i=0; i<NP; ++i) {
     executables_[i]=ptmc_state.tracee[i].executable ? ptmc_state.tracee[i].executable : "";
@@ -35,6 +89,10 @@ StateView StateView::stopped_live() {
 }
 void StateView::read(size_t node, uint64_t address, void* destination, size_t length) const {
   if (node>=NP) throw std::out_of_range("Observation process index");
+  if (evaluation_reads_ && length) {
+    evaluation_reads_->memory=true;
+    evaluation_reads_->local &= node==evaluation_reads_->node;
+  }
   if (live_) {
     if (!guest_read_exact(live_pids_[node], reinterpret_cast<const void*>(address), destination, length))
       throw std::runtime_error("Cannot read stopped guest memory");
@@ -51,6 +109,10 @@ void StateView::read(size_t node, uint64_t address, void* destination, size_t le
 }
 void StateView::require_symbols(size_t node) const {
   if (node>=NP) throw std::out_of_range("Observation process index");
+  if (evaluation_reads_) {
+    evaluation_reads_->symbols=true;
+    evaluation_reads_->local &= node==evaluation_reads_->node;
+  }
   const auto& configured = executables_[node];
   const auto& loaded = dwarf_executable_path();
   std::error_code error;
@@ -65,8 +127,63 @@ void StateView::require_symbol_address(size_t node, uint64_t address) const {
   if (!dwarf_main_image_contains(address))
     throw std::runtime_error("Observation cannot use symbols outside the configured fixed executable");
 }
-int64_t StateView::evaluate(size_t node, const std::string& expression) const {
-  return evaluate_observation(*this, node, expression);
+int64_t StateView::evaluate(size_t node, std::string_view expression) const {
+  if (node>=NP) throw std::out_of_range("Observation process index");
+  const auto mode=memo_mode_;
+  // Nested evaluations keep recording into the outer dependency set. Constants
+  // and stale/live views retain the original evaluator's validation behavior.
+  if (mode==MemoMode::off || live_ || evaluation_reads_ || !snapshots_[node] ||
+      expression.size()>ObservationMemo::max_expression ||
+      executables_[node].size()>ObservationMemo::max_executable ||
+      store_generation_!=StateStore::instance().generation())
+    return evaluate_observation(*this,node,expression);
+  const auto symbols=dwarf_symbol_generation();
+  memo.sync(store_generation_,symbols);
+  ++memo.stats.lookups;
+  auto root=memo.find(node,snapshots_[node],executables_[node]);
+  std::optional<MemoValue> cached;
+  if (root!=memo.roots.end()) {
+    const auto found=root->values.find(expression);
+    if (found!=root->values.end()) {
+      cached=found->second;
+      // A hit is a retained validated observation, not a fallback to live data.
+      if (cached->symbols) require_symbols(node);
+      check_snapshot_lifetime();
+      snapshot_views_[node]=root->owner;
+      memo.roots.splice(memo.roots.begin(),memo.roots,root);
+      ++memo.stats.hits;
+      if (mode==MemoMode::on) return cached->value;
+    }
+  }
+  if (!cached) ++memo.stats.misses;
+  EvaluationReads reads{node};
+  struct TraceScope {
+    EvaluationReads*& slot;
+    EvaluationReads* previous;
+    TraceScope(EvaluationReads*& slot, EvaluationReads& current)
+        : slot(slot),previous(std::exchange(slot,&current)) {}
+    ~TraceScope() {slot=previous;}
+  } trace(evaluation_reads_,reads);
+  const int64_t value=evaluate_observation(*this,node,expression);
+  if (cached && (cached->value!=value || !reads.local || !reads.memory))
+    throw std::runtime_error("Saved observation memo disagrees with original evaluation");
+  if (!reads.local) {++memo.stats.nonlocal;return value;}
+  const auto owner=snapshot_views_[node];
+  if (!reads.memory || !owner || store_generation_!=StateStore::instance().generation() ||
+      symbols!=dwarf_symbol_generation() || owner->encoded_size()>ObservationMemo::max_root_bytes)
+    return value;
+  // Re-find after evaluation: nested symbol/type work may invalidate admission,
+  // and no cache iterator is kept across a callback into the evaluator.
+  root=memo.find(node,snapshots_[node],executables_[node]);
+  if (root==memo.roots.end()) {
+    if (memo.roots.size()>=ObservationMemo::max_roots) memo.roots.pop_back();
+    memo.roots.push_front({node,snapshots_[node],executables_[node],owner,{}});
+    root=memo.roots.begin();
+  } else memo.roots.splice(memo.roots.begin(),memo.roots,root);
+  if (root->values.size()<ObservationMemo::max_values &&
+      root->values.emplace(std::string(expression),MemoValue{value,reads.symbols}).second)
+    ++memo.stats.admitted;
+  return value;
 }
 void StateView::check_snapshot_lifetime() const {
   if (!live_ && StateStore::instance().generation()!=store_generation_)

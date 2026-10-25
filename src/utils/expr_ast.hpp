@@ -6,12 +6,20 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <variant>
 
 struct type_info;
 
 namespace detsim {
+// Lookup borrowed expressions without allocating; cache entries still own strings.
+struct ExpressionStringHash {
+  using is_transparent = void;
+  size_t operator()(std::string_view value) const noexcept {
+    return std::hash<std::string_view>{}(value);
+  }
+};
 // Explicit logical process context for immutable observations.
 struct ExpressionObservation {
   virtual ~ExpressionObservation() = default;
@@ -20,7 +28,7 @@ struct ExpressionObservation {
   virtual void require_symbol_address(size_t node, uint64_t address) const = 0;
   virtual void read(size_t node, uint64_t address, void* output, size_t length) const = 0;
 };
-int64_t evaluate_observation(const ExpressionObservation&, size_t node, const std::string&);
+int64_t evaluate_observation(const ExpressionObservation&, size_t node, std::string_view);
 }
 
 /* Evaluation result: can be a value or an address */
@@ -217,6 +225,7 @@ class MemberAccessNode : public ExprNode
   mutable std::string cached_base_type_;
   mutable std::string cached_member_type_;
   mutable bool offset_computed_;
+  mutable uint64_t cached_symbol_generation_ = 0;
 
   public:
   bool is_read_only() const override { return object_->is_read_only(); }
@@ -395,13 +404,14 @@ class ExprCache
 {
   public:
   static ExprCache &instance();
-  std::shared_ptr<ExprNode> get(const std::string &expr);
+  std::shared_ptr<ExprNode> get(std::string_view expr);
   void clear();
   size_t size() const;
 
   private:
   ExprCache() = default;
-  std::unordered_map<std::string, std::shared_ptr<ExprNode>> cache_;
+  std::unordered_map<std::string, std::shared_ptr<ExprNode>,
+                     detsim::ExpressionStringHash, std::equal_to<>> cache_;
   mutable std::mutex mutex_;
   static constexpr size_t MAX_CACHE_SIZE = 1024;
 };

@@ -122,7 +122,7 @@ def main():
         ['git', 'rev-parse', 'HEAD'], cwd=common.ROOT, text=True).strip()
     report['execution_options'] = {name: os.environ.get(name) for name in (
         'DETSIM_RESIDENT_MEMORY', 'DETSIM_CAPTURE_MODE', 'DETSIM_CAPTURE_VERIFY',
-        'DETSIM_SOFT_DIRTY')}
+        'DETSIM_SOFT_DIRTY', 'DETSIM_OBSERVATION_CACHE', 'DETSIM_OBSERVATION_CACHE_STATS')}
     (work / 'inputs.json').write_text(json.dumps(report, indent=2))
     old_preload, old_seed = os.environ.get('LD_PRELOAD'), os.environ.get('DETSIM_BENCH_SEED')
     old_limit = common.MODEL_ADDRESS_SPACE_LIMIT
@@ -259,6 +259,13 @@ def main():
         finally:
             report['tracer_exit'] = session.proc.returncode
             report['passed'] = completed and report['tracer_exit'] == 0 and sys.exc_info()[0] is None
+            with session.log.open('rb') as transcript:
+                transcript.seek(max(0, session.log.stat().st_size - 65536))
+                tail = transcript.read().decode(errors='replace')
+            summaries = [json.loads(line.removeprefix('OBSERVATION_CACHE_PROCESS '))
+                         for line in tail.splitlines() if line.startswith('OBSERVATION_CACHE_PROCESS ')]
+            if summaries:
+                report['observation_cache_process'] = summaries
             (work / 'result.json').write_text(json.dumps(report, indent=2))
     common.require(report['passed'], 'benchmark tracer did not finish successfully')
     print(json.dumps(metrics, indent=2), flush=True)

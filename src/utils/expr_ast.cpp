@@ -38,15 +38,15 @@ struct ObservationScope {
 };
 }
 int64_t detsim::evaluate_observation(const ExpressionObservation& view, size_t node,
-                                   const std::string& expression) {
+                                   std::string_view expression) {
   if (node >= view.process_count()) throw std::out_of_range("Observation process index");
   auto ast = ExprCache::instance().get(expression);
-  if (!ast) throw std::runtime_error("Invalid observation expression: " + expression);
+  if (!ast) throw std::runtime_error("Invalid observation expression: " + std::string(expression));
   if (!ast->is_read_only()) throw std::runtime_error("Observation expression must be read-only");
   ObservationScope scope(view);
   bool ok = true;
   const auto result = ast->eval(int(node + 1), ok);
-  if (!ok) throw std::runtime_error("Cannot evaluate observation expression: " + expression);
+  if (!ok) throw std::runtime_error("Cannot evaluate observation expression: " + std::string(expression));
   return result.as_value();
 }
 
@@ -653,7 +653,8 @@ EvalResult MemberAccessNode::eval_address(int pid, bool &success) const
   ptrdiff_t offset = -1;
   std::string member_type;
 
-  if (offset_computed_ && cached_base_type_ == base_type)
+  if (offset_computed_ && cached_base_type_ == base_type &&
+      cached_symbol_generation_ == dwarf_symbol_generation())
   {
     offset = cached_offset_;
     member_type = cached_member_type_;
@@ -677,6 +678,7 @@ EvalResult MemberAccessNode::eval_address(int pid, bool &success) const
       cached_offset_ = offset;
       cached_member_type_ = member_type;
       cached_base_type_ = base_type;
+      cached_symbol_generation_ = dwarf_symbol_generation();
       offset_computed_ = true;
     }
   }
@@ -1136,7 +1138,7 @@ ExprCache &ExprCache::instance()
   return instance;
 }
 
-std::shared_ptr<ExprNode> ExprCache::get(const std::string &expr)
+std::shared_ptr<ExprNode> ExprCache::get(std::string_view expr)
 {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -1146,7 +1148,9 @@ std::shared_ptr<ExprNode> ExprCache::get(const std::string &expr)
     return it->second;
   }
 
-  ExprNode *ast = parse_expression(expr);
+  // The scanner requires a terminated string; a borrowed view may be a slice.
+  std::string owned(expr);
+  ExprNode *ast = parse_expression(owned);
   if (!ast)
   {
     return nullptr;
@@ -1159,7 +1163,7 @@ std::shared_ptr<ExprNode> ExprCache::get(const std::string &expr)
     std::advance(mid, cache_.size() / 2);
     cache_.erase(cache_.begin(), mid);
   }
-  cache_[expr] = result;
+  cache_.emplace(std::move(owned), result);
   return result;
 }
 

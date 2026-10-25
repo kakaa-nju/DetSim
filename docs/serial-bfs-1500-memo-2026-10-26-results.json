@@ -1,0 +1,423 @@
+[
+  {
+    "label": "memo-verify",
+    "report": "/home/kaguya/code/detsim/build/serial-bfs-1500/memo-verify/run-srf10q9z/result.json",
+    "report_sha256": "2f8d496f69b8b9ec30081c9979fc9ba7d6071aeab6374c43619fd26dfc101da7",
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 14067,
+      "new": 4876,
+      "unique": 4876,
+      "elapsed_s": 15.011789,
+      "states_per_s": 937.06354,
+      "state_store": {
+        "loads": 77165,
+        "l1": 77165,
+        "l2": 0,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 65248,
+        "new": 1537,
+        "dedup_pct": 97.6
+      },
+      "new_states_per_s": 324.81138657091435
+    },
+    "search_work": {
+      "transitions": 14066,
+      "restore_us": 2575742,
+      "capture_check_commit_us": 11027849
+    },
+    "memo_process": [
+      {
+        "lookups": 2778735,
+        "hits": 2344978,
+        "misses": 433757,
+        "admitted": 433751,
+        "nonlocal": 0,
+        "roots": 16
+      }
+    ],
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-memo": "e9e4c2efd4e92e3c256070950c308e5ae0fe95afc089be257a217d37a3288f44",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "0d8ff8cb116d048bda258d0a0b3c848917b2471a111eb5a443f1ed6e9271cb2e"
+    },
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "verify",
+      "DETSIM_OBSERVATION_CACHE_STATS": "1"
+    }
+  },
+  {
+    "label": "memo-off",
+    "report": "/home/kaguya/code/detsim/build/serial-bfs-1500/memo-off/run-ur2i_5h7/result.json",
+    "report_sha256": "7cdeac269254370097cd5d6da4e5457eb7b65d47cd75bb015e9543f2ee721dcb",
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 58563,
+      "new": 18694,
+      "unique": 18694,
+      "elapsed_s": 60.026051,
+      "states_per_s": 975.626399,
+      "state_store": {
+        "loads": 296175,
+        "l1": 291972,
+        "l2": 4203,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 268710,
+        "new": 3638,
+        "dedup_pct": 98.6
+      },
+      "new_states_per_s": 311.43144832232923
+    },
+    "search_work": {
+      "transitions": 58562,
+      "restore_us": 10839050,
+      "capture_check_commit_us": 43073651
+    },
+    "memo_process": null,
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-memo": "e9e4c2efd4e92e3c256070950c308e5ae0fe95afc089be257a217d37a3288f44",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "0d8ff8cb116d048bda258d0a0b3c848917b2471a111eb5a443f1ed6e9271cb2e"
+    },
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "off",
+      "DETSIM_OBSERVATION_CACHE_STATS": "1"
+    }
+  },
+  {
+    "label": "memo-on",
+    "report": "/home/kaguya/code/detsim/build/serial-bfs-1500/memo-on/run-aa916nad/result.json",
+    "report_sha256": "72fc8d1014e6425a19110214da16f86f29f5a930ae9c342cd5eca18a652e5d6a",
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 60497,
+      "new": 19314,
+      "unique": 19314,
+      "elapsed_s": 60.018599,
+      "states_per_s": 1007.970883,
+      "state_store": {
+        "loads": 304827,
+        "l1": 300445,
+        "l2": 4382,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 277579,
+        "new": 3712,
+        "dedup_pct": 98.7
+      },
+      "new_states_per_s": 321.8002472866786
+    },
+    "search_work": {
+      "transitions": 60496,
+      "restore_us": 12603591,
+      "capture_check_commit_us": 39983669
+    },
+    "memo_process": [
+      {
+        "lookups": 11786155,
+        "hits": 9933799,
+        "misses": 1852356,
+        "admitted": 1852350,
+        "nonlocal": 0,
+        "roots": 16
+      }
+    ],
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-memo": "e9e4c2efd4e92e3c256070950c308e5ae0fe95afc089be257a217d37a3288f44",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "0d8ff8cb116d048bda258d0a0b3c848917b2471a111eb5a443f1ed6e9271cb2e"
+    },
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "on",
+      "DETSIM_OBSERVATION_CACHE_STATS": "1"
+    }
+  },
+  {
+    "label": "memo-mode",
+    "report": "/home/kaguya/code/detsim/build/serial-bfs-1500/memo-mode/run-unmdeqdo/result.json",
+    "report_sha256": "ec892dd7ac813b6fc88f38f90ccee5846cd3958ff2284fda9dd3afc8a9db5c84",
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 73278,
+      "new": 23093,
+      "unique": 23093,
+      "elapsed_s": 60.012339,
+      "states_per_s": 1221.048889,
+      "state_store": {
+        "loads": 357817,
+        "l1": 351904,
+        "l2": 5913,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 335490,
+        "new": 4080,
+        "dedup_pct": 98.8
+      },
+      "new_states_per_s": 384.8041983499427
+    },
+    "search_work": {
+      "transitions": 73277,
+      "restore_us": 13147308,
+      "capture_check_commit_us": 39600853
+    },
+    "memo_process": [
+      {
+        "lookups": 14265669,
+        "hits": 12057440,
+        "misses": 2208229,
+        "admitted": 2208223,
+        "nonlocal": 0,
+        "roots": 16
+      }
+    ],
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-memo-mode": "ea26e518e54ec6e3d4804cc1b8e8aeb5956b47d1bfeb35b1872617ea62118105",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "0d8ff8cb116d048bda258d0a0b3c848917b2471a111eb5a443f1ed6e9271cb2e"
+    },
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "on",
+      "DETSIM_OBSERVATION_CACHE_STATS": "1"
+    }
+  },
+  {
+    "label": "memo-stringview",
+    "report": "/home/kaguya/code/detsim/build/serial-bfs-1500/memo-stringview/run-9_cmnwff/result.json",
+    "report_sha256": "334fa332d28409219b1b87047f60585a876710ce79e7f9bbf8be78b7c8ecb8b9",
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 74877,
+      "new": 23492,
+      "unique": 23492,
+      "elapsed_s": 60.012649,
+      "states_per_s": 1247.686971,
+      "state_store": {
+        "loads": 366510,
+        "l1": 360347,
+        "l2": 6163,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 342761,
+        "new": 4095,
+        "dedup_pct": 98.8
+      },
+      "new_states_per_s": 391.45080897862044
+    },
+    "search_work": {
+      "transitions": 74876,
+      "restore_us": 13235018,
+      "capture_check_commit_us": 39563841
+    },
+    "memo_process": [
+      {
+        "lookups": 14575875,
+        "hits": 12315855,
+        "misses": 2260020,
+        "admitted": 2260014,
+        "nonlocal": 0,
+        "roots": 16
+      }
+    ],
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-memo-stringview": "ba1640f17eadfea03e8cf27643683ef55f54603b664a6b10a07e6d5d6a46f152",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "0d8ff8cb116d048bda258d0a0b3c848917b2471a111eb5a443f1ed6e9271cb2e"
+    },
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "on",
+      "DETSIM_OBSERVATION_CACHE_STATS": "1"
+    }
+  },
+  {
+    "label": "memo-view-off",
+    "report": "/home/kaguya/code/detsim/build/serial-bfs-1500/memo-view-off/run-j0rrvhun/result.json",
+    "report_sha256": "41d6cedf7576c0fc9a82409da90fb43f9aff2a86a17212342891fe48a7c39a58",
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 62650,
+      "new": 20031,
+      "unique": 20031,
+      "elapsed_s": 60.051466,
+      "states_per_s": 1043.271783,
+      "state_store": {
+        "loads": 316130,
+        "l1": 311539,
+        "l2": 4591,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 287207,
+        "new": 3781,
+        "dedup_pct": 98.7
+      },
+      "new_states_per_s": 333.5638800225127
+    },
+    "search_work": {
+      "transitions": 62649,
+      "restore_us": 11223617,
+      "capture_check_commit_us": 42547202
+    },
+    "memo_process": null,
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-memo-stringview": "ba1640f17eadfea03e8cf27643683ef55f54603b664a6b10a07e6d5d6a46f152",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "0d8ff8cb116d048bda258d0a0b3c848917b2471a111eb5a443f1ed6e9271cb2e"
+    },
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "off",
+      "DETSIM_OBSERVATION_CACHE_STATS": null
+    }
+  },
+  {
+    "label": "memo-final-on",
+    "report": "/home/kaguya/code/detsim/build/serial-bfs-1500/memo-final-on/run-576op6bi/result.json",
+    "report_sha256": "288c6c0d41ca9ee9e8de704f8aca496dc5b8c71c29e061fa0be02d872bef20d9",
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 72654,
+      "new": 22932,
+      "unique": 22932,
+      "elapsed_s": 60.015504,
+      "states_per_s": 1210.587187,
+      "state_store": {
+        "loads": 355581,
+        "l1": 349717,
+        "l2": 5864,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 332647,
+        "new": 4069,
+        "dedup_pct": 98.8
+      },
+      "new_states_per_s": 382.10126503311545
+    },
+    "search_work": {
+      "transitions": 72653,
+      "restore_us": 13089329,
+      "capture_check_commit_us": 39637751
+    },
+    "memo_process": [
+      {
+        "lookups": 14144613,
+        "hits": 11952197,
+        "misses": 2192416,
+        "admitted": 2192410,
+        "nonlocal": 0,
+        "roots": 16
+      }
+    ],
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-memo-final": "8be22e5c242a84b41ed0ec7fc5976dd36f7100c240a0fb755e3c2a5951f6981f",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "0d8ff8cb116d048bda258d0a0b3c848917b2471a111eb5a443f1ed6e9271cb2e"
+    },
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "on",
+      "DETSIM_OBSERVATION_CACHE_STATS": "1"
+    }
+  },
+  {
+    "label": "memo-final-off",
+    "report": "/home/kaguya/code/detsim/build/serial-bfs-1500/memo-final-off/run-4cvv5_o7/result.json",
+    "report_sha256": "1fb86d1afb66c30a82bb7db167317613babd6c0d0dc062c8c05d7dd1be49f271",
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 61860,
+      "new": 19816,
+      "unique": 19816,
+      "elapsed_s": 60.01365,
+      "states_per_s": 1030.765502,
+      "state_store": {
+        "loads": 312934,
+        "l1": 308382,
+        "l2": 4552,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 283804,
+        "new": 3781,
+        "dedup_pct": 98.7
+      },
+      "new_states_per_s": 330.1915480894763
+    },
+    "search_work": {
+      "transitions": 61859,
+      "restore_us": 11215396,
+      "capture_check_commit_us": 42611405
+    },
+    "memo_process": null,
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-memo-final": "8be22e5c242a84b41ed0ec7fc5976dd36f7100c240a0fb755e3c2a5951f6981f",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "0d8ff8cb116d048bda258d0a0b3c848917b2471a111eb5a443f1ed6e9271cb2e"
+    },
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "off",
+      "DETSIM_OBSERVATION_CACHE_STATS": "1"
+    }
+  }
+]
