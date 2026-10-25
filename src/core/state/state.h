@@ -296,6 +296,21 @@ private:
   hash_type capture_stopped(pid_t pid, hash_type comparison_hash);
   void bind_threads_for_restore(int index, hash_type hash);
   void recover_stopped(int index, hash_type hash) const;
+  // Restore bodies shared by the checked public APIs and recover_stopped().
+  // Only recover_stopped() reaches them without a per-process rseq probe: its
+  // callers already ran verify_thread_pool() on the affected owned carriers
+  // (one node from tracee_state::recover_running_state, every node from the
+  // sys_state all-node preflight) and keep all tasks stopped. Until restore
+  // completes, no guest code, thread creation/replacement, or rseq registration
+  // may run; only the existing fixed restore syscall injection and pending-EXIT
+  // syscall suppression are allowed. Parsing, validation, and every other check
+  // are identical to the public path; only the duplicate rseq enumeration is
+  // omitted. The public low-level APIs below always keep their own
+  // require_no_process_rseq() guard.
+  void restore_memory_mappings_unchecked(hash_type ts_hash, int pid,
+                                         std::vector<maps_item> &maps_out) const;
+  void recover_mem_reg_snapshot_unchecked(std::vector<maps_item> &maps,
+                                          hash_type ts_hash, int pid) const;
   void restore_resources(int index) const;
   void restore_thread_registers(pid_t main_pid) const;
 

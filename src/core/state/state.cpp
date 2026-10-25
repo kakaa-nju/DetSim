@@ -772,6 +772,9 @@ void clear_capture_layout_cache()
 
 // Public low-level restore APIs may bypass the owned-carrier barrier. Their
 // caller must keep all tasks stopped; never write memory with native rseq active.
+// The checked public APIs below always perform this probe. Their shared private
+// bodies are also reached by recover_stopped(), which inherits the
+// verify_thread_pool() owned-carrier barrier instead of repeating it.
 static void require_no_process_rseq(pid_t pid)
 {
   const auto threads = get_thread_list(pid);
@@ -836,6 +839,12 @@ void tracee_state::restore_memory_mappings(
 {
   (void)discard_zero_guards();
   require_no_process_rseq(pid);
+  restore_memory_mappings_unchecked(ts_hash, pid, maps_out);
+}
+
+void tracee_state::restore_memory_mappings_unchecked(
+    hash_type ts_hash, int pid, std::vector<maps_item> &maps_out) const
+{
   const auto snapshot = SnapshotView::open(ts_hash);
   std::vector<maps_item> maps_saved;
   parse_mapping_text(snapshot->maps_text(), maps_saved);
@@ -915,8 +924,15 @@ void tracee_state::restore_memory_mappings(
 void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps,
                                             hash_type ts_hash, int pid) const
 {
-  const bool discard_guards = discard_zero_guards();
+  (void)discard_zero_guards();
   require_no_process_rseq(pid);
+  recover_mem_reg_snapshot_unchecked(maps, ts_hash, pid);
+}
+
+void tracee_state::recover_mem_reg_snapshot_unchecked(
+    std::vector<maps_item> &maps, hash_type ts_hash, int pid) const
+{
+  const bool discard_guards = discard_zero_guards();
   const auto snapshot = SnapshotView::open(ts_hash);
   const auto& regions = snapshot->regions();
   auto resident = detsim::resident::get(pid);
@@ -1350,9 +1366,14 @@ void tracee_state::recover_stopped(int index, hash_type ts_hash) const
   if ((!resident.snapshot || resident.brk != brk) &&
       tracee_do_syscall(main_pid, SYS_brk, brk, 0, 0, 0, 0, 0) != brk)
     throw std::runtime_error("Cannot restore snapshot brk");
+  // Both callers already ran verify_thread_pool() on the affected owned
+  // carriers: one node from tracee_state::recover_running_state, every node
+  // from sys_state's all-node preflight. All tasks remain stopped here, so
+  // reuse that barrier instead of re-enumerating the process twice. Only the
+  // checked public APIs are reachable without it.
   std::vector<maps_item> maps;
-  restore_memory_mappings(ts_hash, main_pid, maps);
-  recover_mem_reg_snapshot(maps, ts_hash, main_pid);
+  restore_memory_mappings_unchecked(ts_hash, main_pid, maps);
+  recover_mem_reg_snapshot_unchecked(maps, ts_hash, main_pid);
 
   restore_thread_registers(main_pid);
 }

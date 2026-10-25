@@ -1,0 +1,296 @@
+{
+  "scope": "one 60-second candidate/baseline pair, not long-window acceptance",
+  "rows": [
+    {
+      "name": "candidate",
+      "report": "build/serial-bfs-1500/restore-barrier-candidate/run-kaorvjqb/result.json",
+      "report_sha256": "c0006fcc9f87522b141b81616d48c846f16b9a847c737142f6be9d4626462078",
+      "result": {
+        "host": {
+          "system": "Linux",
+          "node": "tilnel",
+          "release": "6.12.105+deb13-amd64",
+          "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+          "machine": "x86_64",
+          "processor": ""
+        },
+        "backend": "pages",
+        "seed": 1,
+        "rounds": 100,
+        "requested_seconds": 60.0,
+        "inputs_sha256": {
+          "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+          "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-restore-barrier": "cfcf6d5e570b6b3d246736ae4c944611507ddae2e2ec467cefeaa75fe3941814",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+          "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ce4c80fddaf20a1c466cca4052c5289f8bd143152bd3616f1d5d627f23502346"
+        },
+        "cpu_affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "tracer_cpu_affinity": [
+          2
+        ],
+        "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+        "checkout_commit": "6b156f89ed6b1530d50cb786152d5fa3fe24c1cc",
+        "execution_options": {
+          "DETSIM_RESIDENT_MEMORY": null,
+          "DETSIM_CAPTURE_MODE": null,
+          "DETSIM_CAPTURE_VERIFY": null,
+          "DETSIM_SOFT_DIRTY": null,
+          "DETSIM_OBSERVATION_CACHE": "on",
+          "DETSIM_OBSERVATION_CACHE_STATS": null,
+          "DETSIM_CAPTURE_LAYOUT_CACHE": "on"
+        },
+        "prefix_nodes": [
+          {
+            "node": 0,
+            "state": 4,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 1,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 2,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          }
+        ],
+        "root": "77d69554786f727b",
+        "root_budget": 2,
+        "command_seconds": 60.05430797603913,
+        "search_metrics": {
+          "engine": "builtin_cli",
+          "completion": "interrupted",
+          "searched": 82758,
+          "new": 25858,
+          "unique": 25858,
+          "elapsed_s": 60.045305,
+          "states_per_s": 1378.259305,
+          "state_store": {
+            "loads": 405759,
+            "l1": 398412,
+            "l2": 7347,
+            "disk": 0,
+            "hit_pct": 100.0,
+            "saves": 378542,
+            "new": 4472,
+            "dedup_pct": 98.8
+          },
+          "new_states_per_s": 430.6414964500555
+        },
+        "search_work": {
+          "transitions": 82757,
+          "restore_us": 12411052,
+          "capture_check_commit_us": 39559350
+        },
+        "first_parent_edges": 46803,
+        "generated_new_nodes_including_budget_cuts": 46503,
+        "generated_new_nodes_per_s": 774.4652142244927,
+        "counter_scope": "CLI searched counts root plus transitions; CLI new excludes model-budget-cut successors; generated_new_nodes counts all saved new identities relative to the deterministic prefix, including budget cuts",
+        "evidence_scope": "native BFS; tree is first-parent witnesses, not every edge",
+        "tracer_exit": 0,
+        "passed": true
+      }
+    },
+    {
+      "name": "baseline",
+      "report": "build/serial-bfs-1500/restore-barrier-baseline/run-f1xi9xnh/result.json",
+      "report_sha256": "3ae3f27574677c887fd23875a8d2ea770702840a9df3ae6c960181babc967be0",
+      "result": {
+        "host": {
+          "system": "Linux",
+          "node": "tilnel",
+          "release": "6.12.105+deb13-amd64",
+          "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+          "machine": "x86_64",
+          "processor": ""
+        },
+        "backend": "pages",
+        "seed": 1,
+        "rounds": 100,
+        "requested_seconds": 60.0,
+        "inputs_sha256": {
+          "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+          "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-page-reserve": "291d31155be4058f3c99e60621edbe32ca28f73cd3cb238db27c9c57770278b7",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+          "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ce4c80fddaf20a1c466cca4052c5289f8bd143152bd3616f1d5d627f23502346"
+        },
+        "cpu_affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "tracer_cpu_affinity": [
+          2
+        ],
+        "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+        "checkout_commit": "6b156f89ed6b1530d50cb786152d5fa3fe24c1cc",
+        "execution_options": {
+          "DETSIM_RESIDENT_MEMORY": null,
+          "DETSIM_CAPTURE_MODE": null,
+          "DETSIM_CAPTURE_VERIFY": null,
+          "DETSIM_SOFT_DIRTY": null,
+          "DETSIM_OBSERVATION_CACHE": "on",
+          "DETSIM_OBSERVATION_CACHE_STATS": null,
+          "DETSIM_CAPTURE_LAYOUT_CACHE": "on"
+        },
+        "prefix_nodes": [
+          {
+            "node": 0,
+            "state": 4,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 1,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 2,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          }
+        ],
+        "root": "e735cbf63792719d",
+        "root_budget": 2,
+        "command_seconds": 60.08528003003448,
+        "search_metrics": {
+          "engine": "builtin_cli",
+          "completion": "interrupted",
+          "searched": 77491,
+          "new": 24164,
+          "unique": 24164,
+          "elapsed_s": 60.075282,
+          "states_per_s": 1289.898234,
+          "state_store": {
+            "loads": 379109,
+            "l1": 372571,
+            "l2": 6538,
+            "disk": 0,
+            "hit_pct": 100.0,
+            "saves": 354448,
+            "new": 4124,
+            "dedup_pct": 98.8
+          },
+          "new_states_per_s": 402.22865703734857
+        },
+        "search_work": {
+          "transitions": 77490,
+          "restore_us": 14014431,
+          "capture_check_commit_us": 38158478
+        },
+        "first_parent_edges": 43814,
+        "generated_new_nodes_including_budget_cuts": 43514,
+        "generated_new_nodes_per_s": 724.3245233538812,
+        "counter_scope": "CLI searched counts root plus transitions; CLI new excludes model-budget-cut successors; generated_new_nodes counts all saved new identities relative to the deterministic prefix, including budget cuts",
+        "evidence_scope": "native BFS; tree is first-parent witnesses, not every edge",
+        "tracer_exit": 0,
+        "passed": true
+      }
+    }
+  ],
+  "gain": 0.06850235830309703,
+  "commands": [
+    {
+      "kind": "cases",
+      "argv": [
+        "python3",
+        "examples/redisraft/run.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-restore-barrier",
+        "--backend",
+        "all",
+        "--variant",
+        "all",
+        "--checker",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so",
+        "--choose",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so",
+        "--output",
+        "build/serial-bfs-1500/restore-barrier-cases"
+      ],
+      "exit": 0
+    },
+    {
+      "kind": "candidate",
+      "argv": [
+        "python3",
+        "examples/redisraft/serial_benchmark.py",
+        "--tracer",
+        "build/serial-bfs-1500/tracer-restore-barrier",
+        "--output",
+        "build/serial-bfs-1500/restore-barrier-candidate",
+        "--binary",
+        "build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--cpu",
+        "2",
+        "--seconds",
+        "60"
+      ],
+      "exit": 0
+    },
+    {
+      "kind": "baseline",
+      "argv": [
+        "python3",
+        "examples/redisraft/serial_benchmark.py",
+        "--tracer",
+        "build/serial-bfs-1500/tracer-page-reserve",
+        "--output",
+        "build/serial-bfs-1500/restore-barrier-baseline",
+        "--binary",
+        "build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--cpu",
+        "2",
+        "--seconds",
+        "60"
+      ],
+      "exit": 0
+    }
+  ]
+}

@@ -6,6 +6,7 @@
 #include "guest.h"
 #include "dispatcher.h"
 #include "proc_status.h"
+#include "utils.h"
 #include "page_snapshot.h"
 #include "state.h"
 #include "resident_memory.h"
@@ -13,6 +14,7 @@
 #include "engine/thread_pool.h"
 #include "state_transition.h"
 #include <array>
+#include <cstdarg>
 #include <cstdio>
 #include <arpa/inet.h>
 #include <cstring>
@@ -26,7 +28,23 @@
 
 static long guest_value = 17;
 alignas(4096) static const long readonly_value __attribute__((used)) = 31;
+alignas(32) static struct rseq registered_rseq{};
 static_assert(NP == 2, "capture oracle requires two processes");
+// The rseq fixture is registered through the host-only injection path. Count
+// only PTRACE_GET_RSEQ_CONFIGURATION, never aggregate syscalls.
+static unsigned long rseq_configuration_calls = 0;
+extern "C" long __real_ptrace(enum __ptrace_request request, ...);
+extern "C" long __wrap_ptrace(enum __ptrace_request request, ...)
+{
+    va_list args;
+    va_start(args, request);
+    const pid_t pid = va_arg(args, pid_t);
+    void* const addr = va_arg(args, void*);
+    void* const data = va_arg(args, void*);
+    va_end(args);
+    if (request == PTRACE_GET_RSEQ_CONFIGURATION) ++rseq_configuration_calls;
+    return __real_ptrace(request, pid, addr, data);
+}
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui() { return nullptr; }
 static void require(bool ok, const char *why) { if (!ok) throw std::runtime_error(why); }
 struct CaptureLayoutMode {
@@ -663,6 +681,71 @@ int main(int argc, char**)
         sys_state crash_predecessor(info,&source);
         require(crash_predecessor.ss_hash==source.ss_hash,"crash predecessor restore identity drift");
         if (argc > 1) require(StateStore::instance().get_stats().disk_reads > 0, "oracle did not exercise cache eviction");
+        // The all-node barrier already probes rseq once per physical thread.
+        // A high-level restore must not repeat that probe inside each node's
+        // memory/register restore. Count only PTRACE_GET_RSEQ_CONFIGURATION.
+        require(ptrace(PTRACE_POKEDATA,children[0],&guest_value,21)==0,"edit first rseq-count branch");
+        require(ptrace(PTRACE_POKEDATA,children[1],&guest_value,22)==0,"edit second rseq-count branch");
+        sys_state diverged(info,&source);
+        ptmc_state.running_state=diverged;
+        size_t expected_rseq_checks=0;
+        for (int i=0;i<NP;++i) expected_rseq_checks+=get_thread_list(ptmc_state.pids[i]).size();
+        rseq_configuration_calls=0;
+        source.recover_running_state();
+        require(rseq_configuration_calls==expected_rseq_checks,
+                "high-level restore repeated the per-node rseq guard");
+        // Both public low-level APIs are reachable without the barrier and
+        // must still perform their own rseq check.
+        const auto public_rseq_checks=get_thread_list(children[0]).size();
+        std::vector<maps_item> maps;
+        rseq_configuration_calls=0;
+        source.child[0].restore_memory_mappings(source.ts_hash[0],children[0],maps);
+        require(rseq_configuration_calls==public_rseq_checks,
+                "public mapping restore lost its rseq guard");
+        rseq_configuration_calls=0;
+        source.child[0].recover_mem_reg_snapshot(maps,source.ts_hash[0],children[0]);
+        require(rseq_configuration_calls==public_rseq_checks,
+                "public memory restore lost its rseq guard");
+        // A later node's active rseq registration must be rejected by the same
+        // barrier before the earlier node's image, model, budget, or store
+        // records change.
+        require(ptrace(PTRACE_POKEDATA,children[0],&guest_value,321)==0,"edit rseq preflight witness");
+        // Change a modeled subsystem on the earlier node too, so a partial
+        // restore of that node's resources would be visible after rejection.
+        ptmc_state.process_states[0].random_state^=0x5a5a5a5a;
+        ptmc_state.time[0].tv_sec+=11;
+        ptmc_state.error_bound=5;
+        sys_state before_rseq(info,&source);
+        ptmc_state.running_state=before_rseq;
+        user_regs_struct rseq_before{},rseq_after{};
+        require(ptrace(PTRACE_GETREGS,children[0],nullptr,&rseq_before)==0,"rseq preflight registers");
+        const auto rseq_tasks=get_thread_list(children[0]);
+        const auto rseq_saves=StateStore::instance().get_stats().save_calls;
+        require(tracee_do_syscall(children[1],SYS_rseq,
+                reinterpret_cast<uintptr_t>(&registered_rseq),sizeof registered_rseq,
+                0,RSEQ_SIG,0,0)==0,"register later-node rseq fixture");
+        bool rseq_rejected=false;
+        try {source.recover_running_state();}
+        catch(const std::runtime_error& error){
+            rseq_rejected=std::string(error.what()).find("active rseq registration")!=std::string::npos;
+        }
+        long rseq_witness=0;
+        require(rseq_rejected && ptmc_state.error_bound==5 &&
+                ptmc_state.running_state.ss_hash==before_rseq.ss_hash &&
+                ptmc_state.process_states[0]==before_rseq.child[0].process_state &&
+                ptmc_state.time[0].tv_sec==before_rseq.child[0].tv.tv_sec &&
+                ptmc_state.status[0]==before_rseq.status[0] &&
+                StateStore::instance().get_stats().save_calls==rseq_saves &&
+                get_thread_list(children[0])==rseq_tasks &&
+                guest_read_exact(children[0],&guest_value,&rseq_witness,sizeof(rseq_witness)) &&
+                rseq_witness==321 &&
+                ptrace(PTRACE_GETREGS,children[0],nullptr,&rseq_after)==0 &&
+                !memcmp(&rseq_before,&rseq_after,sizeof(rseq_before)),
+                "active rseq on a later node mutated an earlier node or changed the model");
+        require(tracee_do_syscall(children[1],SYS_rseq,
+                reinterpret_cast<uintptr_t>(&registered_rseq),sizeof registered_rseq,
+                RSEQ_FLAG_UNREGISTER,RSEQ_SIG,0,0)==0,"unregister later-node rseq fixture");
+        source.recover_running_state();
         // A later node's failure must be detected before any earlier image,
         // status, budget, or store record changes.
         require(ptrace(PTRACE_POKEDATA,children[0],&guest_value,456)==0,"edit preflight witness");
