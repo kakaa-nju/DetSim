@@ -24,8 +24,9 @@ const char *g_input_string = nullptr;
 
 /* External parser interface */
 extern int yyparse(void);
-extern void yy_scan_string(const char *str);
-extern void yylex_destroy(void);
+struct yy_buffer_state;
+extern yy_buffer_state *yy_scan_string(const char *str);
+extern int yylex_destroy(void);
 
 namespace {
 thread_local const detsim::ExpressionObservation* observation = nullptr;
