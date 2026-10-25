@@ -86,12 +86,16 @@ def main():
     parser.add_argument('--cpu', type=int,
                         help='pin tracer and its children to this allowed CPU; leave driver unpinned')
     parser.add_argument('--perf', type=Path, help='optional perf executable for CPU sampling')
+    parser.add_argument('--perf-stack-size', type=int, default=8192,
+                        help='bytes of user stack per perf DWARF sample (8..65528, multiple of 8)')
     parser.add_argument('--perf-sudo', action='store_true', help='run only perf through sudo -n')
     parser.add_argument('--sample-interval', type=float, default=0,
                         help='optional seconds between read-only saved-state count samples')
     args = parser.parse_args()
     if args.seconds <= 0 or args.rounds < 0 or args.sample_interval < 0:
         parser.error('seconds must be positive and rounds nonnegative')
+    if not 8 <= args.perf_stack_size <= 65528 or args.perf_stack_size % 8:
+        parser.error('perf-stack-size must be a multiple of 8 in 8..65528')
     driver_affinity = os.sched_getaffinity(0)
     if args.cpu is not None and args.cpu not in driver_affinity:
         parser.error('cpu must belong to the current allowed CPU set')
@@ -175,8 +179,8 @@ def main():
         if args.perf:
             perf_log = (work / 'perf.log').open('w')
             profiler = subprocess.Popen((['sudo', '-n'] if args.perf_sudo else []) +
-                [str(args.perf.resolve()), 'record', '-F', '99',
-                '--call-graph', 'dwarf,8192', '-p', str(session.proc.pid),
+                [str(args.perf.resolve()), 'record', '-F', '99', '-m', '4096',
+                '--call-graph', f'dwarf,{args.perf_stack_size}', '-p', str(session.proc.pid),
                 '-o', str(work / 'perf.data')], stdout=perf_log, stderr=perf_log)
             time.sleep(.2)
             common.require(profiler.poll() is None, 'perf failed; see perf.log')
@@ -197,10 +201,17 @@ def main():
             samples = None
         if profiler:
             profiler.send_signal(signal.SIGINT)
-            # sudo may propagate SIGINT as 128 + SIGINT after perf flushes.
+            # The supervisor may report either form of SIGINT after perf flushes.
             report['perf_exit'] = profiler.wait(timeout=15)
-            common.require(report['perf_exit'] in (0, 128 + signal.SIGINT), 'perf record failed')
+            common.require(report['perf_exit'] in (0, -signal.SIGINT, 128 + signal.SIGINT),
+                           'perf record failed')
+            perf_log.flush()
+            recorded = (work / 'perf.log').read_text()
+            common.require('Captured and wrote' in recorded and ' lost ' not in recorded,
+                           'perf recording incomplete or lost samples; see perf.log')
             report['profile_scope'] = 'tracer CPU samples around BFS; diagnostic timing only'
+            report['perf_stack_size'] = args.perf_stack_size
+            report['perf_buffer_pages'] = 4096
         metrics = common.search_metrics(reply)
         if 'Program received signal SIGINT, Interrupt.' in reply:
             metrics['completion'] = 'interrupted'
@@ -208,6 +219,13 @@ def main():
                        'missing native BFS metrics')
         metrics['new_states_per_s'] = metrics['new'] / metrics['elapsed_s']
         report['search_metrics'] = metrics
+        work_receipts = [json.loads(line.removeprefix('SEARCH_WORK '))
+                         for line in reply.splitlines() if line.startswith('SEARCH_WORK ')]
+        common.require(len(work_receipts) <= 1, 'duplicate native BFS work receipt')
+        if work_receipts:
+            report['search_work'] = work_receipts[0]
+            common.require(work_receipts[0]['transitions'] == metrics['searched'] - 1,
+                           'native BFS transition and visit counts disagree')
         after = setup.tree(session)
         (work / 'prefix-tree.json').write_text(json.dumps(sorted(before)))
         (work / 'tree.json').write_text(json.dumps(sorted(after)))

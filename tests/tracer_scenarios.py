@@ -1144,12 +1144,25 @@ int main(void) {
         self.assertIn("Complete explore all 5 sys_states", output)
         self.assertNotIn("Fatal signal", output)
         self.assertEqual(code, 0, output)
+        receipts = re.findall(r"SEARCH_WORK (\{[^\n]+\})", output)
+        self.assertEqual(len(receipts), 1, output)
+        work = json.loads(receipts[0])
+        self.assertEqual(work['transitions'], 4)
+        self.assertGreaterEqual(work['restore_us'], 0)
+        self.assertGreaterEqual(work['capture_check_commit_us'], 0)
 
     def test_bfs_reports_reachable_assertion_violation(self):
         code, output = self.run_tracer("sw 0\nbfs\nq\n", assertions=["tracee0(counter < 3)"])
         self.assertIn("Stopped for illegal state", output)
         self.assertNotIn("Complete explore all", output)
         self.assertEqual(code, 0, output)
+        receipts = re.findall(r"SEARCH_WORK (\{[^\n]+\})", output)
+        self.assertEqual(len(receipts), 1, output)
+        work = json.loads(receipts[0])
+        visits = int(re.search(r"Searched for (\d+) sys_states", output)[1])
+        self.assertEqual(work['transitions'], visits - 1)
+        self.assertGreaterEqual(work['restore_us'], 0)
+        self.assertGreaterEqual(work['capture_check_commit_us'], 0)
 
     def build_depth_reopen_probe(self):
         source = self.root / "depth_reopen.c"

@@ -830,6 +830,13 @@ int exec_bfs()
   /* Start status monitor in auto mode */
   StatusMonitorScope status_monitor;
 
+  auto report_work = []() {
+    detsim::ui::ui_printf(
+        "SEARCH_WORK {\"transitions\":%zu,\"restore_us\":%llu,\"capture_check_commit_us\":%llu}\n",
+        g_save_count.load(), static_cast<unsigned long long>(g_restore_time_us.load()),
+        static_cast<unsigned long long>(g_save_time_us.load()));
+  };
+
   auto stop_for_violation = [&]() {
     stop_status_monitor();
     detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu "
@@ -840,6 +847,7 @@ int exec_bfs()
     detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
                           time_used, states_searched_this_run / time_used);
     StateStore::instance().print_stats();
+    report_work();
     return 1;
   };
 
@@ -965,6 +973,7 @@ int exec_bfs()
       detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
                             time_used, states_searched_this_run / time_used);
       StateStore::instance().print_stats();
+      report_work();
       sigint_received = 0;
       clear_search_bookkeeping();
       return 0;
@@ -990,7 +999,7 @@ int exec_bfs()
   detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
                         states_searched_this_run / time_used);
   StateStore::instance().print_stats();
-  detsim::ui::ui_printf("SEARCH_WORK {\"transitions\":%zu}\n", g_save_count.load());
+  report_work();
   report_search_exited(exited_receipt);
   return 0;
 }
