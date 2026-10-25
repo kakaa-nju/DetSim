@@ -1076,7 +1076,7 @@ void tracee_state::restore_resources(int index) const
 
 void state_queue_append(sys_state &s)
 {
-  StateStore::instance().queue_push_back(s.ss_hash);
+  StateStore::instance().queue_push_back(s.ss_hash, s.ts_hash);
 }
 
 std::optional<sys_state> state_queue_extract()

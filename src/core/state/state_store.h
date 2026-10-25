@@ -2,6 +2,7 @@
 #ifndef __STATE_STORE_H
 #define __STATE_STORE_H
 #include "types.h"
+#include <array>
 #include <atomic>
 #include <condition_variable>
 #include <deque>
@@ -105,8 +106,14 @@ class StateStore
   // Queue Management (with transparent prefetch)
   // ==================================================================
 
-  // Queue operations - prefetch happens automatically on pop
+  // Queue operations - prefetch happens automatically on pop.
+  // The component-hash overload lets enqueue carry the already-known ts_hash
+  // values so prefetch does not have to reload and deserialize sys_state
+  // metadata for every candidate on every pop. The hash-only overload is for
+  // callers that do not have them (tests/external users) and keeps the old
+  // metadata-lookup fallback.
   void queue_push_back(hash_type hash);
+  void queue_push_back(hash_type hash, const hash_type (&ts_hash)[NP]);
   void queue_pop_front();
   hash_type queue_try_pop_front();
   size_t queue_size() const;
@@ -206,7 +213,16 @@ class StateStore
   size_t pending_bytes_ = 0;
   static constexpr size_t max_io_queue_size_ = 50;
   std::vector<std::thread> io_threads_, prefetch_threads_;
-  std::deque<hash_type> state_queue_, prefetch_queue_;
+  struct QueueEntry
+  {
+    hash_type ss_hash = 0;
+    std::array<hash_type, NP> ts_hash{};
+    // False for hash-only enqueues, which still resolve component hashes from
+    // SysStateStore metadata in submit_prefetch_tasks().
+    bool ts_known = false;
+  };
+  std::deque<QueueEntry> state_queue_;
+  std::deque<hash_type> prefetch_queue_;
   std::unordered_set<hash_type> prefetch_inflight_;
   std::shared_ptr<detsim::snapshot::SharedObjectPool> shared_pool_;
   bool shared_writes_ = false;

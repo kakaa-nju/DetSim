@@ -1,5 +1,7 @@
+#include "state.h"
 #include "state_store.h"
 #include "state_store_packed.h"
+#include "sysstate_store.h"
 #include "debug.h"
 #include "ncurses_ui.h"
 #include <atomic>
@@ -29,6 +31,17 @@ extern "C" int __real_fsync(int fd);
 extern "C" int __wrap_fsync(int fd) {
   if (fail_sync.load()) {errno = EIO; return -1;}
   return __real_fsync(fd);
+}
+// Count metadata loads performed by the prefetch path. The queue-prefetch
+// regression asserts that a known-hint enqueue does not enter this oracle.
+static std::atomic<unsigned> sysstate_load_calls{0};
+extern "C" bool real_sysstate_load(SysStateStore *, hash_type, std::vector<uint8_t> &)
+  asm("__real__ZN13SysStateStore4loadEmRSt6vectorIhSaIhEE");
+extern "C" bool wrap_sysstate_load(SysStateStore *store, hash_type hash, std::vector<uint8_t> &data)
+  asm("__wrap__ZN13SysStateStore4loadEmRSt6vectorIhSaIhEE");
+extern "C" bool wrap_sysstate_load(SysStateStore *store, hash_type hash, std::vector<uint8_t> &data) {
+  ++sysstate_load_calls;
+  return real_sysstate_load(store, hash, data);
 }
 template <typename F> static void rejects(F operation, const char *message) {
   bool failed = false; try {operation();} catch (const std::exception &) {failed = true;}
@@ -67,6 +80,21 @@ static StateStore::Config config(size_t hot = 8192, size_t warm = 8192) {
   result.prefetch_threads = 0; result.prefetch_window = 0;
   result.packed_storage_path = "packed";
   return result;
+}
+static bool await_l2(StateStore &store, hash_type hash) {
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+  while (!store.in_l2(hash) && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  return store.in_l2(hash);
+}
+// Persist sys-state metadata whose only nonzero component is ts. This makes the
+// hash-only legacy path observable: it must load this record to find ts.
+static sys_state metadata_with_component(hash_type ts) {
+  sys_state state;
+  state.ts_hash[0] = ts;
+  state.ss_hash = state.identity_hash();
+  require(state.save_metadata() == 1, "queue hints: metadata save");
+  return state;
 }
 static int run_child(const char *executable, const char *mode, const char *hash = nullptr) {
   const pid_t pid = fork();
@@ -212,6 +240,132 @@ static void run_case(const char *mode, const char *executable, const char *hash_
     require(store.get_stats().prefetch_issued==1,"prefetch issue accounting");
     store.shutdown(); return;
   }
+  if (!strcmp(mode, "queue_hints")) {
+    auto cfg=config(0,1u<<16); cfg.prefetch_threads=1; cfg.prefetch_window=4; cfg.max_inflight_prefetch=8;
+    store.init(cfg);
+    auto d1=payload(21), d2=payload(22), d3=payload(23), d4=payload(24);
+    const hash_type h1=store.save(d1.data(),d1.size()), h2=store.save(d2.data(),d2.size());
+    const hash_type h3=store.save(d3.data(),d3.size()), h4=store.save(d4.data(),d4.size());
+    store.wait_for_completion();
+    store.shutdown();
+    require(store.queue_size()==0,"queue survived shutdown");
+    store.init(cfg); // reopen packed data with cold L1/L2 and an empty queue
+    SysStateStore::instance().init();
+    auto fs1=metadata_with_component(h1), fs2=metadata_with_component(h2);
+    auto fs3=metadata_with_component(h3), fs4=metadata_with_component(h4);
+    sysstate_load_calls.store(0);
+
+    // Known hints alone: FIFO order and cold bytes must not cost a metadata load.
+    sys_state trigger1; trigger1.ss_hash=0x1111;
+    state_queue_append(trigger1);
+    state_queue_append(fs1);
+    // The queue must own the hint array: mutating the producer's sys_state after
+    // enqueue must not change what the later trigger pop prefetches.
+    fs1.ts_hash[0] = h2;
+    require(store.queue_size()==2,"known hints: queue size");
+    require(store.queue_peek(0)==trigger1.ss_hash && store.queue_peek(1)==fs1.ss_hash,
+            "known hints: peek order");
+    require(store.queue_try_pop_front()==trigger1.ss_hash,"known hints: trigger FIFO");
+    require(await_l2(store,h1),"known hints: cold component not prefetched");
+    require(sysstate_load_calls.load()==0,"known hints: metadata was loaded");
+    require(store.get_stats().prefetch_issued==1,"known hints: prefetch accounting");
+    auto got1=store.load_shared(h1);
+    require(got1 && *got1==d1,"known hints: prefetched bytes differ");
+    require(store.get_stats().l2_hits==1,"known hints: prefetch was not a cold L2 hit");
+    require(store.queue_try_pop_front()==fs1.ss_hash,"known hints: pop order");
+    require(store.queue_size()==0,"known hints: queue not drained");
+
+    // Mixed queue: known hint plus the hash-only legacy overload. Only the
+    // legacy entry may resolve component hashes through SysStateStore::load.
+    sysstate_load_calls.store(0);
+    sys_state trigger2; trigger2.ss_hash=0x2222;
+    state_queue_append(trigger2);
+    state_queue_append(fs2);
+    store.queue_push_back(fs3.ss_hash);
+    require(store.queue_size()==3,"mixed hints: queue size");
+    require(store.queue_peek(1)==fs2.ss_hash && store.queue_peek(2)==fs3.ss_hash,
+            "mixed hints: peek order");
+    require(store.queue_try_pop_front()==trigger2.ss_hash,"mixed hints: trigger FIFO");
+    require(await_l2(store,h2) && await_l2(store,h3),"mixed hints: components not prefetched");
+    require(sysstate_load_calls.load()==1,"mixed hints: legacy metadata load count");
+    auto got2=store.load_shared(h2), got3=store.load_shared(h3);
+    require(got2 && *got2==d2,"mixed hints: known bytes differ");
+    require(got3 && *got3==d3,"mixed hints: legacy bytes differ");
+    require(store.queue_try_pop_front()==fs2.ss_hash,"mixed hints: known FIFO");
+    require(store.queue_try_pop_front()==fs3.ss_hash,"mixed hints: legacy FIFO");
+
+    // All-zero component hints are valid entries: neither prefetch nor metadata.
+    store.queue_clear();
+    sysstate_load_calls.store(0);
+    const auto issued_before_zero=store.get_stats().prefetch_issued;
+    sys_state trigger3; trigger3.ss_hash=0x3333;
+    sys_state zero_hint; zero_hint.ss_hash=0x4444;
+    state_queue_append(trigger3);
+    state_queue_append(zero_hint);
+    require(store.queue_try_pop_front()==trigger3.ss_hash,"zero hints: trigger FIFO");
+    // submit_prefetch_tasks runs inside the pop; no asynchronous grace is needed
+    // for the issue/load counters. Byte waits use await_l2 elsewhere.
+    require(store.get_stats().prefetch_issued==issued_before_zero,"zero hints: prefetch issued");
+    require(sysstate_load_calls.load()==0,"zero hints: metadata loaded");
+    require(store.queue_try_pop_front()==zero_hint.ss_hash,"zero hints: FIFO");
+    require(store.queue_size()==0,"zero hints: queue not drained");
+
+    // Known hints must not bypass metadata validation. Store a valid metadata
+    // payload under the wrong key: extract must still load it and reject the
+    // identity mismatch instead of trusting the queued component hint.
+    std::vector<uint8_t> fs1_bytes;
+    require(SysStateStore::instance().load(fs1.ss_hash, fs1_bytes),
+            "malformed hints: read metadata payload");
+    const hash_type bad_ss = 0xBAD5EED5EED5EEDULL;
+    require(!SysStateStore::instance().exists(bad_ss),
+            "malformed hints: fixed key already present");
+    require(SysStateStore::instance().save(bad_ss, fs1_bytes),
+            "malformed hints: save mismatched metadata");
+    sys_state bad_hint; bad_hint.ss_hash=bad_ss; bad_hint.ts_hash[0]=h3;
+    state_queue_append(bad_hint);
+    require(store.queue_size()==1,"malformed hints: queue size");
+    sysstate_load_calls.store(0);
+    rejects([&]{ state_queue_extract(); }, "known hints bypassed metadata validation");
+    require(sysstate_load_calls.load()==1,"malformed hints: metadata not loaded");
+    require(store.queue_size()==0,"malformed hints: entry not consumed");
+
+    // Clear must drop pending known-hint entries without issuing prefetch.
+    state_queue_append(fs4);
+    require(store.queue_size()==1,"clear: queue size");
+    sysstate_load_calls.store(0);
+    const auto issued_before_clear=store.get_stats().prefetch_issued;
+    store.queue_clear();
+    require(store.queue_size()==0,"clear: retained entries");
+    require(store.queue_try_pop_front()==0,"clear: popped a cleared entry");
+    require(store.get_stats().prefetch_issued==issued_before_clear,"clear: issued prefetch");
+    require(sysstate_load_calls.load()==0,"clear: loaded metadata");
+
+    // Shutdown drops the queue; reopen must not resurrect it, and a fresh
+    // known-hint enqueue must still prefetch cold bytes with no metadata load.
+    state_queue_append(fs4);
+    require(store.queue_size()==1,"shutdown: queue size");
+    store.shutdown();
+    require(store.queue_size()==0,"shutdown: retained queue entry");
+    store.init(cfg);
+    require(store.queue_size()==0,"reinit: retained queue entry");
+    require(store.queue_try_pop_front()==0,"reinit: popped a stale entry");
+    require(!store.in_l2(h4),"reinit: retained warm bytes");
+    sysstate_load_calls.store(0);
+    const auto issued_before_reinit=store.get_stats().prefetch_issued;
+    sys_state trigger4; trigger4.ss_hash=0x5555;
+    state_queue_append(trigger4);
+    state_queue_append(fs4);
+    require(store.queue_try_pop_front()==trigger4.ss_hash,"reinit: trigger FIFO");
+    require(await_l2(store,h4),"reinit: known hint did not prefetch");
+    require(sysstate_load_calls.load()==0,"reinit: metadata loaded");
+    require(store.get_stats().prefetch_issued==issued_before_reinit+1,"reinit: prefetch accounting");
+    auto got4=store.load_shared(h4);
+    require(got4 && *got4==d4,"reinit: prefetched bytes differ");
+    require(store.queue_try_pop_front()==fs4.ss_hash,"reinit: FIFO");
+    store.shutdown();
+    SysStateStore::instance().shutdown();
+    return;
+  }
   if (!strcmp(mode, "sync_error")) {
     store.init(config()); auto data=payload(11); auto hash=store.save(data.data(),data.size());
     fail_sync=true;
@@ -250,7 +404,7 @@ int main(int argc, char **argv) {
   try {
     const std::string executable = std::filesystem::canonical("/proc/self/exe");
     if (argc > 1) {run_case(argv[1], executable.c_str(), argc > 2 ? argv[2] : nullptr); return 0;}
-    for (auto mode : {"reference", "lifetime", "barrier", "concurrent", "shutdown", "errors", "backpressure", "multiworker", "prefetch", "sync_error", "config"}) {
+    for (auto mode : {"reference", "lifetime", "barrier", "concurrent", "shutdown", "errors", "backpressure", "multiworker", "prefetch", "queue_hints", "sync_error", "config"}) {
       auto old = std::filesystem::current_path();
       char pattern[] = "/tmp/detsim-store-cache-XXXXXX";
       require(mkdtemp(pattern) != nullptr,"mkdtemp");

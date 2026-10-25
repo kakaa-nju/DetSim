@@ -381,18 +381,31 @@ bool StateStore::exists(hash_type hash) {
   catch (...) { record_failure(std::current_exception()); throw; }
 }
 
-void StateStore::queue_push_back(hash_type hash) { std::lock_guard lock(mutex_); state_queue_.push_back(hash); }
+void StateStore::queue_push_back(hash_type hash) {
+  std::lock_guard lock(mutex_);
+  QueueEntry entry;
+  entry.ss_hash = hash;
+  state_queue_.push_back(std::move(entry));
+}
+void StateStore::queue_push_back(hash_type hash, const hash_type (&ts_hash)[NP]) {
+  std::lock_guard lock(mutex_);
+  QueueEntry entry;
+  entry.ss_hash = hash;
+  entry.ts_known = true;
+  std::copy(std::begin(ts_hash), std::end(ts_hash), entry.ts_hash.begin());
+  state_queue_.push_back(std::move(entry));
+}
 void StateStore::queue_pop_front() { (void)queue_try_pop_front(); }
 hash_type StateStore::queue_try_pop_front() {
-  hash_type hash;
+  QueueEntry entry;
   { std::lock_guard lock(mutex_); if (state_queue_.empty()) return 0;
-    hash = state_queue_.front(); state_queue_.pop_front(); }
-  submit_prefetch_tasks(); return hash;
+    entry = std::move(state_queue_.front()); state_queue_.pop_front(); }
+  submit_prefetch_tasks(); return entry.ss_hash;
 }
 size_t StateStore::queue_size() const { std::lock_guard lock(mutex_); return state_queue_.size(); }
 void StateStore::queue_clear() { std::lock_guard lock(mutex_); state_queue_.clear(); }
 hash_type StateStore::queue_peek(size_t offset) const {
-  std::lock_guard lock(mutex_); return offset < state_queue_.size() ? state_queue_[offset] : 0;
+  std::lock_guard lock(mutex_); return offset < state_queue_.size() ? state_queue_[offset].ss_hash : 0;
 }
 void StateStore::disable_prefetch() { std::lock_guard lock(mutex_); config_.prefetch_window = 0; }
 void StateStore::enable_prefetch(int window) {
@@ -401,7 +414,7 @@ void StateStore::enable_prefetch(int window) {
 }
 void StateStore::submit_prefetch_tasks() {
   std::shared_lock lifecycle(lifecycle_mutex_);
-  std::vector<hash_type> candidates;
+  std::vector<QueueEntry> candidates;
   {
     std::lock_guard lock(mutex_);
     if (!initialized_ || stopping_ || shared_writes_ || config_.prefetch_threads == 0 || config_.warm_cache_size == 0) return;
@@ -410,15 +423,21 @@ void StateStore::submit_prefetch_tasks() {
     candidates.assign(state_queue_.begin(), state_queue_.begin() + count);
   }
   std::vector<hash_type> hashes;
-  for (auto hash : candidates) {
-    if (SysStateStore::instance().exists(hash)) {
+  for (const auto& entry : candidates) {
+    if (entry.ts_known) {
+      for (auto thread_hash : entry.ts_hash) if (thread_hash) hashes.push_back(thread_hash);
+      continue;
+    }
+    // Hash-only enqueue (tests/external callers): resolve the component hashes
+    // from metadata, preserving the historical fallback.
+    if (SysStateStore::instance().exists(entry.ss_hash)) {
       std::vector<uint8_t> data;
-      if (!SysStateStore::instance().load(hash, data)) throw std::runtime_error("prefetch metadata disappeared");
+      if (!SysStateStore::instance().load(entry.ss_hash, data)) throw std::runtime_error("prefetch metadata disappeared");
       sys_state state;
       std::istringstream stream(std::string(reinterpret_cast<const char *>(data.data()), data.size()));
       { cereal::BinaryInputArchive archive(stream); archive(state); }
       for (auto thread_hash : state.ts_hash) if (thread_hash) hashes.push_back(thread_hash);
-    } else hashes.push_back(hash);
+    } else hashes.push_back(entry.ss_hash);
   }
   std::lock_guard lock(mutex_); check_ready();
   for (auto hash : hashes) {

@@ -106,3 +106,31 @@ python3 examples/redisraft/serial_benchmark.py --seconds 30 --binary PATH_TO_RAF
 30秒采样、prefix-tree/tree及long-summary。已核实驱动exit0、采样与状态树计数
 一致，所有本次目标进程已由驱动关闭。此结果支持约758/s的基线，**不支持1000/s
 目标已经达成**。
+
+## 第一项优化：队列携带预取组件引用
+
+BFS入队时已有 `ts_hash[NP]`，现在把这些值复制到队列项中。预取仍查看原来的
+lookahead窗口，直接使用这些组件引用；不再为每个候选重新加载和解码sys_state。
+保留hash-only接口原来的元数据解析路径。新增引用仅是预取提示，实际出队仍加载
+并验证权威元数据，不改变状态身份、FIFO或调度动作。
+
+NP=3每个队列项从8字节增长至40字节；在长测约3.5万项的frontier上，额外约1.1MiB。
+这是避免重复解码的明确空间取舍，不是把frontier快照全部常驻。
+
+- 新的 `queue_hints` 回归经实际 `state_queue_append` 路径验证：零额外元数据load，
+  冷预取字节/FIFO、入队后源对象变化不污染队列、混合hash-only入口、零引用、
+  清空及重开、错误key的元数据在真实extract时仍被拒绝。
+- 把生产入队改回旧hash-only调用时，回归因 `known hints: metadata was loaded` 失败；
+  恢复后 `make -j4 check-store-cache NP=1 CC=/usr/bin/gcc CXX=/usr/bin/g++` 的12项通过。
+- NP=3生产构建通过。初次60.035851秒无perf采样BFS：48884次访问，
+  **814.246807 visits/s**；全新保存身份约459.18/s。相对旧60秒基线约+8.54%，
+  相对旧552.5秒基线约+7.40%。这是初测，不能把不同窗口当作最终配对性能结论。
+- 结果：`build/serial-bfs-700/run-9mbcg7dr/`；冻结程序 `tracer-prefetch`。
+  红/绿日志和边界说明在 `prefetch-notes.md`、`red.log`、`green.log`。
+
+实际BFS/DFS actor/choice/pending/timeout回归28行通过（full/pages），
+`python3 tests/native_search_actors.py --tracer build/serial-bfs-700/tracer-prefetch-np1`，
+结果在 `build/native-search-actors/run-k03cqwst/`。`make check CC=/usr/bin/gcc
+CXX=/usr/bin/g++` 也通过，包括14项构建契约和5项案例目录检查。
+仍需更长/重复性能测量。新目标1000 visits/s尚未达到；下一步以profile为依据
+削减不必要的状态复制和表达式类型处理。
