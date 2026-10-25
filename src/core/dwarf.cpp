@@ -5,6 +5,7 @@
 #include "debug.h"
 #include "dwarf_info.h"
 #include "expr_ast.hpp"
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <dwarf.h>
@@ -110,6 +111,20 @@ bool dwarf_main_image_contains(uint64_t address) {
   return false;
 }
 static int elf_symbols_loaded_for_pid = -1;
+
+/* Symbol/type invalidation epoch. The service is serial-control-thread state;
+ * the atomic only lets observation code read the epoch safely. */
+static std::atomic<uint64_t> symbol_generation{0};
+
+static void mark_symbol_change()
+{
+  symbol_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
+uint64_t dwarf_symbol_generation(void)
+{
+  return symbol_generation.load(std::memory_order_acquire);
+}
 
 /* Forward declarations for ELF symbol handling */
 static void load_elf_symbols(const char *executable);
@@ -295,6 +310,7 @@ static void cache_type_info(Dwarf_Debug dbg, const std::string &name,
   parse_type_info(dbg, type_die, info);
   if (!info.name.empty())
   {
+    mark_symbol_change();
     type_cache[info.name] = info;
   }
 }
@@ -341,6 +357,7 @@ static void parse_type_info(Dwarf_Debug dbg, Dwarf_Die type_die,
       /* Cache the struct type for later lookup */
       if (!info.name.empty())
       {
+        mark_symbol_change();
         type_cache[info.name] = info;
       }
       break;
@@ -656,6 +673,7 @@ static void cache_type_by_name(Dwarf_Debug dbg, const std::string &name)
   {
     type_info info;
     parse_type_info(dbg, die, info);
+    mark_symbol_change();
     type_cache[name] = info;
     dwarf_dealloc_die(die);
   }
@@ -705,11 +723,9 @@ static bool get_variable_address(Dwarf_Debug dbg, Dwarf_Die die,
 
 void dwarf_init(const char *executable)
 {
-  ExprCache::instance().clear();
-  if (dbg != nullptr)
-  {
-    dwarf_cleanup();
-  }
+  // Invalidate the previous context even when dbg is null. Otherwise a failed or
+  // partial init can leave a negative size/type entry that outlives this load.
+  dwarf_cleanup();
 
   dwarf_fd = open(executable, O_RDONLY);
   if (dwarf_fd < 0)
@@ -811,6 +827,7 @@ void dwarf_init(const char *executable)
 
 void dwarf_cleanup(void)
 {
+  mark_symbol_change();
   ExprCache::instance().clear();
   if (dbg != nullptr)
   {
@@ -833,6 +850,9 @@ void dwarf_cleanup(void)
   current_elf_fixed = false;
   current_elf_ranges.clear();
   elf_symbols_loaded_for_pid = -1;
+  DwarfLocalCache::instance().clear();
+  current_frame_id = 0;
+  current_stack_trace.clear();
 }
 
 /* Legacy compatibility wrapper */
@@ -850,28 +870,8 @@ void init_dwarf(void)
 
 void cleanup_dwarf(void)
 {
-  /* Close dwarf debug handle */
-  if (dbg)
-  {
-    dwarf_finish(dbg);
-    dbg = nullptr;
-  }
-
-  /* Close file descriptor */
-  if (dwarf_fd >= 0)
-  {
-    close(dwarf_fd);
-    dwarf_fd = -1;
-  }
-
-  /* Clear all caches */
-  global_vars.clear();
-  type_cache.clear();
-  type_index.clear();
-  resolving_types.clear();
-  type_size_cache.clear();
-  member_offset_cache.clear();
-  elf_library_cache.clear();
+  // One cleanup path: also clears ELF identity and local/frame caches.
+  dwarf_cleanup();
 }
 
 /* ==================================================================
@@ -1052,6 +1052,7 @@ static void load_symbols_from_file(const char *path, uintptr_t base_addr)
   /* Store in global cache */
   if (!lib_syms.symbols.empty())
   {
+    mark_symbol_change();
     elf_library_cache[path] = std::move(lib_syms);
     LOG_INFO("ELF: Loaded %zu symbols from %s (base=0x%lx)",
              elf_library_cache[path].symbols.size(), path, base_addr);
@@ -1061,6 +1062,7 @@ static void load_symbols_from_file(const char *path, uintptr_t base_addr)
 /* Load symbols from main executable */
 static void load_elf_symbols(const char *executable)
 {
+  mark_symbol_change();
   if (elf_version(EV_CURRENT) == EV_NONE)
   {
     LOG_ERROR("ELF library initialization failed");
@@ -1100,6 +1102,7 @@ static void load_elf_symbols(const char *executable)
 /* Load symbols from all shared libraries mapped in process */
 static void load_shared_library_symbols(int pid)
 {
+  mark_symbol_change();
   auto libraries = parse_proc_maps(pid);
 
   for (const auto &[path, base_addr] : libraries)
@@ -1355,6 +1358,7 @@ const type_info &dwarf_get_type_info(const char *type_name)
     ptr_info.size = 8;
     ptr_info.is_struct = false;
     ptr_info.is_array = false;
+    mark_symbol_change();
     type_cache[type_name] = std::move(ptr_info);
     return type_cache.find(type_name)->second;
   }
@@ -1412,6 +1416,7 @@ size_t dwarf_type_size(const char *type_name)
   }
 
   type_info info = dwarf_get_type_info(type_name);
+  mark_symbol_change();
   type_size_cache[key] = info.size;
   return info.size;
 }
@@ -1446,6 +1451,7 @@ ptrdiff_t dwarf_member_offset(const char *struct_type, const char *member)
   {
     if (m.name == member)
     {
+      mark_symbol_change();
       member_offset_cache[struct_key][member_key] = m.offset;
       return m.offset;
     }

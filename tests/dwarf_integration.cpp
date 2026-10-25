@@ -6,10 +6,12 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <unistd.h>
 
 // The executable entry point owns the UI accessor; all runtime state and DWARF
 // behavior below are linked from the production objects.
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui() { return nullptr; }
+extern void cleanup_dwarf();
 
 static void require(bool condition, const char *message)
 {
@@ -104,5 +106,110 @@ int main(int argc, char **argv)
       dwarf_cleanup();
     }
   }
+
+  // Symbol generation: lifecycle changes invalidate; cache hits stay stable.
+  const uint64_t generation_before_init = dwarf_symbol_generation();
+  dwarf_init(argv[1]);
+  require(dwarf_symbol_generation() != generation_before_init,
+          "init did not change symbol generation");
+
+  const uint64_t generation_before_size = dwarf_symbol_generation();
+  require(dwarf_type_size("FixtureOther") == sizeof(FixtureOther),
+          "size-cache insertion lookup");
+  require(dwarf_symbol_generation() != generation_before_size,
+          "size-cache insertion did not change symbol generation");
+  const uint64_t generation_after_size = dwarf_symbol_generation();
+  require(dwarf_type_size("FixtureOther") == sizeof(FixtureOther),
+          "size-cache hit lookup");
+  require(dwarf_symbol_generation() == generation_after_size,
+          "size-cache hit changed symbol generation");
+
+  const uint64_t generation_before_member = dwarf_symbol_generation();
+  require(dwarf_member_offset("FixtureOther", "flag") ==
+              offsetof(FixtureOther, flag),
+          "member-cache insertion lookup");
+  require(dwarf_symbol_generation() != generation_before_member,
+          "member-cache insertion did not change symbol generation");
+  const uint64_t generation_after_member = dwarf_symbol_generation();
+  require(dwarf_member_offset("FixtureOther", "flag") ==
+              offsetof(FixtureOther, flag),
+          "member-cache hit lookup");
+  require(dwarf_symbol_generation() == generation_after_member,
+          "member-cache hit changed symbol generation");
+
+  const uint64_t generation_before_known = dwarf_symbol_generation();
+  require(dwarf_get_type_info("FixtureOther").size == sizeof(FixtureOther),
+          "known type lookup");
+  require(dwarf_type_size("FixtureOther") == sizeof(FixtureOther),
+          "known size lookup");
+  require(dwarf_member_offset("FixtureOther", "flag") ==
+              offsetof(FixtureOther, flag),
+          "known member lookup");
+  require(dwarf_symbol_generation() == generation_before_known,
+          "known-type cache hits changed symbol generation");
+
+  const uint64_t generation_before_lazy = dwarf_symbol_generation();
+  require(dwarf_type_size("LazyProbeType *") == sizeof(void *),
+          "synthetic pointer type size");
+  require(dwarf_symbol_generation() != generation_before_lazy,
+          "lazy type insertion did not change symbol generation");
+  const uint64_t generation_after_lazy = dwarf_symbol_generation();
+  require(dwarf_type_size("LazyProbeType *") == sizeof(void *),
+          "synthetic pointer type hit");
+  require(dwarf_symbol_generation() == generation_after_lazy,
+          "lazy type cache hit changed symbol generation");
+
+  const uint64_t generation_before_reinit = dwarf_symbol_generation();
+  dwarf_init(argv[2]);
+  require(dwarf_symbol_generation() != generation_before_reinit,
+          "reinit did not change symbol generation");
+  const uint64_t generation_before_cleanup = dwarf_symbol_generation();
+  dwarf_cleanup();
+  require(dwarf_symbol_generation() != generation_before_cleanup,
+          "cleanup did not change symbol generation");
+  require(dwarf_get_global_addr("fixture_record") == 0,
+          "cleanup clears generation symbols");
+
+  dwarf_init(argv[1]);
+  const uint64_t generation_before_legacy = dwarf_symbol_generation();
+  cleanup_dwarf();
+  require(dwarf_symbol_generation() != generation_before_legacy,
+          "legacy cleanup did not change symbol generation");
+  require(dwarf_executable_path().empty(),
+          "legacy cleanup left executable identity");
+  require(dwarf_get_global_addr("fixture_record") == 0,
+          "legacy cleanup clears symbols");
+
+  const uint64_t generation_before_failure = dwarf_symbol_generation();
+  dwarf_init("/nonexistent/detsim-dwarf-fixture");
+  require(dwarf_symbol_generation() != generation_before_failure,
+          "failed init did not change symbol generation");
+  require(dwarf_executable_path().empty(),
+          "failed init left executable identity");
+  require(dwarf_get_global_addr("fixture_record") == 0,
+          "failed init left stale symbols");
+  require(dwarf_type_size("FixtureRecord") == 0,
+          "failed init left a stale type");
+  dwarf_init(argv[1]);
+  require(dwarf_type_size("FixtureRecord") == sizeof(FixtureRecord),
+          "failed init left negative size cache");
+
+  const uint64_t generation_before_shared = dwarf_symbol_generation();
+  dwarf_load_shared_library_symbols(getpid());
+  require(dwarf_symbol_generation() != generation_before_shared,
+          "shared symbol load did not change symbol generation");
+  const uint64_t generation_after_shared = dwarf_symbol_generation();
+  dwarf_load_shared_library_symbols(getpid());
+  require(dwarf_symbol_generation() == generation_after_shared,
+          "repeated shared symbol load changed symbol generation");
+  dwarf_cleanup();
+
+  // A zero-size lookup while no parser is loaded must not outlive dwarf_init().
+  require(dwarf_type_size("FixtureRecord") == 0,
+          "missing type before fixture load");
+  dwarf_init(argv[1]);
+  require(dwarf_type_size("FixtureRecord") == sizeof(FixtureRecord),
+          "negative size cache survived reinitialization");
+  dwarf_cleanup();
   std::puts("DWARF 4/5 multi-CU production parser regression passed");
 }

@@ -86,6 +86,12 @@ bool dwarf_main_image_contains(uint64_t address);
 /* Cleanup DWARF resources */
 void dwarf_cleanup(void);
 
+/* Monotonic epoch for symbol/type meaning. It changes on init, cleanup, ELF
+ * loads, and materialized type/size/member cache entries; cache hits leave it
+ * unchanged. Atomicity only makes the epoch readable across threads; the
+ * symbol service itself remains serial-control-thread state. */
+uint64_t dwarf_symbol_generation(void);
+
 /* Legacy compatibility wrapper - uses tracee[0].executable */
 void init_dwarf(void);
 
