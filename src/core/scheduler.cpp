@@ -806,18 +806,18 @@ int exec_bfs()
   g_states_new = 0;
   g_queue_size = 0;
 
-  sys_state s = ptmc_state.running_state;
+  const auto& initial = ptmc_state.running_state;
   std::unordered_set<hash_type> queued;
-  queued.insert(s.ss_hash);
+  queued.insert(initial.ss_hash);
   StateStore::instance().queue_clear();
   state_queue_append(ptmc_state.running_state);
 
   /* Check if this is a new state or was already in state_set */
-  if (!state_set.count(s.ss_hash))
+  if (!state_set.count(initial.ss_hash))
   {
     states_new_this_run++;
   }
-  state_set.emplace(s.ss_hash);
+  state_set.emplace(initial.ss_hash);
   states_searched_this_run++;
 
   /* Update global stats */
@@ -880,7 +880,7 @@ int exec_bfs()
       std::vector<int> choices;
       do
       {
-      s = state_fetched.value();
+      const auto& s = state_fetched.value();
       for (int j = 0; j < NP; j++)
         ptmc_state.status[j] = s.status[j];
 

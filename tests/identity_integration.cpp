@@ -6,6 +6,7 @@
 #include "state/sysstate_store.h"
 #include "state/page_snapshot.h"
 #include "cereal/archives/binary.hpp"
+#include "utils.h"
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -96,6 +97,33 @@ int main()
     original.status[0] = original.status[1] = dstatus_exit(0);
     original.error_bound = 5;
     auto ordered = original.identity_hash();
+    const auto legacy_identity = [](const sys_state& state) {
+      std::ostringstream encoded;
+      { cereal::BinaryOutputArchive archive(encoded);
+        const uint32_t domain=0x44535335, nodes=NP;
+        archive(domain,nodes,state); }
+      const auto bytes=encoded.str();
+      return XXHash64::hash(bytes.data(),bytes.size());
+    };
+    const auto check_legacy_encoding = [&](sys_state state) {
+      std::ostringstream payload;
+      { cereal::BinaryOutputArchive archive(payload); archive(state); }
+      const auto expected=payload.str();
+      const auto key=legacy_identity(state);
+      require(state.identity_hash()==key,"identity changed from legacy encoding");
+      state.commit_metadata();
+      std::vector<uint8_t> actual;
+      require(state.ss_hash==key && SysStateStore::instance().load(key,actual) &&
+              std::string(actual.begin(),actual.end())==expected,
+              "commit changed legacy hash or persisted archive bytes");
+    };
+    auto encoding_fixture=original;
+    encoding_fixture.error_bound=417;
+    check_legacy_encoding(encoding_fixture);
+    encoding_fixture.model_identity=std::string("model\0context",13);
+    encoding_fixture.monitor_states["encoding-monitor"]={0,1,255,0,42};
+    encoding_fixture.property_failed=true;
+    check_legacy_encoding(encoding_fixture);
     auto swapped = original;
     std::swap(swapped.ts_hash[0], swapped.ts_hash[1]);
     require(swapped.identity_hash() != ordered, "node order disappeared from identity");

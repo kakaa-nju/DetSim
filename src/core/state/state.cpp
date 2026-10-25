@@ -16,6 +16,8 @@
 #include "resident_memory.h"
 #include <stdexcept>
 #include <climits>
+#include <charconv>
+#include <string_view>
 #include "cereal/archives/binary.hpp"
 #include "config.h"
 #include "debug.h"
@@ -216,59 +218,74 @@ sys_state::sys_state(const struct syscall_info info[][MAX_THREADS_PER_PROCESS],
     ts_hash[j] = child[j].save_stopped(ptmc_state.pids[j], comparison_hash);
     if (!ts_hash[j]) throw std::runtime_error("Failed to capture tracee state");
   }
-  ss_hash = identity_hash();
+  if (persist) commit_metadata();
+  else ss_hash = identity_hash();
   LOG_DEBUG("Create sstate " HASH_FORMAT, ss_hash);
-  if (persist) save_metadata();
-}
-
-void sys_state::commit_metadata()
-{
-  ss_hash = identity_hash();
-  save_metadata();
 }
 
 /* ======================================================================
  * Section 4: State Persistence (save/load to disk)
  * ====================================================================== */
 
-hash_type sys_state::identity_hash() const
+namespace {
+// The stored archive is the suffix of the identity encoding. Binary cereal
+// writes these two uint32_t values verbatim before the unchanged state archive.
+constexpr size_t system_identity_prefix_size = 2 * sizeof(uint32_t);
+std::string encode_system_identity(const sys_state& state)
 {
   std::ostringstream encoded;
   {
     cereal::BinaryOutputArchive archive(encoded);
-    const uint32_t domain = 0x44535335; // DSS5: ordered machine/monitor/model product state
+    const uint32_t domain = 0x44535335;
     const uint32_t nodes = NP;
-    archive(domain, nodes, *this);
+    archive(domain, nodes, state);
   }
-  const std::string bytes = encoded.str();
+  return std::move(encoded).str();
+}
+
+hash_type system_identity_key(std::string_view bytes)
+{
   const hash_type result = XXHash64::hash(bytes.data(), bytes.size());
   if (result == 0)
     throw std::runtime_error("Reserved zero system-state identity");
   return result;
 }
 
-int sys_state::save_metadata() const
+int persist_system_metadata(hash_type key, const std::string& encoded)
 {
-  if (ss_hash != identity_hash())
-    throw std::runtime_error("System-state metadata does not match its identity");
-  std::ostringstream encoded;
-  {
-    cereal::BinaryOutputArchive archive(encoded);
-    archive(*this);
-  }
-  const std::string bytes = encoded.str();
-  const std::vector<uint8_t> data(bytes.begin(), bytes.end());
-  auto &store = SysStateStore::instance();
-  if (store.exists(ss_hash))
+  const std::vector<uint8_t> data(encoded.begin() + system_identity_prefix_size, encoded.end());
+  auto& store = SysStateStore::instance();
+  if (store.exists(key))
   {
     std::vector<uint8_t> previous;
-    if (!store.load(ss_hash, previous) || previous != data)
+    if (!store.load(key, previous) || previous != data)
       throw std::runtime_error("System-state identity collision or corrupt metadata");
     return 0;
   }
-  if (!store.save(ss_hash, data))
+  if (!store.save(key, data))
     throw std::runtime_error("Failed to persist system-state metadata");
   return 1;
+}
+} // namespace
+
+hash_type sys_state::identity_hash() const
+{
+  return system_identity_key(encode_system_identity(*this));
+}
+
+void sys_state::commit_metadata()
+{
+  const auto encoded = encode_system_identity(*this);
+  ss_hash = system_identity_key(encoded);
+  persist_system_metadata(ss_hash, encoded);
+}
+
+int sys_state::save_metadata() const
+{
+  const auto encoded = encode_system_identity(*this);
+  if (ss_hash != system_identity_key(encoded))
+    throw std::runtime_error("System-state metadata does not match its identity");
+  return persist_system_metadata(ss_hash, encoded);
 }
 
 /* ======================================================================
@@ -493,6 +510,58 @@ static void require_no_process_rseq(pid_t pid)
   for (pid_t tid : threads) require_no_rseq(tid);
 }
 
+namespace {
+bool parse_mapping_line(std::string_view line, maps_item& item)
+{
+  // Saved text is length-delimited; match the old C parser's NUL boundary.
+  line = line.substr(0, line.find('\0'));
+  const char* cursor = line.data();
+  const char* end = cursor + line.size();
+  const auto space = [](char c) { return c == ' ' || (c >= '\t' && c <= '\r'); };
+  const auto skip_space = [&] { while (cursor != end && space(*cursor)) ++cursor; };
+  const auto number = [&](auto& value, int base) {
+    skip_space();
+    bool negative = false;
+    if (cursor != end && (*cursor == '+' || *cursor == '-')) negative = *cursor++ == '-';
+    if (base == 16 && end - cursor >= 2 && cursor[0] == '0' &&
+        (cursor[1] == 'x' || cursor[1] == 'X')) cursor += 2;
+    const auto parsed = std::from_chars(cursor, end, value, base);
+    if (parsed.ec != std::errc{}) return false;
+    cursor = parsed.ptr;
+    if (negative) value = 0 - value; // Preserve scanf's unsigned sign conversion.
+    return true;
+  };
+  if (!number(item.start, 16) || cursor == end || *cursor++ != '-' ||
+      !number(item.end, 16)) return false;
+  skip_space();
+  size_t flags = 0;
+  while (cursor != end && !space(*cursor) && flags < sizeof(item.flags) - 1)
+    item.flags[flags++] = *cursor++;
+  item.flags[flags] = '\0';
+  if (!flags || !number(item.offset, 16) || !number(item.a, 16) ||
+      cursor == end || *cursor++ != ':' || !number(item.b, 16) ||
+      !number(item.inode, 10) || item.end <= item.start) return false;
+  skip_space();
+  size_t name = 0;
+  while (cursor != end && !space(*cursor) && name < sizeof(item.name) - 1)
+    item.name[name++] = *cursor++;
+  item.name[name] = '\0'; // Keep the existing first-token, width-limited name contract.
+  return true;
+}
+void parse_mapping_text(std::string_view text, std::vector<maps_item>& items)
+{
+  while (!text.empty()) {
+    const auto newline = text.find('\n');
+    maps_item item{};
+    if (!parse_mapping_line(text.substr(0, newline), item))
+      throw std::runtime_error("Invalid saved memory mapping text");
+    items.push_back(item);
+    if (newline == std::string_view::npos) break;
+    text.remove_prefix(newline + 1);
+  }
+}
+}
+
 void tracee_state::restore_memory_mappings(
     hash_type ts_hash, int pid, std::vector<maps_item> &maps_out) const
 {
@@ -500,16 +569,7 @@ void tracee_state::restore_memory_mappings(
   require_no_process_rseq(pid);
   const auto snapshot = SnapshotView::open(ts_hash);
   std::vector<maps_item> maps_saved;
-  std::istringstream encoded(std::string(snapshot->maps_text()));
-  std::string line;
-  while (std::getline(encoded, line)) {
-    maps_item item{};
-    if (sscanf(line.c_str(), "%lx-%lx %4s %lx %x:%x %lu %511s",
-               &item.start, &item.end, item.flags, &item.offset, &item.a, &item.b,
-               &item.inode, item.name) < 7 || item.end <= item.start)
-      throw std::runtime_error("Invalid saved memory mapping text");
-    maps_saved.push_back(item);
-  }
+  parse_mapping_text(snapshot->maps_text(), maps_saved);
 
   if (maps_saved.empty())
     throw std::runtime_error("Snapshot contains no memory mappings");
@@ -1139,16 +1199,7 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
   std::vector<maps_item> parsed_maps;
   const auto resident = detsim::resident::get(pid);
   if (resident.snapshot) {
-    std::istringstream input(std::string(resident.snapshot->maps_text()));
-    std::string line;
-    while (std::getline(input, line)) {
-      maps_item item{};
-      if (sscanf(line.c_str(), "%lx-%lx %4s %lx %x:%x %lu %511s",
-                 &item.start, &item.end, item.flags, &item.offset, &item.a, &item.b,
-                 &item.inode, item.name) < 7 || item.end <= item.start)
-        throw std::runtime_error("Invalid resident mapping record");
-      parsed_maps.push_back(item);
-    }
+    parse_mapping_text(resident.snapshot->maps_text(), parsed_maps);
   } else {
     auto maps_fp = fileutils::open_cfile(fmt::format("/proc/{}/maps", pid), "r");
     if (!maps_fp) throw std::runtime_error("Cannot open tracee memory mappings for capture");
@@ -1556,13 +1607,8 @@ void get_maps_item(std::vector<maps_item> &items, FILE *maps)
   while (fgets(line, sizeof(line), maps) != NULL)
   {
     maps_item item{};
-    /* Use width-limited format specifiers to prevent buffer overflow */
-    if (sscanf(line, "%lx-%lx %4s %lx %x:%x %lu %511s", &item.start, &item.end,
-               item.flags, &item.offset, &item.a, &item.b, &item.inode,
-               item.name) >= 7)
+    if (parse_mapping_line(line, item))
     {
-      if (item.end <= item.start)
-        throw std::runtime_error("Invalid memory mapping extent");
       items.emplace_back(item);
     }
     else

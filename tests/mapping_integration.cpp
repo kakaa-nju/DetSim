@@ -98,6 +98,13 @@ static void check_mapping_parser()
         try { (void)parse(invalid); } catch (const std::runtime_error&) { rejected = true; }
         require(rejected, "malformed mapping must fail explicitly");
     }
+    for (const char* overflow : {"10000000000000000-2 rw-p 0 00:00 0\n",
+            "1-2 rw-p 10000000000000000 00:00 0\n", "1-2 rw-p 0 100000000:00 0\n",
+            "1-2 rw-p 0 00:00 18446744073709551616\n"}) {
+        bool rejected = false;
+        try { (void)parse(overflow); } catch (const std::runtime_error&) { rejected = true; }
+        require(rejected, "mapping numeric overflow must fail explicitly");
+    }
 
 }
 static int protection(pid_t pid, uintptr_t address)
