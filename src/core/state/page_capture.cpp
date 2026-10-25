@@ -72,10 +72,11 @@ hash_type save_paged_snapshot(pid_t pid, const std::vector<RegionInfo>& regions,
     auto& store=StateStore::instance();
     auto& work=scratch[pid];
     if (work.generation!=store.generation()) {work=Scratch{};work.generation=store.generation();}
-    size_t total=0;
+    size_t total=0, page_count=0;
     for (const auto& r:regions) {
         if (r.end<=r.start || r.end-r.start>SIZE_MAX-total) throw std::runtime_error("Page capture extent overflow");
         total+=r.end-r.start;
+        page_count += (r.end - 1) / 4096 - r.start / 4096 + 1;
     }
     auto check_oracle = [&](hash_type root) {
         std::vector<uint8_t> oracle(total);
@@ -125,6 +126,7 @@ hash_type save_paged_snapshot(pid_t pid, const std::vector<RegionInfo>& regions,
     }
     work.memory.resize(total);
     std::vector<detsim::experiment::Region> reads;
+    reads.reserve(regions.size());
     const auto read_only = detsim::resident::get_read_only(pid);
     std::vector<uint8_t> protected_regions(regions.size(), 0);
     size_t protected_size = 0;
@@ -165,6 +167,10 @@ hash_type save_paged_snapshot(pid_t pid, const std::vector<RegionInfo>& regions,
     std::vector<RegionInfo> descriptors=regions;
     std::vector<PageRef> refs;
     std::vector<SavedPage> next;
+    // Count current chunks, including unaligned endpoints, rather than retaining
+    // a former large layout's capacity after mappings shrink.
+    refs.reserve(page_count);
+    next.reserve(page_count);
     offset=0;
     for (size_t region_index = 0; region_index < descriptors.size(); ++region_index) {
         auto& r = descriptors[region_index];

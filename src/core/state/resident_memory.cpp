@@ -216,18 +216,23 @@ void publish(pid_t pid, uint64_t root, uint64_t brk) {
     if (entry.pid == pid && entry.image.root == root &&
         entry.generation == StateStore::instance().generation()) return;
     std::shared_ptr<const Image::Pages> pages;
-    if (entry.image.snapshot && snapshot->format_version() == PAGE_SNAPSHOT_VERSION &&
-        entry.image.snapshot->format_version() == PAGE_SNAPSHOT_VERSION) {
-        const auto before = entry.image.snapshot->page_references();
+    // Live authority can expire while the immutable saved objects remain valid.
+    // Reuse their index only after opening the new root and comparing all page
+    // references and geometry; this does not skip capture or restore validation.
+    const auto& hint = entry.object_hint;
+    if (hint.snapshot && snapshot->format_version() == PAGE_SNAPSHOT_VERSION &&
+        hint.snapshot->format_version() == PAGE_SNAPSHOT_VERSION) {
+        const auto before = hint.snapshot->page_references();
         const auto after = snapshot->page_references();
-        if (before.size() == after.size() && same_geometry(*entry.image.snapshot, *snapshot) &&
-            (before.empty() || !std::memcmp(before.data(), after.data(), before.size_bytes()))) pages = entry.image.pages;
+        if (before.size() == after.size() && same_geometry(*hint.snapshot, *snapshot) &&
+            (before.empty() || !std::memcmp(before.data(), after.data(), before.size_bytes()))) pages = hint.pages;
     }
     if (!pages) {
         auto loaded = std::make_shared<Image::Pages>();
         const auto refs = snapshot->format_version() == PAGE_SNAPSHOT_VERSION ?
             snapshot->page_references() : std::span<const PageRef>{};
-        const auto& hint = entry.object_hint;
+        loaded->offsets.reserve(snapshot->regions().size());
+        loaded->values.reserve(refs.size());
         const bool matching_geometry = hint.snapshot &&
             hint.snapshot->format_version() == PAGE_SNAPSHOT_VERSION && !refs.empty() &&
             same_geometry(*hint.snapshot, *snapshot);

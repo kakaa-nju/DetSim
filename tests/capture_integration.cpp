@@ -293,6 +293,18 @@ int main(int argc, char**)
             sys_state page_source(info, &source);
             ptmc_state.running_state = page_source;
             require(detsim::resident::get(children[1]).snapshot != nullptr, "missing resident capture proof");
+            {
+                const auto saved_image = detsim::resident::get(children[1]);
+                detsim::resident::invalidate(children[1]);
+                require(!detsim::resident::get(children[1]).snapshot,
+                        "page-index hint retained live memory authority");
+                sys_state recaptured(info, &page_source);
+                require(recaptured.ss_hash == page_source.ss_hash,
+                        "invalidated resident recapture changed identity");
+                require(detsim::resident::get(children[1]).pages == saved_image.pages,
+                        "identical saved page index rebuilt after live invalidation");
+                compare_full(recaptured);
+            }
             const auto ro_view = SnapshotView::open(page_source.ts_hash[1]);
             size_t ro_region = ro_view->regions().size();
             for (size_t index = 0; index < ro_view->regions().size(); ++index) {
