@@ -7,6 +7,7 @@
 #include "page_restore_stats.h"
 #include "page_snapshot.h"
 #include <fcntl.h>
+#include <array>
 #include <cstdio>
 #include <cerrno>
 #include <climits>
@@ -56,6 +57,13 @@ extern "C" uint64_t __wrap__Z17tracee_do_syscalliimmmmmm(int pid, int nr, uint64
     return __real__Z17tracee_do_syscalliimmmmmm(pid, nr, address, size, advice, a4, a5, a6);
 }
 static void require(bool ok, const char* message) { if (!ok) throw std::runtime_error(message); }
+struct CaptureLayoutMode {
+    explicit CaptureLayoutMode(const char* mode) {
+        if (mode) setenv("DETSIM_CAPTURE_LAYOUT_CACHE", mode, 1);
+        else unsetenv("DETSIM_CAPTURE_LAYOUT_CACHE");
+    }
+    ~CaptureLayoutMode() { unsetenv("DETSIM_CAPTURE_LAYOUT_CACHE"); }
+};
 static void check_mapping_parser()
 {
     const auto parse = [](const std::string& text) {
@@ -192,14 +200,18 @@ int main(int argc, char** argv)
             nul_snapshot[nul_header.maps_offset + permission + 1] = 0;
             const auto nul_hash = StateStore::instance().save(nul_snapshot.data(), nul_snapshot.size());
             const auto calls_before_nul = mapping_syscalls;
-            bool nul_rejected = false;
-            try {
-                std::vector<maps_item> nul_maps;
-                saved.restore_memory_mappings(nul_hash, child, nul_maps);
-            } catch (const std::runtime_error& error) {
-                nul_rejected = std::string(error.what()) == "Invalid saved memory mapping text";
+            for (const char* mode : std::array<const char*, 3>{nullptr, "on", "verify"}) {
+                CaptureLayoutMode layout_mode(mode);
+                bool nul_rejected = false;
+                try {
+                    std::vector<maps_item> nul_maps;
+                    saved.restore_memory_mappings(nul_hash, child, nul_maps);
+                } catch (const std::runtime_error& error) {
+                    nul_rejected = std::string(error.what()) == "Invalid saved memory mapping text";
+                }
+                require(nul_rejected, "embedded NUL in saved mandatory mapping must reject before kernel mapping changes");
             }
-            require(nul_rejected && mapping_syscalls == calls_before_nul,
+            require(mapping_syscalls == calls_before_nul,
                     "embedded NUL in saved mandatory mapping must reject before kernel mapping changes");
         }
         char* literal = static_cast<char*>(read_mem(child, hash, reinterpret_cast<uintptr_t>("read-only fixture"), 17));
@@ -603,21 +615,27 @@ int main(int argc, char** argv)
         restore();
         require(tracee_do_syscall(child, SYS_mprotect, reinterpret_cast<uintptr_t>(backed), 4096,
                                  PROT_NONE, 0, 0, 0) == 0, "file guard mutation");
-        bool file_guard_failed = false;
-        try { saved.save_full_state_to_state_store(child); }
-        catch (const std::runtime_error&) { file_guard_failed = true; }
-        require(file_guard_failed, "unreadable file mapping admitted by capture");
+        for (const char* mode : std::array<const char*, 3>{nullptr, "on", "verify"}) {
+            CaptureLayoutMode layout_mode(mode);
+            bool file_guard_failed = false;
+            try { saved.save_full_state_to_state_store(child); }
+            catch (const std::runtime_error&) { file_guard_failed = true; }
+            require(file_guard_failed, "unreadable file mapping admitted by capture");
+        }
         restore();
         // Extending the reserved injection VMA must not hide the extra guest page.
         require(tracee_do_syscall(child, SYS_mremap, scratch_page, 4096, 8192, 0, 0, 0) == scratch_page,
                 "extend scratch VMA");
         const auto saves_before_overlap = StateStore::instance().get_stats().save_calls;
-        bool overlap_failed = false;
-        try { saved.save_full_state_to_state_store(child); }
-        catch (const std::runtime_error& error) {
-            overlap_failed = std::string(error.what()).find("scratch") != std::string::npos;
+        for (const char* mode : std::array<const char*, 3>{nullptr, "on", "verify"}) {
+            CaptureLayoutMode layout_mode(mode);
+            bool overlap_failed = false;
+            try { saved.save_full_state_to_state_store(child); }
+            catch (const std::runtime_error& error) {
+                overlap_failed = std::string(error.what()).find("scratch") != std::string::npos;
+            }
+            require(overlap_failed, "expanded scratch VMA silently omitted guest memory");
         }
-        require(overlap_failed, "expanded scratch VMA silently omitted guest memory");
         require(StateStore::instance().get_stats().save_calls == saves_before_overlap,
                 "expanded scratch VMA published incomplete snapshot");
         bool overlap_restore_failed = false;
@@ -638,10 +656,13 @@ int main(int argc, char** argv)
         require(tracee_do_syscall(child, SYS_mmap, reinterpret_cast<uintptr_t>(page), 8192,
                                  PROT_READ | PROT_WRITE, MAP_FIXED | MAP_ANONYMOUS | MAP_SHARED,
                                  -1, 0) == reinterpret_cast<uintptr_t>(page), "shared mapping mutation");
-        bool shared_failed = false;
-        try { saved.save_full_state_to_state_store(child); }
-        catch (const std::runtime_error&) { shared_failed = true; }
-        require(shared_failed, "shared mapping accepted as isolated snapshot memory");
+        for (const char* mode : std::array<const char*, 3>{nullptr, "on", "verify"}) {
+            CaptureLayoutMode layout_mode(mode);
+            bool shared_failed = false;
+            try { saved.save_full_state_to_state_store(child); }
+            catch (const std::runtime_error&) { shared_failed = true; }
+            require(shared_failed, "shared mapping accepted as isolated snapshot memory");
+        }
         kill(child, SIGKILL); waitpid(child, nullptr, 0); child = -1;
         StateStore::instance().shutdown();
         munmap(page, 8192); munmap(sparse, sparse_size); munmap(backed, 4096); fclose(file);

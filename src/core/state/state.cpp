@@ -36,6 +36,8 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fmt/format.h>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <stack>
 #include <stdint.h>
@@ -433,15 +435,45 @@ sys_state::sys_state(hash_type hash) : sys_state()
   }
 }
 
-static bool excluded_mapping(const maps_item& item)
+struct CaptureLayoutContext {
+  uintptr_t scratch;
+  size_t page_size;
+
+  bool operator==(const CaptureLayoutContext& other) const
+  {
+    return scratch == other.scratch && page_size == other.page_size;
+  }
+};
+
+struct RegionToCapture {
+  uint64_t start, end;
+  size_t size;
+};
+
+// Immutable, text-derived capture layout. Shared with the opt-in cache; it
+// never contains kernel state, pid/store identity, or captured memory bytes.
+struct CaptureLayout {
+  std::vector<RegionInfo> regions;
+  std::vector<RegionToCapture> regions_to_capture;
+  size_t byte_count = 0;
+  std::string maps_text;
+};
+
+static bool excluded_mapping(const maps_item& item,
+                             const CaptureLayoutContext& context)
 {
-  if (item.start < scratch_page + PAGE_SIZE && scratch_page < item.end) {
-    if (item.start != scratch_page || item.end != scratch_page + PAGE_SIZE)
+  if (item.start < context.scratch + context.page_size && context.scratch < item.end) {
+    if (item.start != context.scratch || item.end != context.scratch + context.page_size)
       throw std::runtime_error("Unsupported mapping overlaps reserved scratch page");
     return true;
   }
   return !strncmp(item.name, "[vvar", 5) || !strcmp(item.name, "[vdso]") ||
          !strcmp(item.name, "[vsyscall]");
+}
+
+static bool excluded_mapping(const maps_item& item)
+{
+  return excluded_mapping(item, {scratch_page, PAGE_SIZE});
 }
 
 static int mapping_protection(const char* flags)
@@ -499,6 +531,243 @@ static bool same_backing(const maps_item& saved, const maps_item& live, uint64_t
   // Anonymous splits need no file-offset adjustment. File mappings do.
   return !saved.inode || uint64_t(saved.offset) + address - saved.start ==
                           uint64_t(live.offset) + address - live.start;
+}
+
+// The one pure layout builder: canonical merging, scratch/pseudo-mapping
+// exclusion, validation, text formatting and raw capture offsets. It depends
+// only on the parsed text and the fixed exclusion context it is given.
+static std::shared_ptr<const CaptureLayout> build_capture_layout(
+    const std::vector<maps_item>& parsed_maps,
+    const CaptureLayoutContext& context)
+{
+  // Kernel VMA partitions can change after mprotect without changing memory
+  // semantics. Store one canonical partition for adjacent equivalent ranges.
+  std::vector<maps_item> maps;
+  maps.reserve(parsed_maps.size());
+  for (const auto& item : parsed_maps) {
+    bool merge = false;
+    if (!maps.empty()) {
+      const auto& previous = maps.back();
+      merge = previous.end == item.start && !excluded_mapping(previous, context) &&
+              !excluded_mapping(item, context) && !strcmp(previous.flags, item.flags) &&
+              !strcmp(previous.name, item.name) && same_backing(previous, item, item.start);
+    }
+    if (merge) maps.back().end = item.end;
+    else maps.push_back(item);
+  }
+
+  CaptureLayout layout;
+  for (const auto& item : maps) {
+    layout.maps_text += fmt::format("{:x}-{:x} {} {:x} {:x}:{:x} {} {}\n", item.start,
+                            item.end, item.flags, item.offset, item.a, item.b,
+                            item.inode, item.name);
+    if (excluded_mapping(item, context)) continue;
+    const bool anonymous_guard = !strcmp(item.flags, "---p") &&
+                                 !item.inode && !item.name[0];
+    if (item.flags[3] != 'p' || (item.flags[0] != 'r' && !anonymous_guard))
+      throw std::runtime_error(fmt::format("Unsupported snapshot mapping {:x}-{:x} {} {}: requires private readable or anonymous PROT_NONE memory",
+                                         item.start, item.end, item.flags, item.name));
+    RegionInfo info{};
+    info.start = item.start; info.end = item.end;
+    info.prot = mapping_protection(item.flags);
+    memcpy(info.flags, item.flags, 5);
+    info.offset = layout.byte_count;
+    layout.regions.push_back(info);
+    layout.regions_to_capture.push_back({item.start, item.end, size_t(item.end - item.start)});
+    layout.byte_count += item.end - item.start;
+  }
+  return std::make_shared<const CaptureLayout>(std::move(layout));
+}
+
+enum class CaptureLayoutCacheMode { off, on, verify };
+
+// Bounded cache of pure text-derived layouts. Four entries are enough for the
+// stopped target and its adjacent transitions; admission caps keep pathological
+// maps text from retaining unbounded metadata.
+struct CaptureLayoutCache {
+  static constexpr size_t max_entries = 4;
+  static constexpr size_t max_key_bytes = 64 * 1024;
+  static constexpr size_t max_layout_bytes = 256 * 1024;
+
+  struct Entry {
+    std::string key;
+    CaptureLayoutContext context;
+    std::shared_ptr<const CaptureLayout> layout;
+  };
+
+  std::mutex mutex;
+  std::vector<Entry> entries; // most recently used first
+  uint64_t lookups = 0;
+  uint64_t hits = 0;
+  uint64_t misses = 0;
+  uint64_t builds = 0;
+  uint64_t admits = 0;
+  uint64_t evictions = 0;
+  uint64_t oversize = 0;
+  uint64_t verify_checks = 0;
+  uint64_t verify_mismatches = 0;
+};
+
+static CaptureLayoutCache& capture_layout_cache()
+{
+  static CaptureLayoutCache cache;
+  return cache;
+}
+
+static CaptureLayoutCacheMode capture_layout_cache_mode()
+{
+  const char* mode = getenv("DETSIM_CAPTURE_LAYOUT_CACHE");
+  if (!mode || !strcmp(mode, "off")) return CaptureLayoutCacheMode::off;
+  if (!strcmp(mode, "on")) return CaptureLayoutCacheMode::on;
+  if (!strcmp(mode, "verify")) return CaptureLayoutCacheMode::verify;
+  throw std::runtime_error("DETSIM_CAPTURE_LAYOUT_CACHE must be off, on or verify");
+}
+
+static size_t capture_layout_bytes(const CaptureLayout& layout)
+{
+  return layout.maps_text.size() + layout.regions.size() * sizeof(RegionInfo) +
+         layout.regions_to_capture.size() * sizeof(RegionToCapture);
+}
+
+static void note_capture_layout_build()
+{
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  ++cache.builds;
+}
+
+static void note_capture_layout_oversize()
+{
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  ++cache.oversize;
+}
+
+static std::shared_ptr<const CaptureLayout> build_capture_layout_counted(
+    const std::vector<maps_item>& parsed_maps,
+    const CaptureLayoutContext& context,
+    CaptureLayoutCacheMode mode)
+{
+  auto layout = build_capture_layout(parsed_maps, context);
+  if (mode != CaptureLayoutCacheMode::off) note_capture_layout_build();
+  return layout;
+}
+
+static std::shared_ptr<const CaptureLayout> find_capture_layout(
+    std::string_view key, const CaptureLayoutContext& context)
+{
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  ++cache.lookups;
+  for (auto it = cache.entries.begin(); it != cache.entries.end(); ++it) {
+    if (it->key != key || !(it->context == context)) continue;
+    ++cache.hits;
+    auto layout = it->layout;
+    if (it != cache.entries.begin()) {
+      auto entry = std::move(*it);
+      cache.entries.erase(it);
+      cache.entries.insert(cache.entries.begin(), std::move(entry));
+    }
+    return layout;
+  }
+  ++cache.misses;
+  return {};
+}
+
+static void admit_capture_layout(std::string_view key,
+                                 const std::shared_ptr<const CaptureLayout>& layout,
+                                 const CaptureLayoutContext& context)
+{
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  if (key.size() > CaptureLayoutCache::max_key_bytes ||
+      capture_layout_bytes(*layout) > CaptureLayoutCache::max_layout_bytes) {
+    ++cache.oversize;
+    return;
+  }
+  for (auto it = cache.entries.begin(); it != cache.entries.end(); ++it) {
+    if (it->key != key || !(it->context == context)) continue;
+    it->layout = layout;
+    if (it != cache.entries.begin()) {
+      auto entry = std::move(*it);
+      cache.entries.erase(it);
+      cache.entries.insert(cache.entries.begin(), std::move(entry));
+    }
+    return;
+  }
+  if (cache.entries.size() >= CaptureLayoutCache::max_entries) {
+    cache.entries.pop_back();
+    ++cache.evictions;
+  }
+  cache.entries.insert(cache.entries.begin(),
+                       {std::string(key), context, layout});
+  ++cache.admits;
+}
+
+static bool same_capture_layout(const CaptureLayout& left, const CaptureLayout& right)
+{
+  if (left.byte_count != right.byte_count || left.maps_text != right.maps_text ||
+      left.regions.size() != right.regions.size() ||
+      left.regions_to_capture.size() != right.regions_to_capture.size())
+    return false;
+  for (size_t i = 0; i < left.regions.size(); ++i) {
+    const auto& a = left.regions[i];
+    const auto& b = right.regions[i];
+    if (a.start != b.start || a.end != b.end || a.offset != b.offset ||
+        a.prot != b.prot || memcmp(a.flags, b.flags, sizeof a.flags))
+      return false;
+  }
+  for (size_t i = 0; i < left.regions_to_capture.size(); ++i) {
+    const auto& a = left.regions_to_capture[i];
+    const auto& b = right.regions_to_capture[i];
+    if (a.start != b.start || a.end != b.end || a.size != b.size) return false;
+  }
+  return true;
+}
+
+static void verify_capture_layout(const CaptureLayout& cached,
+                                  const CaptureLayout& rebuilt)
+{
+  const bool equal = same_capture_layout(cached, rebuilt);
+  auto& cache = capture_layout_cache();
+  {
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    ++cache.verify_checks;
+    if (!equal) ++cache.verify_mismatches;
+  }
+  if (!equal) throw std::runtime_error("Capture layout cache verification mismatch");
+}
+
+// Test-facing diagnostics; the counters stay bounded and independent of the
+// cached layout contents.
+namespace detsim {
+CaptureLayoutCacheStats capture_layout_cache_stats()
+{
+  CaptureLayoutCacheStats stats;
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  stats.lookups = cache.lookups;
+  stats.hits = cache.hits;
+  stats.misses = cache.misses;
+  stats.builds = cache.builds;
+  stats.admits = cache.admits;
+  stats.evictions = cache.evictions;
+  stats.oversize = cache.oversize;
+  stats.verify_checks = cache.verify_checks;
+  stats.verify_mismatches = cache.verify_mismatches;
+  stats.entries = cache.entries.size();
+  return stats;
+}
+
+void clear_capture_layout_cache()
+{
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  cache.entries.clear();
+  cache.lookups = cache.hits = cache.misses = cache.builds = 0;
+  cache.admits = cache.evictions = cache.oversize = 0;
+  cache.verify_checks = cache.verify_mismatches = 0;
+}
 }
 
 // Public low-level restore APIs may bypass the owned-carrier barrier. Their
@@ -1196,58 +1465,50 @@ hash_type tracee_state::save_full_state_to_state_store(int pid, hash_type compar
 hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
 {
   validate_io_state();
+  const auto layout_cache_mode = capture_layout_cache_mode();
+  const CaptureLayoutContext layout_context{scratch_page, PAGE_SIZE};
   std::vector<maps_item> parsed_maps;
   const auto resident = detsim::resident::get(pid);
+  std::shared_ptr<const CaptureLayout> layout;
+
   if (resident.snapshot) {
-    parse_mapping_text(resident.snapshot->maps_text(), parsed_maps);
+    const std::string_view resident_maps = resident.snapshot->maps_text();
+    const bool cache_enabled = layout_cache_mode != CaptureLayoutCacheMode::off;
+    const bool key_fits =
+        resident_maps.size() <= CaptureLayoutCache::max_key_bytes;
+    if (cache_enabled && key_fits)
+      layout = find_capture_layout(resident_maps, layout_context);
+    else if (cache_enabled)
+      note_capture_layout_oversize();
+
+    if (layout && layout_cache_mode == CaptureLayoutCacheMode::verify) {
+      parse_mapping_text(resident_maps, parsed_maps);
+      const auto rebuilt = build_capture_layout_counted(
+          parsed_maps, layout_context, layout_cache_mode);
+      verify_capture_layout(*layout, *rebuilt);
+    } else if (!layout) {
+      parse_mapping_text(resident_maps, parsed_maps);
+      layout = build_capture_layout_counted(parsed_maps, layout_context,
+                                            layout_cache_mode);
+      if (cache_enabled && key_fits)
+        admit_capture_layout(layout->maps_text, layout, layout_context);
+    }
   } else {
     auto maps_fp = fileutils::open_cfile(fmt::format("/proc/{}/maps", pid), "r");
     if (!maps_fp) throw std::runtime_error("Cannot open tracee memory mappings for capture");
     get_maps_item(parsed_maps, maps_fp.get());
     if (ferror(maps_fp.get()) || parsed_maps.empty())
       throw std::runtime_error("Failed to read tracee memory mappings");
+    layout = build_capture_layout_counted(parsed_maps, layout_context,
+                                          layout_cache_mode);
+    if (layout_cache_mode != CaptureLayoutCacheMode::off)
+      admit_capture_layout(layout->maps_text, layout, layout_context);
   }
 
-  // Kernel VMA partitions can change after mprotect without changing memory
-  // semantics. Store one canonical partition for adjacent equivalent ranges.
-  std::vector<maps_item> maps;
-  for (const auto& item : parsed_maps) {
-    bool merge = false;
-    if (!maps.empty()) {
-      const auto& previous = maps.back();
-      merge = previous.end == item.start && !excluded_mapping(previous) &&
-              !excluded_mapping(item) && !strcmp(previous.flags, item.flags) &&
-              !strcmp(previous.name, item.name) && same_backing(previous, item, item.start);
-    }
-    if (merge) maps.back().end = item.end;
-    else maps.push_back(item);
-  }
-
-  struct RegionToCapture { uint64_t start, end; size_t size; };
-  std::vector<RegionToCapture> regions_to_capture;
-  std::vector<RegionInfo> regions;
-  size_t regions_data_size = 0;
-  std::string maps_text;
-  for (const auto& item : maps) {
-    maps_text += fmt::format("{:x}-{:x} {} {:x} {:x}:{:x} {} {}\n", item.start,
-                            item.end, item.flags, item.offset, item.a, item.b,
-                            item.inode, item.name);
-    if (excluded_mapping(item)) continue;
-    const bool anonymous_guard = !strcmp(item.flags, "---p") &&
-                                 !item.inode && !item.name[0];
-    if (item.flags[3] != 'p' || (item.flags[0] != 'r' && !anonymous_guard))
-      throw std::runtime_error(fmt::format("Unsupported snapshot mapping {:x}-{:x} {} {}: requires private readable or anonymous PROT_NONE memory",
-                                         item.start, item.end, item.flags, item.name));
-    RegionInfo info{};
-    info.start = item.start; info.end = item.end;
-    info.prot = mapping_protection(item.flags);
-    memcpy(info.flags, item.flags, 5);
-    info.offset = regions_data_size;
-    regions.push_back(info);
-    regions_to_capture.push_back({item.start, item.end, size_t(item.end - item.start)});
-    regions_data_size += item.end - item.start;
-  }
-  std::vector<uint8_t> maps_data(maps_text.begin(), maps_text.end());
+  const auto& regions = layout->regions;
+  const auto& regions_to_capture = layout->regions_to_capture;
+  const auto& maps_text = layout->maps_text;
+  const size_t regions_data_size = layout->byte_count;
 
   // prepare_capture preserved and verified the complete logical slot layout.
   for (auto& thread : threads) {
@@ -1293,7 +1554,7 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
   size_t header_size = sizeof(StateDataHeader);
   size_t regions_size = regions.size() * sizeof(RegionInfo);
   size_t tstate_size = tstate_data.size();
-  size_t maps_size = maps_data.size();
+  size_t maps_size = maps_text.size();
 
   size_t total_size = header_size + regions_size + tstate_size + maps_size +
                       regions_data_size + sizeof(regs);
@@ -1372,7 +1633,7 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
 
   if (maps_size > 0)
   {
-    memcpy(all_data + header->maps_offset, maps_data.data(), maps_size);
+    memcpy(all_data + header->maps_offset, maps_text.data(), maps_size);
     LOG_TRACE("Copied maps data: offset=%lu, size=%zu", header->maps_offset,
               maps_size);
   }

@@ -435,6 +435,29 @@ bool mapping_exists(maps_item &a, std::vector<maps_item> &array);
  * Statistics
  * ====================================================================== */
 
+namespace detsim {
+
+/* Opt-in capture-layout memoization counters. Layouts contain only text-derived
+ * metadata; no kernel state or captured bytes are cached. */
+struct CaptureLayoutCacheStats
+{
+  uint64_t lookups = 0;
+  uint64_t hits = 0;
+  uint64_t misses = 0;
+  uint64_t builds = 0;
+  uint64_t admits = 0;
+  uint64_t evictions = 0;
+  uint64_t oversize = 0;
+  uint64_t verify_checks = 0;
+  uint64_t verify_mismatches = 0;
+  size_t entries = 0;
+};
+
+CaptureLayoutCacheStats capture_layout_cache_stats();
+void clear_capture_layout_cache();
+
+} // namespace detsim
+
 /* ======================================================================
  * Global Cleanup
  * ====================================================================== */

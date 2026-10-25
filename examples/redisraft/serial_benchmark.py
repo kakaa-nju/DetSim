@@ -122,7 +122,8 @@ def main():
         ['git', 'rev-parse', 'HEAD'], cwd=common.ROOT, text=True).strip()
     report['execution_options'] = {name: os.environ.get(name) for name in (
         'DETSIM_RESIDENT_MEMORY', 'DETSIM_CAPTURE_MODE', 'DETSIM_CAPTURE_VERIFY',
-        'DETSIM_SOFT_DIRTY', 'DETSIM_OBSERVATION_CACHE', 'DETSIM_OBSERVATION_CACHE_STATS')}
+        'DETSIM_SOFT_DIRTY', 'DETSIM_OBSERVATION_CACHE', 'DETSIM_OBSERVATION_CACHE_STATS',
+        'DETSIM_CAPTURE_LAYOUT_CACHE')}
     (work / 'inputs.json').write_text(json.dumps(report, indent=2))
     old_preload, old_seed = os.environ.get('LD_PRELOAD'), os.environ.get('DETSIM_BENCH_SEED')
     old_limit = common.MODEL_ADDRESS_SPACE_LIMIT

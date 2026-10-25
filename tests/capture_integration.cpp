@@ -7,6 +7,7 @@
 #include "dispatcher.h"
 #include "proc_status.h"
 #include "page_snapshot.h"
+#include "state.h"
 #include "resident_memory.h"
 #include "engine/exec_engine.h"
 #include "engine/thread_pool.h"
@@ -28,6 +29,16 @@ alignas(4096) static const long readonly_value __attribute__((used)) = 31;
 static_assert(NP == 2, "capture oracle requires two processes");
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui() { return nullptr; }
 static void require(bool ok, const char *why) { if (!ok) throw std::runtime_error(why); }
+struct CaptureLayoutMode {
+    explicit CaptureLayoutMode(const char *mode) {
+        if (mode) setenv("DETSIM_CAPTURE_LAYOUT_CACHE", mode, 1);
+        else unsetenv("DETSIM_CAPTURE_LAYOUT_CACHE");
+    }
+    ~CaptureLayoutMode() { unsetenv("DETSIM_CAPTURE_LAYOUT_CACHE"); }
+};
+static detsim::CaptureLayoutCacheStats capture_layout_stats() {
+    return detsim::capture_layout_cache_stats();
+}
 int main(int argc, char**)
 {
     pid_t children[NP]{};
@@ -133,14 +144,23 @@ int main(int argc, char**)
                 "unchanged resident inactive snapshot did not bypass hashing");
         require(reused.ss_hash == source.ss_hash, "unchanged capture identity drift");
         auto compare_full = [&](const sys_state& optimized) {
-            const char* backend = getenv("DETSIM_SNAPSHOT_BACKEND");
-            const std::string selected = backend ? backend : "full";
+            const char* backend_value = getenv("DETSIM_SNAPSHOT_BACKEND");
+            const bool had_backend = backend_value != nullptr;
+            const std::string selected = had_backend ? backend_value : "full";
+            const char* layout_cache_value = getenv("DETSIM_CAPTURE_LAYOUT_CACHE");
+            const bool had_layout_cache = layout_cache_value != nullptr;
+            const std::string saved_layout_cache =
+                had_layout_cache ? layout_cache_value : "";
             setenv("DETSIM_SNAPSHOT_BACKEND", "full", 1);
             setenv("DETSIM_CAPTURE_MODE", "full", 1);
+            unsetenv("DETSIM_CAPTURE_LAYOUT_CACHE");
             sys_state full(info, &source);
             unsetenv("DETSIM_CAPTURE_MODE");
-            if (backend) setenv("DETSIM_SNAPSHOT_BACKEND", selected.c_str(), 1);
+            if (had_backend) setenv("DETSIM_SNAPSHOT_BACKEND", selected.c_str(), 1);
             else unsetenv("DETSIM_SNAPSHOT_BACKEND");
+            if (had_layout_cache)
+                setenv("DETSIM_CAPTURE_LAYOUT_CACHE", saved_layout_cache.c_str(), 1);
+            else unsetenv("DETSIM_CAPTURE_LAYOUT_CACHE");
             if (selected == "full")
                 require(full.ss_hash == optimized.ss_hash, "full capture system identity differs");
             for (int i = 0; i < NP; ++i) {
@@ -165,6 +185,177 @@ int main(int argc, char**)
             }
         };
         compare_full(reused);
+        // Opt-in capture-layout cache. The cache memoizes only text-derived
+        // layouts, so off/on/verify must all preserve the full byte oracle.
+        detsim::clear_capture_layout_cache();
+        {
+            CaptureLayoutMode off_mode("off");
+            sys_state off_capture(info, &source);
+            require(off_capture.ss_hash == source.ss_hash,
+                    "off layout cache changed unchanged identity");
+            const auto off_stats = capture_layout_stats();
+            require(off_stats.lookups == 0 && off_stats.builds == 0 &&
+                    off_stats.entries == 0,
+                    "off layout cache was consulted or populated");
+            compare_full(off_capture);
+        }
+        detsim::clear_capture_layout_cache();
+        {
+            detsim::resident::Scope controlled;
+            source.recover_running_state();
+            CaptureLayoutMode on_mode("on");
+            sys_state first(info, &source);
+            const auto first_stats = capture_layout_stats();
+            require(first_stats.hits == 0, "empty layout cache reported a hit");
+            require(first_stats.builds == NP, "initial cached capture did not build each layout");
+            require(first_stats.admits >= 1 && first_stats.entries >= 1,
+                    "initial cached capture admitted no layout");
+            require(first.ss_hash == source.ss_hash,
+                    "layout cache changed unchanged capture identity");
+            compare_full(first);
+
+            sys_state second(info, &source);
+            const auto second_stats = capture_layout_stats();
+            require(second_stats.lookups == first_stats.lookups + NP &&
+                    second_stats.hits == first_stats.hits + NP &&
+                    second_stats.builds == first_stats.builds,
+                    "unchanged resident capture did not reuse cached layout");
+            require(second.ss_hash == first.ss_hash, "cached layout changed identity");
+            compare_full(second);
+
+            const auto mapped = tracee_do_syscall(children[1], SYS_mmap, 0, 4096,
+                PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, uint64_t(-1), 0);
+            require(mapped > 0 && mapped < uint64_t(-4095), "layout cache fixture mapping");
+            require(!detsim::resident::get(children[1]).snapshot,
+                    "mapping injection retained resident proof");
+            const auto before_changed = capture_layout_stats();
+            sys_state changed(info, &source);
+            const auto changed_stats = capture_layout_stats();
+            require(changed.ts_hash[1] != source.ts_hash[1],
+                    "mapping change absent from cached identity");
+            require(changed_stats.hits == before_changed.hits + 1,
+                    "unchanged peer did not hit cached layout");
+            require(changed_stats.builds == before_changed.builds + 1,
+                    "changed mapping did not rebuild exactly one layout");
+            require(changed_stats.admits == before_changed.admits + 1,
+                    "changed mapping was not admitted");
+            compare_full(changed);
+
+            const auto before_reuse = capture_layout_stats();
+            sys_state changed_reused(info, &source);
+            const auto reused_stats = capture_layout_stats();
+            require(changed_reused.ss_hash == changed.ss_hash,
+                    "changed branch reuse identity drift");
+            require(reused_stats.hits == before_reuse.hits + NP,
+                    "changed branch did not hit after publication");
+
+            ptmc_state.running_state = changed;
+            source.recover_running_state();
+            const auto before_restored = capture_layout_stats();
+            sys_state restored(info, &source);
+            const auto restored_stats = capture_layout_stats();
+            require(restored.ss_hash == source.ss_hash,
+                    "layout cache restore identity drift");
+            require((restored_stats.hits - before_restored.hits) +
+                    (restored_stats.builds - before_restored.builds) == NP,
+                    "restore neither reused nor rebuilt each saved layout");
+            compare_full(restored);
+            const auto before_restored_reuse = capture_layout_stats();
+            sys_state restored_reused(info, &source);
+            const auto restored_reuse_stats = capture_layout_stats();
+            require(restored_reused.ss_hash == source.ss_hash,
+                    "restored capture reused a stale layout");
+            require(restored_reuse_stats.hits == before_restored_reuse.hits + NP,
+                    "restored unchanged capture did not hit");
+
+            const auto before_pressure = capture_layout_stats();
+            for (int i = 0; i < 5; ++i) {
+                // Fixed addresses guarantee five distinct canonical layouts even
+                // after the earlier branch mapping was restored and unmapped.
+                const uint64_t pressure_address =
+                    0x500000000000ull + uint64_t(i) * 0x100000ull;
+                const auto extra = tracee_do_syscall(children[1], SYS_mmap,
+                    pressure_address, 4096, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE,
+                    uint64_t(-1), 0);
+                require(extra > 0 && extra < uint64_t(-4095),
+                        "layout cache pressure mapping");
+                sys_state pressure(info, &source);
+                require(pressure.ts_hash[1] != source.ts_hash[1],
+                        "pressure mapping absent from cached identity");
+            }
+            const auto pressure_stats = capture_layout_stats();
+            require(pressure_stats.admits == before_pressure.admits + 5,
+                    "pressure mappings were not all admitted");
+            require(pressure_stats.evictions >= 1,
+                    "layout cache never evicted under pressure");
+            require(pressure_stats.entries <= 4, "layout cache exceeded its entry bound");
+            // Entries are MRU-first and eviction removes the LRU tail, so the
+            // layouts currently backing resident snapshots must survive.
+            const auto before_pressure_reuse = capture_layout_stats();
+            sys_state pressure_reused(info, &source);
+            const auto pressure_reuse_stats = capture_layout_stats();
+            require(pressure_reused.ts_hash[1] != source.ts_hash[1],
+                    "pressure reuse lost the latest mapping");
+            require(pressure_reuse_stats.hits == before_pressure_reuse.hits + NP &&
+                    pressure_reuse_stats.builds == before_pressure_reuse.builds,
+                    "layout cache evicted a currently reused layout");
+
+            source.recover_running_state();
+            // Force the live /proc path so verify must rebuild from canonical
+            // text and prove the builder is idempotent, not merely hard-coded.
+            detsim::clear_capture_layout_cache();
+            detsim::resident::invalidate_all();
+            {
+                CaptureLayoutMode verify_mode("verify");
+                sys_state verify_original(info, &source);
+                const auto seeded_stats = capture_layout_stats();
+                require(verify_original.ss_hash == source.ss_hash,
+                        "verify mode changed restored identity");
+                require(seeded_stats.lookups == 0 && seeded_stats.builds == NP,
+                        "verify seed did not rebuild from live maps");
+                require(seeded_stats.admits >= 1,
+                        "verify seed did not admit canonical layout");
+                const auto before_verify = capture_layout_stats();
+                sys_state verified(info, &source);
+                const auto verify_stats = capture_layout_stats();
+                require(verified.ss_hash == verify_original.ss_hash,
+                        "verify mode changed reused identity");
+                require(verify_stats.lookups == before_verify.lookups + NP &&
+                        verify_stats.hits == before_verify.hits + NP,
+                        "verify mode did not hit both cached layouts");
+                require(verify_stats.builds == before_verify.builds + NP,
+                        "verify mode reused without rebuilding");
+                require(verify_stats.verify_checks ==
+                        before_verify.verify_checks + NP &&
+                        verify_stats.verify_mismatches == 0,
+                        "canonical text did not rebuild the original layout");
+                compare_full(verified);
+            }
+
+            {
+                CaptureLayoutMode invalid("bogus");
+                bool rejected = false;
+                try { sys_state bad(info, &source); }
+                catch (const std::runtime_error& error) {
+                    rejected = std::string(error.what()) ==
+                        "DETSIM_CAPTURE_LAYOUT_CACHE must be off, on or verify";
+                }
+                require(rejected, "invalid layout cache mode was not rejected");
+            }
+            source.recover_running_state();
+        }
+        detsim::clear_capture_layout_cache();
+        {
+            CaptureLayoutMode default_off(nullptr);
+            sys_state default_off_capture(info, &source);
+            require(default_off_capture.ss_hash == source.ss_hash,
+                    "default layout cache mode changed identity");
+            const auto default_stats = capture_layout_stats();
+            require(default_stats.lookups == 0 && default_stats.builds == 0 &&
+                    default_stats.entries == 0,
+                    "default layout cache mode was not off");
+        }
         for (int i=0;i<NP;++i)
             require(source.child[i].process_state==initial_process_states[i],"process model state absent from capture");
         ptmc_state.process_states[1].random_state^=0x1234;
