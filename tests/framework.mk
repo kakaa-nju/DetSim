@@ -4,7 +4,7 @@ check-state-view: $(BUILD_DIR)/tests/state_view_integration $(BUILD_DIR)/tests/d
 check-plugins: $(BUILD_DIR)/tests/plugin_integration $(BUILD_DIR)/tests/plugin_good.so $(BUILD_DIR)/tests/plugin_legacy.so $(BUILD_DIR)/tests/plugin_bad_abi.so $(BUILD_DIR)/tests/plugin_decoder.so
 	$(BUILD_DIR)/tests/plugin_integration $(BUILD_DIR)/tests/plugin_good.so $(BUILD_DIR)/tests/plugin_legacy.so $(BUILD_DIR)/tests/plugin_bad_abi.so $(BUILD_DIR)/tests/plugin_decoder.so
 $(BUILD_DIR)/tests/state_view_integration: $(BUILD_DIR)/tests/state_view_integration.o $(TRACER_OBJS_NO_MAIN) $(BUILD_DIR)/nr2call.o
-	$(LD) $^ $(LDFLAGS) $(LDLIBS) -o $@
+	$(LD) $^ $(LDFLAGS) $(LDLIBS) -Wl,--wrap=_ZN12SnapshotView4openEm -o $@
 $(BUILD_DIR)/tests/plugin_integration: $(BUILD_DIR)/tests/plugin_integration.o $(TRACER_OBJS_NO_MAIN) $(BUILD_DIR)/nr2call.o
 	$(LD) $^ $(LDFLAGS) $(LDLIBS) -o $@
 $(BUILD_DIR)/tests/plugin_good.so: tests/plugin_fixture.cpp src/api/plugin.h $(BUILD_DIR)/.config

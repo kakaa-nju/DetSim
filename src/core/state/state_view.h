@@ -5,6 +5,7 @@
 #include "api/plugin.h"
 #include <array>
 #include <string>
+class SnapshotView;
 namespace detsim {
 // Immutable observation of a saved machine identity. No UI cursor or live-memory
 // fallback is involved. The global symbol service currently supports only the
@@ -30,6 +31,9 @@ class StateView final : private ExpressionObservation {
   std::array<int, NP> statuses_{};
   std::array<timeval, NP> clocks_{};
   mutable std::array<std::shared_ptr<const tracee_state>, NP> metadata_{};
+  // Lazily pinned validated roots: at most one full snapshot per logical node
+  // for this view's lifetime. Released with the view; never a global cache.
+  mutable std::array<std::shared_ptr<const SnapshotView>, NP> snapshot_views_{};
   const tracee_state& metadata(size_t node) const;
   std::array<int, NP> live_pids_{};
   bool live_ = false;

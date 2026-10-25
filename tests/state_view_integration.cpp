@@ -4,6 +4,7 @@
 #include <fstream>
 #include <thread>
 #include <barrier>
+#include <atomic>
 #include "monitor.h"
 #include "proc_status.h"
 #include "dwarf_info.h"
@@ -19,15 +20,25 @@
 #include <filesystem>
 #include <stdexcept>
 #include <sys/mman.h>
+#include <unistd.h>
 extern "C" detsim::ui::NCursesUI* get_ncurses_ui() { return nullptr; }
 static void require(bool b,const char* m) { if(!b) throw std::runtime_error(m); }
 template<class F> static void rejects(F f) { bool b=false; try { f(); } catch(const std::exception&) { b=true; } require(b,"expected rejection"); }
+// tests/framework.mk wraps SnapshotView::open at this target's link so the saved
+// observation tests can count how often a view asks the store for a root.
+static std::atomic<size_t> snapshot_open_calls{0};
+extern "C" std::shared_ptr<const SnapshotView> __real__ZN12SnapshotView4openEm(uint64_t);
+extern "C" std::shared_ptr<const SnapshotView> __wrap__ZN12SnapshotView4openEm(uint64_t hash) {
+ ++snapshot_open_calls; return __real__ZN12SnapshotView4openEm(hash);
+}
 static_assert(NP >= 2, "State observation fixture needs two logical nodes");
 // Construct saved observations through both real snapshot layouts, without a live tracee.
-static sys_state save_serialized_fixture(const std::vector<uint8_t>& metadata, bool pages, size_t memory_size=4096) {
+static sys_state save_serialized_fixture(const std::vector<uint8_t>& metadata, bool pages, size_t memory_size=4096, uint64_t first_word=0) {
  auto& store=StateStore::instance();
  RegionInfo region{}; region.start=0x1000; region.end=region.start+memory_size; region.prot=PROT_READ;
- memcpy(region.flags,"r--p",5); const std::vector<uint8_t> memory(memory_size,0); user_regs_struct regs{};
+ memcpy(region.flags,"r--p",5); std::vector<uint8_t> memory(memory_size,0);
+ if (first_word) memcpy(memory.data(),&first_word,sizeof(first_word));
+ user_regs_struct regs{};
  std::vector<uint8_t> bytes;
  if (pages) {
   require(memory_size && memory_size%4096==0,"fixture memory must span complete pages");
@@ -226,6 +237,82 @@ static void compact_metadata_constructor(StateStore& store,const StateStore::Con
  store.shutdown(); store.init(config);
  puts("PASS compact snapshot metadata: full/pages, tiny/zero/cold, fresh graph, bounded single LRU, concurrency, oversized bypass, archive/I-O/lifecycle/eviction integrity");
 }
+static void warm_saved_observation(StateStore& store,const StateStore::Config& config) {
+ tracee_state saved; const auto metadata=serialize_fixture(saved);
+ constexpr long first=0x1122334455667788L, branch_value=0x0102030405060708L;
+ for(bool pages:{false,true}) {
+  sys_state machine=save_serialized_fixture(metadata,pages,4096,uint64_t(first));
+  machine.ts_hash[1]=machine.ts_hash[0];
+  detsim::StateView view(machine); long value=0;
+  snapshot_open_calls=0;
+  for(int attempt=0;attempt<3;++attempt) {
+   view.read(0,0x1000,&value,sizeof(value)); require(value==first,"saved cold/page+full bytes");
+  }
+  require(snapshot_open_calls==1,"repeated reads of one saved node reuse one opened root");
+  detsim::StateView copy=view;
+  copy.read(0,0x1000,&value,sizeof(value));
+  require(value==first && snapshot_open_calls==1,"copied observation shares the immutable pinned root");
+  view.read(1,0x1000,&value,sizeof(value));
+  require(value==first && snapshot_open_calls==2,"same saved source on another node opens once for that node");
+  copy.read(1,0x1000,&value,sizeof(value));
+  require(value==first && snapshot_open_calls==3,"copy pins a root that was cold when it was copied");
+  detsim::StateView late=view;
+  late.read(1,0x1000,&value,sizeof(value));
+  require(value==first && snapshot_open_calls==3,"copy of a warm view reuses every pinned node");
+  const sys_state other=save_serialized_fixture(metadata,pages,4096,uint64_t(branch_value));
+  detsim::StateView branch(other); snapshot_open_calls=0;
+  branch.read(0,0x1000,&value,sizeof(value));
+  require(value==branch_value && snapshot_open_calls==1,"branch different bytes open their own root");
+  view.read(0,0x1000,&value,sizeof(value));
+  require(value==first && snapshot_open_calls==1,"original view never adopts branch bytes");
+  sys_state missing=machine; missing.ts_hash[0]=~missing.ts_hash[0];
+  detsim::StateView absent(missing); long untouched=0x55; snapshot_open_calls=0;
+  for(int attempt=0;attempt<2;++attempt)
+   rejects([&]{absent.read(0,0x1000,&untouched,sizeof(untouched));});
+  require(untouched==0x55 && snapshot_open_calls==2,"missing uncached root rejects without fabricating bytes");
+  sys_state no_root; detsim::StateView disconnected(no_root);
+  const auto without_root=snapshot_open_calls.load();
+  rejects([&]{disconnected.read(0,0x1000,&untouched,sizeof(untouched));});
+  require(snapshot_open_calls==without_root && untouched==0x55,"absent hash is rejected before opening a root");
+  view.read(0,0x1000,&value,sizeof(value));
+  store.wait_for_completion(); store.shutdown();
+  const auto pinned=snapshot_open_calls.load();
+  rejects([&]{view.read(0,0x1000,&value,sizeof(value));});
+  rejects([&]{copy.read(0,0x1000,&value,sizeof(value));});
+  require(snapshot_open_calls==pinned,"closed store rejects before using a pinned root");
+  store.init(config);
+  rejects([&]{view.read(0,0x1000,&value,sizeof(value));});
+  require(snapshot_open_calls==pinned,"reopened store invalidates the old observation before its pinned root");
+  detsim::StateView fresh(machine); snapshot_open_calls=0;
+  fresh.read(0,0x1000,&value,sizeof(value));
+  require(value==first && snapshot_open_calls==1,"fresh view after reopen opens the root once");
+  // A retained root must not bypass store poisoning just because its bytes are
+  // already warm. Attaching a missing read-only pool is a real failure path.
+  rejects([&]{store.attach_shared_pool(config.packed_storage_path+"/absent-pool",false);});
+  const auto before_poison_read=snapshot_open_calls.load();
+  rejects([&]{fresh.read(0,0x1000,&value,sizeof(value));});
+  require(snapshot_open_calls==before_poison_read,"poisoned view rejects before reusing its pinned root");
+  rejects([&]{store.shutdown();});
+  store.init(config);
+ }
+ puts("PASS warm saved observation: one open per node/view, copy isolation, branch bytes, missing roots, lifecycle invalidation");
+}
+// stopped_live reads must bypass SnapshotView entirely: the pid slot is faked to
+// this test process only for the duration of the check and restored by RAII.
+static void live_observation_reads_fresh() {
+ struct restore_pid { int& slot; int saved; restore_pid(int& target):slot(target),saved(target){} ~restore_pid(){slot=saved;} };
+ restore_pid restore(ptmc_state.pids[0]); ptmc_state.pids[0]=getpid();
+ auto live=detsim::StateView::stopped_live();
+ volatile long cell=111; long observed=0;
+ const auto address=reinterpret_cast<uint64_t>(&cell);
+ snapshot_open_calls=0;
+ live.read(0,address,&observed,sizeof(observed));
+ require(observed==111 && snapshot_open_calls.load()==0,"live read uses guest memory without opening a saved root");
+ cell=222;
+ live.read(0,address,&observed,sizeof(observed));
+ require(observed==222 && snapshot_open_calls.load()==0,"live read sees changed bytes without a cached root");
+ puts("PASS stopped_live raw reads stay fresh and never open a saved root");
+}
 int main(int argc, char** argv) {
  require(argc==4,"expected two distinct DWARF binaries and changed-layout fixture");
  char directory[]="/tmp/detsim-view-XXXXXX";
@@ -235,6 +322,8 @@ int main(int argc, char** argv) {
   auto& store=StateStore::instance(); store.init(cfg);
   captured_stdio_observation(store,cfg);
   compact_metadata_constructor(store,cfg);
+  warm_saved_observation(store,cfg);
+  live_observation_reads_fresh();
   RegionInfo r{}; r.start=0x1000; r.end=0x2000; r.prot=PROT_READ|PROT_WRITE; memcpy(r.flags,"rw-p",5);
   std::vector<uint8_t> bytes(4096); long value=123; memcpy(bytes.data(),&value,sizeof(value));
   auto page=store.save(bytes.data(),bytes.size());

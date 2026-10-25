@@ -41,7 +41,12 @@ void StateView::read(size_t node, uint64_t address, void* destination, size_t le
   } else {
     check_snapshot_lifetime();
     if (!snapshots_[node]) throw std::runtime_error("Observation has no saved process snapshot");
-    SnapshotView::open(snapshots_[node])->read_into(address, destination, length);
+    // Pin this node's validated immutable root for the view's lifetime: later
+    // reads skip open's store locks and global LRU. read_into still verifies the
+    // root's store generation; stopped_live never enters this branch.
+    auto& view=snapshot_views_[node];
+    if (!view) view=SnapshotView::open(snapshots_[node]);
+    view->read_into(address, destination, length);
   }
 }
 void StateView::require_symbols(size_t node) const {
