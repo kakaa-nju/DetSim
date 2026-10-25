@@ -262,26 +262,17 @@ int is_go_program(const char *filename)
 #include <dirent.h>
 #include <algorithm>
 
-// Get list of all thread TIDs in a process
-std::vector<pid_t> get_thread_list(pid_t pid)
+namespace {
+std::vector<pid_t> scan_thread_list(pid_t pid, DIR* directory)
 {
   std::vector<pid_t> threads;
-  std::string task_dir = fmt::format("/proc/{}/task", pid);
-
-  const auto close_dir = [](DIR* value) { closedir(value); };
-  std::unique_ptr<DIR, decltype(close_dir)> dir(opendir(task_dir.c_str()), close_dir);
-  if (!dir) {
-    LOG_ERROR("Failed to open %s: %s", task_dir.c_str(), strerror(errno));
-    return threads;
-  }
-
   for (;;) {
     errno = 0;
-    const auto* entry = readdir(dir.get());
+    const auto* entry = readdir(directory);
     if (!entry) {
       const int error = errno;
       if (error)
-        throw std::runtime_error("Cannot enumerate process threads in " + task_dir +
+        throw std::runtime_error("Cannot enumerate process threads in /proc/" + std::to_string(pid) + "/task" +
                                  ": " + strerror(error));
       break;
     }
@@ -294,9 +285,30 @@ std::vector<pid_t> get_thread_list(pid_t pid)
     }
   }
 
-  dir.reset();
   std::sort(threads.begin(), threads.end());
   return threads;
+}
+}
+
+std::vector<pid_t> get_thread_list(pid_t pid)
+{
+  const auto task_dir = fmt::format("/proc/{}/task", pid);
+  const auto close_dir = [](DIR* value) { closedir(value); };
+  std::unique_ptr<DIR, decltype(close_dir)> dir(opendir(task_dir.c_str()), close_dir);
+  if (!dir) {
+    LOG_ERROR("Failed to open %s: %s", task_dir.c_str(), strerror(errno));
+    return {};
+  }
+  return scan_thread_list(pid, dir.get());
+}
+
+std::vector<pid_t> get_thread_list(pid_t pid, DIR* directory)
+{
+  if (!directory) throw std::runtime_error("Missing retained task directory");
+  errno = 0;
+  rewinddir(directory);
+  if (errno) throw std::runtime_error("Cannot rewind retained task directory");
+  return scan_thread_list(pid, directory);
 }
 
 // Get thread count for a process

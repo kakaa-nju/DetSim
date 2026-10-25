@@ -76,6 +76,7 @@
 
 !thread_control.mk
 !thread_control_integration.cpp
+!pending_status_reader_integration.cpp
 
 !thread_identity.mk
 !thread_identity_integration.cpp

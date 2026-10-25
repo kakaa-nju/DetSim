@@ -31,6 +31,9 @@ namespace {
 struct CarrierPool {
   pid_t anchor;
   std::vector<pid_t> carriers;
+  // One retained status descriptor per physical carrier. This is bound at
+  // pool creation/growth and must not be reopened by numeric tid later.
+  PendingStatusReader pending_status;
 };
 std::map<int, CarrierPool> pools;
 
@@ -538,11 +541,16 @@ void prepare_thread_pool(int node, const tracee_state& state)
   auto found = pools.find(node);
   if (found == pools.end()) {
     auto carriers = live_bindings(state);
+    // Maximum carrier growth happens through push_back below; reserve before
+    // the vector moves into the pool so those append paths cannot allocate.
+    carriers.reserve(MAX_THREADS_PER_PROCESS);
     verify_stopped_thread_set(ptmc_state.pids[node], carriers);
     std::sort(carriers.begin(), carriers.end());
     if (!std::binary_search(carriers.begin(), carriers.end(), ptmc_state.pids[node]))
       throw std::runtime_error("Initial thread pool has no owned leader anchor");
-    found = pools.emplace(node, CarrierPool{ptmc_state.pids[node], std::move(carriers)}).first;
+    CarrierPool prepared{ptmc_state.pids[node], std::move(carriers), {}};
+    for (pid_t tid : prepared.carriers) prepared.pending_status.retain(tid);
+    found = pools.emplace(node, std::move(prepared)).first;
   } else verify_thread_pool(node);
   validate_bound_slots(found->second, state);
   for (pid_t tid : found->second.carriers) {
@@ -565,7 +573,7 @@ void ensure_thread_carriers(int node, size_t count)
   verify_thread_pool(node);
   for (pid_t tid : pool.carriers) {
     require_thread_capture_boundary(tid);
-    require_no_pending_signals(tid);
+    pool.pending_status.require_no_pending(tid);
     require_no_rseq(tid);
     require_no_native_robust_list(tid);
     if (query_clear_child_tid(tid))
@@ -575,6 +583,7 @@ void ensure_thread_carriers(int node, size_t count)
     const pid_t carrier = create_thread_carrier(pool.anchor);
     if (carrier <= 0)
       throw std::runtime_error("Cannot create a carrier for an adopted thread layout");
+    pool.pending_status.retain(carrier);
     pool.carriers.push_back(carrier);
   }
   std::sort(pool.carriers.begin(), pool.carriers.end());
@@ -584,7 +593,7 @@ void ensure_thread_carriers(int node, size_t count)
 void verify_thread_pool(int node)
 {
   const auto& pool = pool_for(node);
-  verify_stopped_thread_set(pool.anchor, pool.carriers);
+  verify_stopped_thread_set(pool.anchor, pool.carriers, pool.pending_status);
 }
 
 void require_thread_capture_boundary(pid_t tid)
@@ -703,6 +712,7 @@ pid_t create_logical_thread(int node, pid_t parent, const CloneRequest& request)
     if (pool.carriers.size() >= MAX_THREADS_PER_PROCESS)
       throw std::runtime_error("Physical thread carrier limit exceeded");
     carrier = create_thread_carrier(pool.anchor);
+    pool.pending_status.retain(carrier);
     pool.carriers.push_back(carrier);
     std::sort(pool.carriers.begin(), pool.carriers.end());
   }

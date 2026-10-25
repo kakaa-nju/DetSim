@@ -141,6 +141,25 @@ static void run_case()
     verify_stopped_thread_set(child, tids);
     enumeration_fault = 0;
     require(enumeration_closes == 2, "normal EOF leaked a directory handle");
+    PendingStatusReader retained;
+    retained.retain(child);
+    retained.retain(worker);
+    verify_stopped_thread_set(child, tids, retained);
+    for (int fault : {1, 2}) {
+        enumeration_fault = fault; enumeration_ends = enumeration_closes = 0;
+        capture_resumes = 0; track_capture_resumes = true;
+        bool failed = false;
+        try { verify_stopped_thread_set(child, tids, retained); }
+        catch (const std::runtime_error& error) {
+            failed = std::string(error.what()).starts_with("Cannot enumerate process threads");
+        }
+        enumeration_fault = 0; track_capture_resumes = false;
+        require(failed && enumeration_ends == static_cast<unsigned>(fault),
+                "retained barrier accepted a directory read failure");
+        require(enumeration_closes == 0 && capture_resumes == 0,
+                "retained barrier closed its stream or resumed after a read failure");
+        verify_stopped_thread_set(child, tids, retained);
+    }
     rejected([&] { verify_stopped_thread_set(child, {}); });
     rejected([&] { verify_stopped_thread_set(-1, tids); });
     const std::array<pid_t, 2> duplicate{child, child};
@@ -158,6 +177,10 @@ static void run_case()
     // PTRACE_CONT returns only after removing the ptrace stop; GETREGS must fail
     // even if this thread has not yet been scheduled on another CPU.
     rejected([&] { verify_stopped_thread_set(child, tids); });
+    capture_resumes = 0; track_capture_resumes = true;
+    rejected([&] { verify_stopped_thread_set(child, tids, retained); });
+    track_capture_resumes = false;
+    require(capture_resumes == 0, "retained barrier resumed a running worker");
     require(ptrace(PTRACE_GETREGS, child, nullptr, &after) == 0, "leader remains stopped");
     require(std::memcmp(&before, &after, sizeof before) == 0,
             "failed barrier modified leader registers");
