@@ -217,3 +217,21 @@ mapped-pool/journal 原型补丁、只读字节及日志测试文本、关键已
 主要用于保留这些证据。对象文件和运行快照已回收，旧的增量链接脚本不能直接沿用。
 这次清理不等于资源采样已经审计。清单、删除记录及统计在
 `build/parallel-artifact-cleanup/`。
+
+
+### 全 build 补清（2026-10-25）
+
+上次范围仅覆盖 `build/shared-parallel/`，遗漏了旧的 search-throughput、
+parallel-redesign、native-search-actors、案例及其他测试运行产物。补查时整个
+`build/` 仍约72 GiB，其中快照约33.8 GiB。
+
+本次先验证没有活动 tracer，按已识别的 DetSim store 格式及 `.parallel-*` worker
+副本生成清单，排除源码/vendor/third_party、正式 release/debug、软链接和跟踪文件，
+再删除5312项；全部目标已确认不存在，可用空间增加38223065088字节（约38.2 GB）。
+`build/` 降到约36 GiB，`shared-parallel/` 仍约25 GiB。
+
+剩余主要是原始 perf、图/journal/日志、原始采样归档、源码及冻结二进制，
+不是全部都属于正常编译缓存。它们仍是本地证据，不随 Git 搬迁。旧案例的快照
+现场已删除，需要重新运行才能恢复；未删除待审计资源归档。正式构建、产品代码
+和子模块未修改。本次仅验证清单、删除结果及工作树，没有运行构建或实验，优化
+目标仍暂停。操作清单及结果保存在 `build/parallel-artifact-cleanup-wide/`。
