@@ -6,6 +6,8 @@
 #include "state/sysstate_store.h"
 #include "state/page_snapshot.h"
 #include "cereal/archives/binary.hpp"
+#include "cereal/types/map.hpp"
+#include "cereal/types/vector.hpp"
 #include "utils.h"
 #include <cstdio>
 #include <cstdlib>
@@ -51,6 +53,66 @@ struct StoreDirectory
   }
 };
 
+static void check_tracee_archive_compatibility()
+{
+  // Independent old member-wise wire encoder: never serialize syscall struct
+  // padding, and include the suffix to catch block-size/alignment mistakes.
+  const auto legacy = [](const tracee_state& state) {
+    std::ostringstream output;
+    {
+      cereal::BinaryOutputArchive ar(output);
+      const bool has_futex = state.futex_state.has_value();
+      ar(has_futex);
+      if (has_futex) ar(*state.futex_state);
+      for (const auto& call : state.si) ar(call.nr, call.rval, call.args);
+      ar(state.brk, state.tv.tv_sec, state.tv.tv_usec, state.fs_state,
+         state.sock_state, state.process_state, state.fd_manager_state,
+         state.threads, state.thread_create_records, state.main_tid,
+         state.current_thread_idx);
+    }
+    return output.str();
+  };
+  const auto encode = [](const tracee_state& state) {
+    std::ostringstream output;
+    { cereal::BinaryOutputArchive ar(output); ar(state); }
+    return output.str();
+  };
+  tracee_state fixture;
+  for (size_t i = 0; i < MAX_THREADS_PER_PROCESS; ++i) {
+    fixture.si[i].nr = i % 2 ? -int(i + 1) : int(0x70000000 + i);
+    fixture.si[i].rval = uintptr_t(-4095) + i;
+    for (size_t j = 0; j < 6; ++j)
+      fixture.si[i].args[j] = 0xfedcba9800000000ULL | (i << 8) | j;
+  }
+  fixture.brk = 0x123456789abcdef0ULL;
+  fixture.tv.tv_sec = 1234567;
+  fixture.tv.tv_usec = 987654;
+  fixture.process_state.random_state = 0xf123456789abcdefULL;
+  for (bool with_futex : {false, true}) {
+    if (with_futex) fixture.futex_state.emplace();
+    const auto expected = legacy(fixture);
+    require(encode(fixture) == expected, "tracee archive changed legacy member bytes");
+    tracee_state decoded;
+    std::istringstream input(expected);
+    { cereal::BinaryInputArchive ar(input); ar(decoded); }
+    require(legacy(decoded) == expected, "legacy tracee archive failed roundtrip");
+    require(input.peek() == std::char_traits<char>::eof(), "tracee archive left trailing bytes");
+    // First record and final record truncations, plus a truncated suffix.
+    if (!with_futex) {
+      constexpr size_t record_size = sizeof(int) + 7 * sizeof(uintptr_t);
+      for (size_t length : {size_t(1), size_t(1 + record_size - 1),
+                            size_t(1 + MAX_THREADS_PER_PROCESS * record_size - 1),
+                            expected.size() - 1}) {
+        rejects([&] {
+          tracee_state incomplete;
+          std::istringstream short_input(expected.substr(0, length));
+          cereal::BinaryInputArchive ar(short_input); ar(incomplete);
+        }, "truncated tracee archive accepted");
+      }
+    }
+  }
+}
+
 int main()
 {
   static_assert(NP == 2);
@@ -58,6 +120,7 @@ int main()
   try {
     StoreDirectory directory;
     StateStore::instance().init(StateStore::Config{});
+    check_tracee_archive_compatibility();
     auto snapshot = [](uint64_t seed) {
       tracee_state saved;saved.process_state.random_state=seed;
       std::ostringstream output;{cereal::BinaryOutputArchive ar(output);ar(saved);}

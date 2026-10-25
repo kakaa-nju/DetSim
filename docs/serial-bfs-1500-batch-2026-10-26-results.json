@@ -1,0 +1,152 @@
+{
+  "scope": "single 60-second screening, no stable gain claim",
+  "report": "build/serial-bfs-1500/batch-screen/run-58mfso8z/result.json",
+  "report_sha256": "ffdeca8f34d06345ae1a9e53997f12e86156cc90e78af5f4d1698a80936db5dd",
+  "result": {
+    "host": {
+      "system": "Linux",
+      "node": "tilnel",
+      "release": "6.12.105+deb13-amd64",
+      "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+      "machine": "x86_64",
+      "processor": ""
+    },
+    "backend": "pages",
+    "seed": 1,
+    "rounds": 100,
+    "requested_seconds": 60.0,
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-batch-screen": "3f01d5a5a9452404d6ebade581c9bad00e3dd92ae9f13755308a0289e46050a3",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ce4c80fddaf20a1c466cca4052c5289f8bd143152bd3616f1d5d627f23502346"
+    },
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "tracer_cpu_affinity": [
+      2
+    ],
+    "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+    "checkout_commit": "2e581dd7052a81e6bbc4042ab144b27b8d8e7512",
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "on",
+      "DETSIM_OBSERVATION_CACHE_STATS": null,
+      "DETSIM_CAPTURE_LAYOUT_CACHE": "on"
+    },
+    "prefix_nodes": [
+      {
+        "node": 0,
+        "state": 4,
+        "current_term": 1,
+        "commit_idx": 3,
+        "last_applied_idx": 3,
+        "snapshot_last_idx": 0
+      },
+      {
+        "node": 1,
+        "state": 1,
+        "current_term": 1,
+        "commit_idx": 3,
+        "last_applied_idx": 3,
+        "snapshot_last_idx": 0
+      },
+      {
+        "node": 2,
+        "state": 1,
+        "current_term": 1,
+        "commit_idx": 3,
+        "last_applied_idx": 3,
+        "snapshot_last_idx": 0
+      }
+    ],
+    "root": "d084beb3c2893379",
+    "root_budget": 2,
+    "command_seconds": 60.045400948030874,
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 77140,
+      "new": 24061,
+      "unique": 24061,
+      "elapsed_s": 60.035816,
+      "states_per_s": 1284.899668,
+      "state_store": {
+        "loads": 376843,
+        "l1": 370397,
+        "l2": 6446,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 352858,
+        "new": 4114,
+        "dedup_pct": 98.8
+      },
+      "new_states_per_s": 400.77742925989384
+    },
+    "search_work": {
+      "transitions": 77139,
+      "restore_us": 14119932,
+      "capture_check_commit_us": 38231929
+    },
+    "first_parent_edges": 43640,
+    "generated_new_nodes_including_budget_cuts": 43340,
+    "generated_new_nodes_per_s": 721.9024057239433,
+    "counter_scope": "CLI searched counts root plus transitions; CLI new excludes model-budget-cut successors; generated_new_nodes counts all saved new identities relative to the deterministic prefix, including budget cuts",
+    "evidence_scope": "native BFS; tree is first-parent witnesses, not every edge",
+    "tracer_exit": 0,
+    "passed": true
+  },
+  "gates": [
+    {
+      "argv": [
+        "make",
+        "-j4",
+        "NP=2",
+        "CC=/usr/bin/gcc",
+        "CXX=/usr/bin/g++",
+        "check-capture"
+      ],
+      "exit": 0
+    },
+    {
+      "argv": [
+        "make",
+        "-j4",
+        "NP=1",
+        "CC=/usr/bin/gcc",
+        "CXX=/usr/bin/g++",
+        "check-state-io"
+      ],
+      "exit": 0
+    },
+    {
+      "argv": [
+        "make",
+        "-j4",
+        "NP=3",
+        "CC=/usr/bin/gcc",
+        "CXX=/usr/bin/g++",
+        "tracer"
+      ],
+      "exit": 0
+    }
+  ],
+  "review": "serial_perf_review: no concrete compatibility defect; readonly review only"
+}

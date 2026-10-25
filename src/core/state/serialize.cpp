@@ -7,11 +7,41 @@
 #include "sockstate.h"
 #include "state/state.h"
 #include "log_wrapper.h"
+#include <array>
+#include <cstring>
 
 template <class Archive>
 void syscall_info::serialize(Archive &ar)
 {
   ar(nr, rval, args);
+}
+
+namespace {
+template<class Archive, size_t Count>
+void archive_syscall_array(Archive& ar, syscall_info (&calls)[Count])
+{
+  // Preserve the existing member-wise wire bytes, excluding struct padding.
+  constexpr size_t record_bytes = sizeof(calls[0].nr) + sizeof(calls[0].rval) +
+                                  sizeof(calls[0].args);
+  std::array<unsigned char,Count*record_bytes> wire{};
+  if constexpr (Archive::is_saving::value) {
+    auto* out=wire.data();
+    for (const auto& call:calls) {
+      std::memcpy(out,&call.nr,sizeof(call.nr)); out+=sizeof(call.nr);
+      std::memcpy(out,&call.rval,sizeof(call.rval)); out+=sizeof(call.rval);
+      std::memcpy(out,call.args,sizeof(call.args)); out+=sizeof(call.args);
+    }
+  }
+  ar(cereal::binary_data(wire.data(),wire.size()));
+  if constexpr (Archive::is_loading::value) {
+    const auto* in=wire.data();
+    for (auto& call:calls) {
+      std::memcpy(&call.nr,in,sizeof(call.nr)); in+=sizeof(call.nr);
+      std::memcpy(&call.rval,in,sizeof(call.rval)); in+=sizeof(call.rval);
+      std::memcpy(call.args,in,sizeof(call.args)); in+=sizeof(call.args);
+    }
+  }
+}
 }
 
 template <class Archive>
@@ -28,7 +58,8 @@ void tracee_state::serialize(Archive &ar)
   if (threads.size() > 10000)
     throw std::runtime_error("Thread archive exceeds supported limit");
 
-  ar(si, brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state, process_state, fd_manager_state,
+  archive_syscall_array(ar,si);
+  ar(brk, tv.tv_sec, tv.tv_usec, fs_state, sock_state, process_state, fd_manager_state,
      threads, thread_create_records, main_tid, current_thread_idx);
 }
 
