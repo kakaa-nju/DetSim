@@ -39,21 +39,32 @@ static void verify_stopped_threads(pid_t main_pid, std::span<const pid_t> expect
     }
     if ((reader ? reader->thread_ids(main_pid) : get_thread_list(main_pid)) != threads)
         throw std::runtime_error("Thread stop barrier found a different physical thread set");
-    for (pid_t tid : threads) {
-        user_regs_struct regs{};
-        if (ptrace(PTRACE_GETREGS, tid, nullptr, &regs) == -1) {
-            const int error = errno;
-            throw std::runtime_error("Thread stop barrier cannot inspect stopped thread " +
-                                     std::to_string(tid) + ": " + std::strerror(error));
+    if (!reader) {
+        for (pid_t tid : threads) {
+            user_regs_struct regs{};
+            if (ptrace(PTRACE_GETREGS, tid, nullptr, &regs) == -1) {
+                const int error = errno;
+                throw std::runtime_error("Thread stop barrier cannot inspect stopped thread " +
+                                         std::to_string(tid) + ": " + std::strerror(error));
+            }
+        }
+        for (pid_t tid : threads) {
+            require_no_pending_signals(tid);
+            require_no_rseq(tid);
+            require_no_native_robust_list(tid);
+        }
+    } else {
+        // PTRACE_GET_RSEQ_CONFIGURATION itself requires a ptrace stop, so the
+        // retained descriptors' fresh query proves each exact carrier is
+        // stopped. Probe every carrier before any pending/robust-list check.
+        for (pid_t tid : threads)
+            require_no_rseq(tid);
+        for (pid_t tid : threads) {
+            reader->require_no_pending(tid);
+            require_no_native_robust_list(tid);
         }
     }
-    for (pid_t tid : threads) {
-        if (reader) reader->require_no_pending(tid);
-        else require_no_pending_signals(tid);
-        require_no_rseq(tid);
-        require_no_native_robust_list(tid);
-    }
-    // Detect a concurrent clone/exit between enumeration and register checks.
+    // Detect a concurrent clone/exit between enumeration and stop checks.
     if ((reader ? reader->thread_ids(main_pid) : get_thread_list(main_pid)) != threads)
         throw std::runtime_error("Thread stop barrier thread set changed during verification");
 }

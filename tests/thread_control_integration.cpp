@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cerrno>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
@@ -25,13 +26,46 @@ extern "C" detsim::ui::NCursesUI *get_ncurses_ui() { return nullptr; }
 
 static bool track_capture_resumes=false;
 static unsigned capture_resumes=0;
+
+// Count only the probes a barrier itself issues; fixture ptrace calls are not
+// interesting. A one-shot rseq fault proves the retained path has no fallback.
+static bool track_stop_probes=false;
+static unsigned getregs_probes=0,rseq_probes=0;
+static int rseq_fault_on=0; // 1-based rseq probe ordinal
+static bool rseq_fault_short=false;
+
+static void reset_probe_counts() {
+    getregs_probes=rseq_probes=0;
+    track_stop_probes=true;
+}
+static void stop_probe_counts() { track_stop_probes=false; }
+
+// libc declares ptrace as a variadic enum __ptrace_request call. Match that
+// ABI and forward the three fixed ptrace arguments from the va_list.
 extern "C" long __real_ptrace(enum __ptrace_request, ...);
-extern "C" long __wrap_ptrace(enum __ptrace_request request,pid_t pid,void* address,void* data) noexcept {
+extern "C" long __wrap_ptrace(enum __ptrace_request request, ...) noexcept {
+    va_list args;
+    va_start(args, request);
+    const pid_t pid=va_arg(args, pid_t);
+    void* const address=va_arg(args, void*);
+    void* const data=va_arg(args, void*);
+    va_end(args);
     if(track_capture_resumes && (request==PTRACE_CONT || request==PTRACE_SYSCALL || request==PTRACE_SINGLESTEP)) {
         ++capture_resumes;
         // A negative oracle must never let the pre-barrier injection run.
-        // Ptrace_right reports this outside glibc's noexcept call boundary.
+        // The caller reports this outside glibc's noexcept call boundary.
         errno=EIO;return -1;
+    }
+    if(track_stop_probes) {
+        if(request==PTRACE_GETREGS) ++getregs_probes;
+        else if(request==PTRACE_GET_RSEQ_CONFIGURATION) {
+            const unsigned ordinal=++rseq_probes;
+            if(rseq_fault_on==static_cast<int>(ordinal)) {
+                if(rseq_fault_short)
+                    return static_cast<long>(sizeof(__ptrace_rseq_configuration)-1);
+                errno=EIO;return -1;
+            }
+        }
     }
     return __real_ptrace(request,pid,address,data);
 }
@@ -121,7 +155,13 @@ static void run_case()
     stopped(worker);
     // Deliberately reverse enumeration order: the gate compares sets, not slots.
     const std::array<pid_t, 2> tids{worker, child};
+    reset_probe_counts();
     verify_stopped_thread_set(child, tids);
+    stop_probe_counts();
+    require(getregs_probes == tids.size(),
+            "public barrier no longer probes registers once per carrier");
+    require(rseq_probes == tids.size(),
+            "public barrier no longer probes rseq once per carrier");
     for (int fault : {1, 2}) {
         enumeration_fault = fault; enumeration_ends = enumeration_closes = 0;
         capture_resumes = 0; track_capture_resumes = true;
@@ -144,7 +184,15 @@ static void run_case()
     PendingStatusReader retained;
     retained.retain(child);
     retained.retain(worker);
+    // Retained descriptors already pin the exact physical carriers; a fresh
+    // rseq query establishes that each one is stopped. No GETREGS is needed.
+    reset_probe_counts();
     verify_stopped_thread_set(child, tids, retained);
+    stop_probe_counts();
+    require(getregs_probes == 0,
+            "retained barrier performed redundant PTRACE_GETREGS");
+    require(rseq_probes == tids.size(),
+            "retained barrier did not probe rseq exactly once per carrier");
     for (int fault : {1, 2}) {
         enumeration_fault = fault; enumeration_ends = enumeration_closes = 0;
         capture_resumes = 0; track_capture_resumes = true;
@@ -160,6 +208,31 @@ static void run_case()
                 "retained barrier closed its stream or resumed after a read failure");
         verify_stopped_thread_set(child, tids, retained);
     }
+    // A failed or short rseq query must reject immediately: no GETREGS
+    // fallback, no retry, and no later carrier work. Fault the first and second
+    // probe ordinals to cover both a stopped leader and the second carrier.
+    auto reject_rseq_probe = [&](int fail_on, bool short_return, const char* label) {
+        reset_probe_counts();
+        rseq_fault_on = fail_on;
+        rseq_fault_short = short_return;
+        capture_resumes = 0; track_capture_resumes = true;
+        std::string message;
+        try { verify_stopped_thread_set(child, tids, retained); }
+        catch (const std::runtime_error& error) { message = error.what(); }
+        track_capture_resumes = false;
+        rseq_fault_on = 0; rseq_fault_short = false;
+        stop_probe_counts();
+        const std::string prefix(label);
+        require(message.starts_with("Cannot inspect thread rseq registration"),
+                (prefix + ": unexpected rejection: " + message).c_str());
+        require(getregs_probes == 0, (prefix + ": fell back to GETREGS").c_str());
+        require(rseq_probes == static_cast<unsigned>(fail_on),
+                (prefix + ": continued past the failed rseq probe").c_str());
+        require(capture_resumes == 0, (prefix + ": resumed a tracee").c_str());
+        verify_stopped_thread_set(child, tids, retained);
+    };
+    reject_rseq_probe(1, false, "failed rseq probe");
+    reject_rseq_probe(2, true, "short rseq probe");
     rejected([&] { verify_stopped_thread_set(child, {}); });
     rejected([&] { verify_stopped_thread_set(-1, tids); });
     const std::array<pid_t, 2> duplicate{child, child};
@@ -177,9 +250,19 @@ static void run_case()
     // PTRACE_CONT returns only after removing the ptrace stop; GETREGS must fail
     // even if this thread has not yet been scheduled on another CPU.
     rejected([&] { verify_stopped_thread_set(child, tids); });
+    reset_probe_counts();
     capture_resumes = 0; track_capture_resumes = true;
-    rejected([&] { verify_stopped_thread_set(child, tids, retained); });
+    std::string running_rejection;
+    try { verify_stopped_thread_set(child, tids, retained); }
+    catch (const std::runtime_error& error) { running_rejection = error.what(); }
     track_capture_resumes = false;
+    stop_probe_counts();
+    require(running_rejection.starts_with("Cannot inspect thread rseq registration"),
+            "retained barrier did not reject the running worker through the rseq stop probe");
+    require(getregs_probes == 0,
+            "retained barrier fell back to GETREGS for a running worker");
+    require(rseq_probes == tids.size(),
+            "retained barrier did not rseq-probe every carrier before rejecting");
     require(capture_resumes == 0, "retained barrier resumed a running worker");
     require(ptrace(PTRACE_GETREGS, child, nullptr, &after) == 0, "leader remains stopped");
     require(std::memcmp(&before, &after, sizeof before) == 0,

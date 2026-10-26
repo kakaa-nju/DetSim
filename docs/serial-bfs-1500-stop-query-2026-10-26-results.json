@@ -1,0 +1,123 @@
+{
+  "scope": "single60-second screening; no stable speedup claim",
+  "report": "build/serial-bfs-1500/stop-query-screen/run-8m9xvn1e/result.json",
+  "report_sha256": "a4b4168adffb9764577848e613c90e6abcd37b424626626ddc5f1fd3c7285fe0",
+  "result": {
+    "host": {
+      "system": "Linux",
+      "node": "tilnel",
+      "release": "6.12.105+deb13-amd64",
+      "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+      "machine": "x86_64",
+      "processor": ""
+    },
+    "backend": "pages",
+    "seed": 1,
+    "rounds": 100,
+    "requested_seconds": 60.0,
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-stop-query": "18b32a3ba14a0e3c3e0d9929855ccf4c4e30ceee0fa3fb4715f59bbf7c7784b4",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ce4c80fddaf20a1c466cca4052c5289f8bd143152bd3616f1d5d627f23502346"
+    },
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "tracer_cpu_affinity": [
+      2
+    ],
+    "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+    "checkout_commit": "5eb154b2ebdb97cf80e8d2e1dded5992ce5bb619",
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "on",
+      "DETSIM_OBSERVATION_CACHE_STATS": null,
+      "DETSIM_CAPTURE_LAYOUT_CACHE": "on"
+    },
+    "prefix_nodes": [
+      {
+        "node": 0,
+        "state": 4,
+        "current_term": 1,
+        "commit_idx": 3,
+        "last_applied_idx": 3,
+        "snapshot_last_idx": 0
+      },
+      {
+        "node": 1,
+        "state": 1,
+        "current_term": 1,
+        "commit_idx": 3,
+        "last_applied_idx": 3,
+        "snapshot_last_idx": 0
+      },
+      {
+        "node": 2,
+        "state": 1,
+        "current_term": 1,
+        "commit_idx": 3,
+        "last_applied_idx": 3,
+        "snapshot_last_idx": 0
+      }
+    ],
+    "root": "b71e4b2fc5ab3c57",
+    "root_budget": 2,
+    "command_seconds": 60.042278696084395,
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 81193,
+      "new": 25362,
+      "unique": 25362,
+      "elapsed_s": 60.030136,
+      "states_per_s": 1352.537335,
+      "state_store": {
+        "loads": 398895,
+        "l1": 391767,
+        "l2": 7128,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 371495,
+        "new": 4413,
+        "dedup_pct": 98.8
+      },
+      "new_states_per_s": 422.48779846175927
+    },
+    "search_work": {
+      "transitions": 81192,
+      "restore_us": 12265010,
+      "capture_check_commit_us": 39592124
+    },
+    "first_parent_edges": 45850,
+    "generated_new_nodes_including_budget_cuts": 45550,
+    "generated_new_nodes_per_s": 758.7855539757564,
+    "counter_scope": "CLI searched counts root plus transitions; CLI new excludes model-budget-cut successors; generated_new_nodes counts all saved new identities relative to the deterministic prefix, including budget cuts",
+    "evidence_scope": "native BFS; tree is first-parent witnesses, not every edge",
+    "tracer_exit": 0,
+    "passed": true
+  },
+  "gates": [
+    "make -j4 NP=1 CC=/usr/bin/gcc CXX=/usr/bin/g++ check-thread-control check-pending-status-reader: exit0",
+    "make -j4 NP=1 CC=/usr/bin/gcc CXX=/usr/bin/g++ check-thread-lifecycle: exit0 four variants",
+    "make -j4 NP=2 CC=/usr/bin/gcc CXX=/usr/bin/g++ check-capture: exit0 normal/tiny",
+    "NP3 tracer build and Raft full/pages healthy/mutant verify +3x replay: exit0"
+  ],
+  "red": "stop-query-red.log: redundant GETREGS count assertion fails before product change"
+}
