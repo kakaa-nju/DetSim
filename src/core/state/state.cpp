@@ -1550,7 +1550,7 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
   const auto regs = main->regs;
 
   // Serialize tracee_state AFTER threads have been populated
-  std::vector<uint8_t> tstate_data;
+  std::string tstate_data;
   {
     std::ostringstream oss;
     {
@@ -1558,13 +1558,14 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
       cereal::BinaryOutputArchive ar(oss);
       ar(*this);
     }
-    std::string str = oss.str();
-    tstate_data.assign(str.begin(), str.end());
+    tstate_data = std::move(oss).str();
   }
 
   if (page_capture_enabled())
   {
-    const auto hash = save_paged_snapshot(pid, regions, tstate_data, maps_text, regs,
+    const std::span<const uint8_t> metadata(
+        reinterpret_cast<const uint8_t*>(tstate_data.data()), tstate_data.size());
+    const auto hash = save_paged_snapshot(pid, regions, metadata, maps_text, regs,
                               comparison_hash);
     remember_thread_bindings(pid, hash, *this);
     detsim::resident::publish(pid, hash, brk);
