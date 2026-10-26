@@ -1,0 +1,297 @@
+{
+  "decision": "retain16: marginal single-pair gain does not justify quadrupled root capacity",
+  "rows": [
+    {
+      "capacity": 64,
+      "report": "build/serial-bfs-1500/observation-capacity-64/run-lojmavv7/result.json",
+      "report_sha256": "705a2e18320d287b73510f9a86e4aed15f2ece6a2a53830e05a48ece27e5275e",
+      "result": {
+        "host": {
+          "system": "Linux",
+          "node": "tilnel",
+          "release": "6.12.105+deb13-amd64",
+          "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+          "machine": "x86_64",
+          "processor": ""
+        },
+        "backend": "pages",
+        "seed": 1,
+        "rounds": 100,
+        "requested_seconds": 60.0,
+        "inputs_sha256": {
+          "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+          "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-observation64": "ed5e2edbdc6f8107993bf1436d100b4d8a27ffffb8b7d3f7a4e3a32e360daf7e",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+          "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ce4c80fddaf20a1c466cca4052c5289f8bd143152bd3616f1d5d627f23502346"
+        },
+        "cpu_affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "tracer_cpu_affinity": [
+          2
+        ],
+        "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+        "checkout_commit": "42cf8a7fadcdea6bb0c27b5885fa279a7c0a5eb6",
+        "execution_options": {
+          "DETSIM_RESIDENT_MEMORY": null,
+          "DETSIM_CAPTURE_MODE": null,
+          "DETSIM_CAPTURE_VERIFY": null,
+          "DETSIM_SOFT_DIRTY": null,
+          "DETSIM_OBSERVATION_CACHE": "on",
+          "DETSIM_OBSERVATION_CACHE_STATS": "1",
+          "DETSIM_CAPTURE_LAYOUT_CACHE": "on"
+        },
+        "prefix_nodes": [
+          {
+            "node": 0,
+            "state": 4,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 1,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 2,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          }
+        ],
+        "root": "cb84c754f627319b",
+        "root_budget": 2,
+        "command_seconds": 60.03268369100988,
+        "search_metrics": {
+          "engine": "builtin_cli",
+          "completion": "interrupted",
+          "searched": 80343,
+          "new": 25080,
+          "unique": 25080,
+          "elapsed_s": 60.023635,
+          "states_per_s": 1338.522736,
+          "state_store": {
+            "loads": 392215,
+            "l1": 385184,
+            "l2": 7031,
+            "disk": 0,
+            "hit_pct": 100.0,
+            "saves": 367594,
+            "new": 4346,
+            "dedup_pct": 98.8
+          },
+          "new_states_per_s": 417.83540766899574
+        },
+        "search_work": {
+          "transitions": 80342,
+          "restore_us": 12629842,
+          "capture_check_commit_us": 39070741
+        },
+        "first_parent_edges": 45366,
+        "generated_new_nodes_including_budget_cuts": 45066,
+        "generated_new_nodes_per_s": 750.804245694217,
+        "counter_scope": "CLI searched counts root plus transitions; CLI new excludes model-budget-cut successors; generated_new_nodes counts all saved new identities relative to the deterministic prefix, including budget cuts",
+        "evidence_scope": "native BFS; tree is first-parent witnesses, not every edge",
+        "tracer_exit": 0,
+        "passed": true,
+        "observation_cache_process": [
+          {
+            "lookups": 15636279,
+            "hits": 14347113,
+            "misses": 1289166,
+            "admitted": 1289160,
+            "nonlocal": 0,
+            "roots": 64
+          }
+        ]
+      }
+    },
+    {
+      "capacity": 16,
+      "report": "build/serial-bfs-1500/observation-capacity-16/run-c0dm2ifl/result.json",
+      "report_sha256": "c5f94e45709141b849de9bce80c577dc97a9d58aedeb2566090ced477db20aa0",
+      "result": {
+        "host": {
+          "system": "Linux",
+          "node": "tilnel",
+          "release": "6.12.105+deb13-amd64",
+          "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+          "machine": "x86_64",
+          "processor": ""
+        },
+        "backend": "pages",
+        "seed": 1,
+        "rounds": 100,
+        "requested_seconds": 60.0,
+        "inputs_sha256": {
+          "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+          "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-restore-barrier": "cfcf6d5e570b6b3d246736ae4c944611507ddae2e2ec467cefeaa75fe3941814",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+          "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ce4c80fddaf20a1c466cca4052c5289f8bd143152bd3616f1d5d627f23502346"
+        },
+        "cpu_affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "tracer_cpu_affinity": [
+          2
+        ],
+        "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+        "checkout_commit": "42cf8a7fadcdea6bb0c27b5885fa279a7c0a5eb6",
+        "execution_options": {
+          "DETSIM_RESIDENT_MEMORY": null,
+          "DETSIM_CAPTURE_MODE": null,
+          "DETSIM_CAPTURE_VERIFY": null,
+          "DETSIM_SOFT_DIRTY": null,
+          "DETSIM_OBSERVATION_CACHE": "on",
+          "DETSIM_OBSERVATION_CACHE_STATS": "1",
+          "DETSIM_CAPTURE_LAYOUT_CACHE": "on"
+        },
+        "prefix_nodes": [
+          {
+            "node": 0,
+            "state": 4,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 1,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 2,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          }
+        ],
+        "root": "91528ed433bb8b8a",
+        "root_budget": 2,
+        "command_seconds": 60.02268509985879,
+        "search_metrics": {
+          "engine": "builtin_cli",
+          "completion": "interrupted",
+          "searched": 79740,
+          "new": 24892,
+          "unique": 24892,
+          "elapsed_s": 60.0141,
+          "states_per_s": 1328.687757,
+          "state_store": {
+            "loads": 391166,
+            "l1": 384222,
+            "l2": 6944,
+            "disk": 0,
+            "hit_pct": 100.0,
+            "saves": 364826,
+            "new": 4308,
+            "dedup_pct": 98.8
+          },
+          "new_states_per_s": 414.76919590562886
+        },
+        "search_work": {
+          "transitions": 79739,
+          "restore_us": 12375606,
+          "capture_check_commit_us": 39583740
+        },
+        "first_parent_edges": 45074,
+        "generated_new_nodes_including_budget_cuts": 44774,
+        "generated_new_nodes_per_s": 746.0580097010536,
+        "counter_scope": "CLI searched counts root plus transitions; CLI new excludes model-budget-cut successors; generated_new_nodes counts all saved new identities relative to the deterministic prefix, including budget cuts",
+        "evidence_scope": "native BFS; tree is first-parent witnesses, not every edge",
+        "tracer_exit": 0,
+        "passed": true,
+        "observation_cache_process": [
+          {
+            "lookups": 15519297,
+            "hits": 13103751,
+            "misses": 2415546,
+            "admitted": 2415540,
+            "nonlocal": 0,
+            "roots": 16
+          }
+        ]
+      }
+    }
+  ],
+  "gain": 0.007402024251511152,
+  "counter_scope": "memo counters are process lifetime, not search-only",
+  "commands": [
+    {
+      "roots": 64,
+      "argv": [
+        "python3",
+        "examples/redisraft/serial_benchmark.py",
+        "--tracer",
+        "build/serial-bfs-1500/tracer-observation64",
+        "--output",
+        "build/serial-bfs-1500/observation-capacity-64",
+        "--binary",
+        "build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--cpu",
+        "2",
+        "--seconds",
+        "60"
+      ],
+      "exit": 0
+    },
+    {
+      "roots": 16,
+      "argv": [
+        "python3",
+        "examples/redisraft/serial_benchmark.py",
+        "--tracer",
+        "build/serial-bfs-1500/tracer-restore-barrier",
+        "--output",
+        "build/serial-bfs-1500/observation-capacity-16",
+        "--binary",
+        "build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--cpu",
+        "2",
+        "--seconds",
+        "60"
+      ],
+      "exit": 0
+    }
+  ]
+}

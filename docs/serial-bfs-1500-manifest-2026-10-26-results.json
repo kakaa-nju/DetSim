@@ -1,0 +1,156 @@
+{
+  "decision": "shelved: no visible screening improvement, not proof of zero benefit",
+  "report": "build/serial-bfs-1500/manifest-reuse-screen/run-09np30ap/result.json",
+  "report_sha256": "43c854de8b6f015a2a3854ca9a9684a765b2514a2c90abb9cc38032b1e055835",
+  "result": {
+    "host": {
+      "system": "Linux",
+      "node": "tilnel",
+      "release": "6.12.105+deb13-amd64",
+      "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+      "machine": "x86_64",
+      "processor": ""
+    },
+    "backend": "pages",
+    "seed": 1,
+    "rounds": 100,
+    "requested_seconds": 60.0,
+    "inputs_sha256": {
+      "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+      "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-manifest-reuse": "42648f1e0a2a4c5d52d2995d5c404c4331a77d914f011ace476a537e3acbef60",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+      "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+      "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ce4c80fddaf20a1c466cca4052c5289f8bd143152bd3616f1d5d627f23502346"
+    },
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ],
+    "tracer_cpu_affinity": [
+      2
+    ],
+    "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+    "checkout_commit": "42cf8a7fadcdea6bb0c27b5885fa279a7c0a5eb6",
+    "execution_options": {
+      "DETSIM_RESIDENT_MEMORY": null,
+      "DETSIM_CAPTURE_MODE": null,
+      "DETSIM_CAPTURE_VERIFY": null,
+      "DETSIM_SOFT_DIRTY": null,
+      "DETSIM_OBSERVATION_CACHE": "on",
+      "DETSIM_OBSERVATION_CACHE_STATS": null,
+      "DETSIM_CAPTURE_LAYOUT_CACHE": "on"
+    },
+    "prefix_nodes": [
+      {
+        "node": 0,
+        "state": 4,
+        "current_term": 1,
+        "commit_idx": 3,
+        "last_applied_idx": 3,
+        "snapshot_last_idx": 0
+      },
+      {
+        "node": 1,
+        "state": 1,
+        "current_term": 1,
+        "commit_idx": 3,
+        "last_applied_idx": 3,
+        "snapshot_last_idx": 0
+      },
+      {
+        "node": 2,
+        "state": 1,
+        "current_term": 1,
+        "commit_idx": 3,
+        "last_applied_idx": 3,
+        "snapshot_last_idx": 0
+      }
+    ],
+    "root": "b793c18b131a0894",
+    "root_budget": 2,
+    "command_seconds": 60.0205959728919,
+    "search_metrics": {
+      "engine": "builtin_cli",
+      "completion": "interrupted",
+      "searched": 82571,
+      "new": 25813,
+      "unique": 25813,
+      "elapsed_s": 60.009368,
+      "states_per_s": 1375.968495,
+      "state_store": {
+        "loads": 404860,
+        "l1": 397541,
+        "l2": 7319,
+        "disk": 0,
+        "hit_pct": 100.0,
+        "saves": 377687,
+        "new": 4471,
+        "dedup_pct": 98.8
+      },
+      "new_states_per_s": 430.14950599046466
+    },
+    "search_work": {
+      "transitions": 82570,
+      "restore_us": 12469722,
+      "capture_check_commit_us": 39445490
+    },
+    "first_parent_edges": 46690,
+    "generated_new_nodes_including_budget_cuts": 46390,
+    "generated_new_nodes_per_s": 773.0459684227969,
+    "counter_scope": "CLI searched counts root plus transitions; CLI new excludes model-budget-cut successors; generated_new_nodes counts all saved new identities relative to the deterministic prefix, including budget cuts",
+    "evidence_scope": "native BFS; tree is first-parent witnesses, not every edge",
+    "tracer_exit": 0,
+    "passed": true
+  },
+  "gates": [
+    {
+      "argv": [
+        "make",
+        "-j4",
+        "NP=2",
+        "CC=/usr/bin/gcc",
+        "CXX=/usr/bin/g++",
+        "check-capture"
+      ],
+      "exit": 0
+    },
+    {
+      "argv": [
+        "make",
+        "-j4",
+        "NP=1",
+        "CC=/usr/bin/gcc",
+        "CXX=/usr/bin/g++",
+        "check-page-snapshot"
+      ],
+      "exit": 0
+    },
+    {
+      "argv": [
+        "make",
+        "-j4",
+        "NP=3",
+        "CC=/usr/bin/gcc",
+        "CXX=/usr/bin/g++",
+        "tracer"
+      ],
+      "exit": 0
+    }
+  ],
+  "additional": "final capture including main_regs-only fallback passed; real Raft full/pages healthy/mutant verify +3x replay passed",
+  "patch": "build/serial-bfs-1500/manifest-reuse-tested.patch",
+  "coverage_limits": [
+    "no capture-level borrowed-path shared-publication/read-only integration test"
+  ]
+}
