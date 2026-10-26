@@ -595,6 +595,7 @@ static std::shared_ptr<const CaptureLayout> build_capture_layout(
 }
 
 enum class CaptureLayoutCacheMode { off, on, verify };
+enum class CaptureLayoutKeyKind { canonical, raw };
 
 // Bounded cache of pure text-derived layouts. Four entries are enough for the
 // stopped target and its adjacent transitions; admission caps keep pathological
@@ -606,6 +607,9 @@ struct CaptureLayoutCache {
 
   struct Entry {
     std::string key;
+    // One bounded alias for the exact live text that produced this layout. It
+    // is lookup metadata only; the layout remains derived from key.
+    std::string raw_alias;
     CaptureLayoutContext context;
     std::shared_ptr<const CaptureLayout> layout;
   };
@@ -668,14 +672,74 @@ static std::shared_ptr<const CaptureLayout> build_capture_layout_counted(
   return layout;
 }
 
+// Read at most one byte past the cache key cap. Exactly max_key_bytes is still
+// a valid raw key; max_key_bytes + 1 selects the checked seek/old-reader path.
+static std::string read_capture_maps(FILE* maps)
+{
+  std::string raw(CaptureLayoutCache::max_key_bytes + 1, '\0');
+  size_t used = 0;
+  bool eof = false;
+  while (used < raw.size()) {
+    const size_t got = fread(raw.data() + used, 1, raw.size() - used, maps);
+    if (got == 0) {
+      eof = feof(maps) != 0;
+      break;
+    }
+    used += got;
+  }
+  // A bounded key is only complete when the zero read reported EOF. A stream
+  // that stops without EOF is a read failure, not a short valid text.
+  if (ferror(maps) || used == 0 ||
+      (used <= CaptureLayoutCache::max_key_bytes && !eof))
+    throw std::runtime_error("Failed to read tracee memory mappings");
+  raw.resize(used);
+  return raw;
+}
+
+// Parse the exact observed text through the unchanged line reader. fmemopen
+// preserves its 1024-byte fgets chunks, NUL handling and missing-final-newline
+// behavior; the observed string outlives fclose.
+static void parse_observed_maps(std::string_view raw,
+                                std::vector<maps_item>& parsed_maps)
+{
+  FILE* maps = fmemopen(const_cast<char*>(raw.data()), raw.size(), "r");
+  if (!maps) throw std::runtime_error("Failed to read tracee memory mappings");
+  bool failed = false;
+  try {
+    get_maps_item(parsed_maps, maps);
+    failed = ferror(maps) != 0;
+  } catch (...) {
+    fclose(maps);
+    throw;
+  }
+  fclose(maps);
+  if (failed || parsed_maps.empty())
+    throw std::runtime_error("Failed to read tracee memory mappings");
+}
+
+// Oversize fallback: rewind with a checked seek and use the historical reader,
+// which consumes the whole stream and reports read errors before any lookup.
+static void parse_maps_file(FILE* maps, std::vector<maps_item>& parsed_maps)
+{
+  if (fseeko(maps, 0, SEEK_SET) != 0)
+    throw std::runtime_error("Failed to read tracee memory mappings");
+  get_maps_item(parsed_maps, maps);
+  if (ferror(maps) || parsed_maps.empty())
+    throw std::runtime_error("Failed to read tracee memory mappings");
+}
+
 static std::shared_ptr<const CaptureLayout> find_capture_layout(
-    std::string_view key, const CaptureLayoutContext& context)
+    std::string_view key, const CaptureLayoutContext& context,
+    CaptureLayoutKeyKind kind)
 {
   auto& cache = capture_layout_cache();
   std::lock_guard<std::mutex> lock(cache.mutex);
   ++cache.lookups;
   for (auto it = cache.entries.begin(); it != cache.entries.end(); ++it) {
-    if (it->key != key || !(it->context == context)) continue;
+    const std::string& candidate =
+        kind == CaptureLayoutKeyKind::canonical ? it->key : it->raw_alias;
+    if (kind == CaptureLayoutKeyKind::raw && candidate.empty()) continue;
+    if (candidate != key || !(it->context == context)) continue;
     ++cache.hits;
     auto layout = it->layout;
     if (it != cache.entries.begin()) {
@@ -689,13 +753,14 @@ static std::shared_ptr<const CaptureLayout> find_capture_layout(
   return {};
 }
 
-static void admit_capture_layout(std::string_view key,
+static void admit_capture_layout(std::string_view key, std::string_view raw_alias,
                                  const std::shared_ptr<const CaptureLayout>& layout,
                                  const CaptureLayoutContext& context)
 {
   auto& cache = capture_layout_cache();
   std::lock_guard<std::mutex> lock(cache.mutex);
   if (key.size() > CaptureLayoutCache::max_key_bytes ||
+      raw_alias.size() > CaptureLayoutCache::max_key_bytes ||
       capture_layout_bytes(*layout) > CaptureLayoutCache::max_layout_bytes) {
     ++cache.oversize;
     return;
@@ -703,6 +768,9 @@ static void admit_capture_layout(std::string_view key,
   for (auto it = cache.entries.begin(); it != cache.entries.end(); ++it) {
     if (it->key != key || !(it->context == context)) continue;
     it->layout = layout;
+    // Oversize live text is admitted without an alias. Keep the previous raw
+    // alias in that case instead of dropping a reusable exact-text key.
+    if (!raw_alias.empty()) it->raw_alias = std::string(raw_alias);
     if (it != cache.entries.begin()) {
       auto entry = std::move(*it);
       cache.entries.erase(it);
@@ -715,7 +783,7 @@ static void admit_capture_layout(std::string_view key,
     ++cache.evictions;
   }
   cache.entries.insert(cache.entries.begin(),
-                       {std::string(key), context, layout});
+                       {std::string(key), std::string(raw_alias), context, layout});
   ++cache.admits;
 }
 
@@ -1511,28 +1579,39 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
   std::shared_ptr<const CaptureLayout> layout;
 
   if (resident.snapshot) {
+    // Keep the historical resident path in control flow: the saved canonical
+    // text is the authority and no live /proc read is performed. The cache is
+    // consulted only when enabled; a resident miss admits no live raw alias.
     const std::string_view resident_maps = resident.snapshot->maps_text();
     const bool cache_enabled = layout_cache_mode != CaptureLayoutCacheMode::off;
     const bool key_fits =
         resident_maps.size() <= CaptureLayoutCache::max_key_bytes;
-    if (cache_enabled && key_fits)
-      layout = find_capture_layout(resident_maps, layout_context);
-    else if (cache_enabled)
+    if (cache_enabled && key_fits) {
+      layout = find_capture_layout(resident_maps, layout_context,
+                                   CaptureLayoutKeyKind::canonical);
+    } else if (cache_enabled) {
       note_capture_layout_oversize();
+    }
 
-    if (layout && layout_cache_mode == CaptureLayoutCacheMode::verify) {
-      parse_mapping_text(resident_maps, parsed_maps);
-      const auto rebuilt = build_capture_layout_counted(
-          parsed_maps, layout_context, layout_cache_mode);
-      verify_capture_layout(*layout, *rebuilt);
-    } else if (!layout) {
+    if (layout) {
+      if (layout_cache_mode == CaptureLayoutCacheMode::verify) {
+        parse_mapping_text(resident_maps, parsed_maps);
+        const auto rebuilt = build_capture_layout_counted(
+            parsed_maps, layout_context, layout_cache_mode);
+        verify_capture_layout(*layout, *rebuilt);
+      }
+    } else {
       parse_mapping_text(resident_maps, parsed_maps);
       layout = build_capture_layout_counted(parsed_maps, layout_context,
                                             layout_cache_mode);
-      if (cache_enabled && key_fits)
-        admit_capture_layout(layout->maps_text, layout, layout_context);
+      if (cache_enabled && key_fits) {
+        // Empty alias preserves any existing raw alias for this canonical key.
+        admit_capture_layout(layout->maps_text, std::string_view{}, layout,
+                             layout_context);
+      }
     }
-  } else {
+  } else if (layout_cache_mode == CaptureLayoutCacheMode::off) {
+    // Historical live reader, unchanged.
     auto maps_fp = fileutils::open_cfile(fmt::format("/proc/{}/maps", pid), "r");
     if (!maps_fp) throw std::runtime_error("Cannot open tracee memory mappings for capture");
     get_maps_item(parsed_maps, maps_fp.get());
@@ -1540,8 +1619,41 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
       throw std::runtime_error("Failed to read tracee memory mappings");
     layout = build_capture_layout_counted(parsed_maps, layout_context,
                                           layout_cache_mode);
-    if (layout_cache_mode != CaptureLayoutCacheMode::off)
-      admit_capture_layout(layout->maps_text, layout, layout_context);
+  } else {
+    auto maps_fp = fileutils::open_cfile(fmt::format("/proc/{}/maps", pid), "r");
+    if (!maps_fp) throw std::runtime_error("Cannot open tracee memory mappings for capture");
+
+    // Without resident authority, observe the live text to EOF before any
+    // lookup. A read error rejects even when a valid prefix was observed.
+    const std::string observed = read_capture_maps(maps_fp.get());
+    if (observed.size() > CaptureLayoutCache::max_key_bytes) {
+      // The bounded reader stopped one byte past the cap. Consume the stream
+      // with the checked seek/old reader, and admit no raw alias.
+      note_capture_layout_oversize();
+      parse_maps_file(maps_fp.get(), parsed_maps);
+      layout = build_capture_layout_counted(parsed_maps, layout_context,
+                                            layout_cache_mode);
+      admit_capture_layout(layout->maps_text, std::string_view{}, layout,
+                           layout_context);
+    } else {
+      // This branch never consults resident canonical authority. The raw key
+      // is the exact observed text, so a hit cannot hide malformed text.
+      layout = find_capture_layout(observed, layout_context,
+                                   CaptureLayoutKeyKind::raw);
+      if (layout) {
+        if (layout_cache_mode == CaptureLayoutCacheMode::verify) {
+          parse_observed_maps(observed, parsed_maps);
+          const auto rebuilt = build_capture_layout_counted(
+              parsed_maps, layout_context, layout_cache_mode);
+          verify_capture_layout(*layout, *rebuilt);
+        }
+      } else {
+        parse_observed_maps(observed, parsed_maps);
+        layout = build_capture_layout_counted(parsed_maps, layout_context,
+                                              layout_cache_mode);
+        admit_capture_layout(layout->maps_text, observed, layout, layout_context);
+      }
+    }
   }
 
   const auto& regions = layout->regions;

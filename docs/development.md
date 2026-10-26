@@ -1,7 +1,8 @@
 # Developing DetSim
 
-[单实例BFS验收](serial-bfs-performance-2026-10-25.md)及
-[优化对并行的影响](parallel-after-serial-2026-10-26.md)记录最新性能测量；
+[单实例1500 BFS验收](serial-bfs-1500-2026-10-26.md)、
+[此前1000 BFS验收](serial-bfs-performance-2026-10-25.md)及
+[优化对并行的影响](parallel-after-serial-2026-10-26.md)记录性能测量；
 请按报告中的硬件、负载与统计口径读取。
 
 [并行性能优化归档](archive/parallel-performance-2026-10-24.md)汇总已测路线、未采用
@@ -988,3 +989,14 @@ cases, make check and NP1/NP4 production builds pass. Detailed-metadata compilat
 also passes. Interval-map allocation failures remain fail-stop; do not continue a
 conversion after a partial allocation failure. Existing sparse write allocation
 is not bounded by the ftruncate-specific64MiB check.
+
+
+`DETSIM_CAPTURE_LAYOUT_CACHE=off|on|verify` defaults to off. It memoizes only
+text-derived capture layouts. Resident snapshots use their canonical maps text;
+nonresident captures still freshly read live maps to EOF before exact raw-text
+lookup. Each of four canonical entries can retain one raw alias up to64KiB.
+Oversized live input uses a checked seek and the original reader; no raw alias
+is retained. Verify reparses the observed input with the original FILE parser
+and compares all layout fields. Input errors reject before publication. Eager
+reading can change which error is reported when malformed text and a later I/O
+failure coexist. This does not cache live VMA authority or change snapshot format.

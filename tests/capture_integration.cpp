@@ -21,14 +21,22 @@
 #include <cstdio>
 #include <arpa/inet.h>
 #include <cerrno>
+#include <cinttypes>
 #include <cstddef>
+#include <cstdint>
 #include <cstring>
+#include <fcntl.h>
 #include <filesystem>
+#include <algorithm>
 #include <linux/prctl.h>
+#include <sstream>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
+#include <sys/types.h>
 #include <sys/wait.h>
+#include <unistd.h>
+#include <utility>
 #include <sys/rseq.h>
 #include <sys/syscall.h>
 #include <sys/user.h>
@@ -92,6 +100,367 @@ extern "C" uint64_t __wrap__Z17tracee_do_syscalliimmmmmm(
     return __real__Z17tracee_do_syscalliimmmmmm(pid, number, rdi, rsi, rdx, r10, r8, r9);
 }
 static void require(bool ok, const char *why) { if (!ok) throw std::runtime_error(why); }
+// Synthetic /proc/<pid>/maps support. Only the one designated maps path is
+// wrapped; every other fopen (stores, fixtures) reaches the real libc. A cookie
+// stream lets a test control short reads, EIO and the rewind used by the
+// oversize fallback without changing product code or throwing through libc.
+struct MapsCookie {
+    std::string data;
+    size_t position = 0;
+    size_t fail_at = SIZE_MAX;
+    bool fail_seek = false;
+    bool fail_after_seek = false;
+    bool armed_eio = false;
+};
+static std::string maps_override_path;
+static std::string maps_override_data;
+static size_t maps_override_fail_at = SIZE_MAX;
+static bool maps_override_fail_seek = false;
+static bool maps_override_fail_after_seek = false;
+static unsigned maps_override_opens = 0;
+static unsigned maps_override_reads = 0;
+static unsigned long long maps_override_bytes = 0;
+
+static ssize_t maps_cookie_read(void *cookie, char *buffer, size_t size)
+{
+    auto *stream = static_cast<MapsCookie *>(cookie);
+    ++maps_override_reads;
+    if (stream->armed_eio) { errno = EIO; return -1; }
+    // The configured failure boundary is checked before EOF so fail_at ==
+    // data.size() injects EIO exactly at the last valid byte, not a silent EOF.
+    if (stream->position >= stream->fail_at) { errno = EIO; return -1; }
+    if (stream->position >= stream->data.size()) return 0;
+    const size_t end = std::min(stream->data.size(), stream->fail_at);
+    const size_t count = std::min(size, end - stream->position);
+    if (count == 0) { errno = EIO; return -1; }
+    memcpy(buffer, stream->data.data() + stream->position, count);
+    stream->position += count;
+    maps_override_bytes += count;
+    return static_cast<ssize_t>(count);
+}
+static ssize_t maps_cookie_write(void *, const char *, size_t)
+{
+    errno = EIO;
+    return -1;
+}
+static int maps_cookie_seek(void *cookie, off64_t *offset, int whence)
+{
+    auto *stream = static_cast<MapsCookie *>(cookie);
+    if (stream->fail_seek) { errno = ESPIPE; return -1; }
+    off64_t base = 0;
+    if (whence == SEEK_SET) base = 0;
+    else if (whence == SEEK_CUR) base = static_cast<off64_t>(stream->position);
+    else if (whence == SEEK_END) base = static_cast<off64_t>(stream->data.size());
+    else { errno = EINVAL; return -1; }
+    const off64_t next = base + *offset;
+    if (next < 0) { errno = EINVAL; return -1; }
+    stream->position = static_cast<size_t>(next);
+    if (stream->fail_after_seek) stream->armed_eio = true;
+    *offset = next;
+    return 0;
+}
+static int maps_cookie_close(void *cookie)
+{
+    delete static_cast<MapsCookie *>(cookie);
+    return 0;
+}
+static FILE *open_maps_cookie()
+{
+    MapsCookie *stream = nullptr;
+    try {
+        stream = new MapsCookie{maps_override_data, 0, maps_override_fail_at,
+            maps_override_fail_seek, maps_override_fail_after_seek, false};
+    } catch (...) {
+        // __wrap_fopen sits on libc's fopencookie contract and must never let
+        // an allocation failure escape as a C++ exception.
+        errno = ENOMEM;
+        return nullptr;
+    }
+    cookie_io_functions_t callbacks{};
+    callbacks.read = maps_cookie_read;
+    callbacks.write = maps_cookie_write;
+    callbacks.seek = maps_cookie_seek;
+    callbacks.close = maps_cookie_close;
+    FILE *file = fopencookie(stream, "r", callbacks);
+    if (!file) delete stream;
+    return file;
+}
+extern "C" FILE *__real_fopen(const char *path, const char *mode);
+extern "C" FILE *__wrap_fopen(const char *path, const char *mode)
+{
+    if (!maps_override_path.empty() && path && maps_override_path == path) {
+        ++maps_override_opens;
+        return open_maps_cookie();
+    }
+    return __real_fopen(path, mode);
+}
+struct MapsStreamScope {
+    MapsStreamScope(pid_t pid, std::string data, size_t fail_at = SIZE_MAX,
+                    bool fail_seek = false, bool fail_after_seek = false)
+    {
+        require(maps_override_path.empty(), "nested maps stream override");
+        maps_override_path = "/proc/" + std::to_string(pid) + "/maps";
+        maps_override_data = std::move(data);
+        maps_override_fail_at = fail_at;
+        maps_override_fail_seek = fail_seek;
+        maps_override_fail_after_seek = fail_after_seek;
+        maps_override_opens = maps_override_reads = 0;
+        maps_override_bytes = 0;
+    }
+    ~MapsStreamScope() { maps_override_path.clear(); }
+    MapsStreamScope(const MapsStreamScope &) = delete;
+    MapsStreamScope &operator=(const MapsStreamScope &) = delete;
+};
+static std::string read_maps_file(pid_t pid)
+{
+    const std::string path = "/proc/" + std::to_string(pid) + "/maps";
+    const int fd = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0) throw std::runtime_error("open real maps fixture");
+    std::string text;
+    char buffer[4096];
+    for (;;) {
+        const ssize_t got = ::read(fd, buffer, sizeof(buffer));
+        if (got < 0) { ::close(fd); throw std::runtime_error("read real maps fixture"); }
+        if (got == 0) break;
+        text.append(buffer, static_cast<size_t>(got));
+    }
+    ::close(fd);
+    return text;
+}
+static const char *maps_padding_prefix()
+{
+    return "ffffffffff600000-ffffffffff601000 r-xp 1 0:0 0 ";
+}
+static std::string excluded_padding_row(size_t extra_name)
+{
+    return std::string(maps_padding_prefix()) + "[vvar" +
+        std::string(extra_name, 'x') + "\n";
+}
+static std::string pad_maps_to(std::string base, size_t target)
+{
+    if (base.empty() || base.back() != '\n') base.push_back('\n');
+    require(base.size() < target, "maps padding target below base");
+    const size_t marker = strlen(maps_padding_prefix());
+    const size_t minimum = marker + 5 + 1;
+    const size_t maximum = marker + 5 + 504 + 1;
+    const size_t fixed = marker + 5 + 1 + 1;
+    size_t remaining = target - base.size();
+    std::string padding;
+    while (remaining > maximum) {
+        padding += excluded_padding_row(1);
+        remaining -= fixed;
+    }
+    require(remaining >= minimum && remaining <= maximum,
+            "exact maps padding unreachable");
+    padding += excluded_padding_row(remaining - minimum);
+    return base + padding;
+}
+struct TestMapRow {
+    uint64_t start = 0;
+    uint64_t end = 0;
+    std::string flags;
+    std::string offset;
+    std::string dev;
+    std::string inode;
+    std::string name;
+};
+static TestMapRow parse_test_row(const std::string &line)
+{
+    std::istringstream input(line);
+    std::string range;
+    TestMapRow row;
+    input >> range >> row.flags >> row.offset >> row.dev >> row.inode;
+    std::getline(input, row.name);
+    const size_t first = row.name.find_first_not_of(" \t");
+    row.name = first == std::string::npos ? "" : row.name.substr(first);
+    const size_t dash = range.find('-');
+    require(dash != std::string::npos && row.flags.size() >= 4 &&
+            row.inode.size() != 0, "fixture map fields");
+    row.start = std::stoull(range.substr(0, dash), nullptr, 16);
+    row.end = std::stoull(range.substr(dash + 1), nullptr, 16);
+    require(row.start < row.end, "fixture map range");
+    return row;
+}
+static std::string format_test_row(uint64_t start, uint64_t end,
+    const std::string &flags, const std::string &offset, const std::string &dev,
+    const std::string &inode, const std::string &name)
+{
+    char range[64];
+    const int written = snprintf(range, sizeof(range), "%" PRIx64 "-%" PRIx64,
+                                 start, end);
+    require(written > 0 && static_cast<size_t>(written) < sizeof(range),
+            "fixture map range format");
+    return std::string(range) + " " + flags + " " + offset + " " + dev + " " +
+        inode + " " + name + "\n";
+}
+static std::string hex_field(uint64_t value)
+{
+    char buffer[32];
+    const int written = snprintf(buffer, sizeof(buffer), "%" PRIx64, value);
+    require(written > 0 && static_cast<size_t>(written) < sizeof(buffer),
+            "fixture hex field");
+    return buffer;
+}
+template <typename Predicate, typename Rewrite>
+static std::string rewrite_first_line(std::string text, Predicate predicate,
+                                      Rewrite rewrite)
+{
+    size_t begin = 0;
+    while (begin < text.size()) {
+        const size_t end = text.find('\n', begin);
+        require(end != std::string::npos, "fixture line newline");
+        const TestMapRow row = parse_test_row(text.substr(begin, end - begin + 1));
+        if (predicate(row)) {
+            text.replace(begin, end - begin + 1, rewrite(row));
+            return text;
+        }
+        begin = end + 1;
+    }
+    throw std::runtime_error("fixture line predicate not found");
+}
+static std::string change_stack_flags(std::string text, const std::string &flags)
+{
+    return rewrite_first_line(std::move(text),
+        [](const TestMapRow &row) { return row.name == "[stack]"; },
+        [&](const TestMapRow &row) {
+            return format_test_row(row.start, row.end, flags, row.offset,
+                                   row.dev, row.inode, row.name);
+        });
+}
+static std::string rename_stack(std::string text, const std::string &name)
+{
+    return rewrite_first_line(std::move(text),
+        [](const TestMapRow &row) { return row.name == "[stack]"; },
+        [&](const TestMapRow &row) {
+            return format_test_row(row.start, row.end, row.flags, row.offset,
+                                   row.dev, row.inode, name);
+        });
+}
+static std::string change_file_backing(std::string text)
+{
+    return rewrite_first_line(std::move(text),
+        [](const TestMapRow &row) {
+            return row.inode != "0" && row.flags.size() >= 4 &&
+                row.flags[0] == 'r' && row.flags[3] == 'p';
+        },
+        [](const TestMapRow &row) {
+            const uint64_t offset = std::stoull(row.offset, nullptr, 16) + 0x1000;
+            return format_test_row(row.start, row.end, row.flags,
+                                   hex_field(offset), row.dev, row.inode, row.name);
+        });
+}
+struct SplitFixture {
+    std::string single;
+    std::string split;
+};
+static SplitFixture make_split_fixture(const std::string &base)
+{
+    const std::string name = "fixture-" + std::string(480, 'x');
+    size_t best_begin = 0;
+    size_t best_end = 0;
+    uint64_t best_size = 0;
+    TestMapRow best{};
+    size_t begin = 0;
+    while (begin < base.size()) {
+        const size_t end = base.find('\n', begin);
+        require(end != std::string::npos, "real maps line");
+        const TestMapRow row = parse_test_row(base.substr(begin, end - begin + 1));
+        const bool excluded = row.name.rfind("[vvar", 0) == 0 ||
+            row.name == "[vdso]" || row.name == "[vsyscall]";
+        const bool scratch_overlap = row.start <= scratch_page &&
+            scratch_page < row.end;
+        if (!excluded && !scratch_overlap && row.flags[0] == 'r' &&
+            row.flags[3] == 'p') {
+            const uint64_t size = row.end - row.start;
+            if (size > best_size) {
+                best_size = size;
+                best_begin = begin;
+                best_end = end + 1;
+                best = row;
+            }
+        }
+        begin = end + 1;
+    }
+    require(best_size >= 64 * 1024, "no large private mapping for split fixture");
+    const std::string single_row = format_test_row(best.start, best.end,
+        best.flags, best.offset, best.dev, best.inode, name);
+    std::string single = base;
+    single.replace(best_begin, best_end - best_begin, single_row);
+    require(single.size() <= 64 * 1024, "single split fixture exceeds raw cap");
+
+    const uint64_t chunk = std::max<uint64_t>(512, best_size / 200);
+    std::string rows;
+    for (uint64_t start = best.start; start < best.end; start += chunk) {
+        const uint64_t end = std::min<uint64_t>(best.end, start + chunk);
+        std::string offset = best.offset;
+        if (best.inode != "0") {
+            offset = hex_field(std::stoull(best.offset, nullptr, 16) +
+                               (start - best.start));
+        }
+        rows += format_test_row(start, end, best.flags, offset, best.dev,
+                                best.inode, name);
+    }
+    std::string split = base;
+    split.replace(best_begin, best_end - best_begin, rows);
+    require(split.size() > 64 * 1024, "split fixture did not exceed raw cap");
+    return {std::move(single), std::move(split)};
+}
+struct EquivalentPartitions {
+    std::string merged;
+    std::string split;
+};
+static EquivalentPartitions make_equivalent_partitions(const std::string &base)
+{
+    size_t target_begin = 0;
+    size_t target_end = 0;
+    TestMapRow target{};
+    bool found = false;
+    size_t begin = 0;
+    while (begin < base.size()) {
+        const size_t end = base.find('\n', begin);
+        require(end != std::string::npos, "real maps line");
+        const TestMapRow row = parse_test_row(base.substr(begin, end - begin + 1));
+        const bool excluded = row.name.rfind("[vvar", 0) == 0 ||
+            row.name == "[vdso]" || row.name == "[vsyscall]";
+        const bool scratch_overlap = row.start <= scratch_page &&
+            scratch_page < row.end;
+        const uint64_t size = row.end - row.start;
+        if (!found && !excluded && !scratch_overlap && row.flags[0] == 'r' &&
+            row.flags[3] == 'p' && size >= 8192) {
+            target = row;
+            target_begin = begin;
+            target_end = end + 1;
+            found = true;
+        }
+        begin = end + 1;
+    }
+    require(found, "no splittable private mapping for alias fixture");
+    const uint64_t midpoint = target.start +
+        (((target.end - target.start) / 2) & ~uint64_t(4095));
+    require(midpoint > target.start && midpoint < target.end,
+            "fixture split midpoint");
+    std::string second_offset = target.offset;
+    if (target.inode != "0") {
+        second_offset = hex_field(std::stoull(target.offset, nullptr, 16) +
+                                  (midpoint - target.start));
+    }
+    const std::string rows =
+        format_test_row(target.start, midpoint, target.flags, target.offset,
+                        target.dev, target.inode, target.name) +
+        format_test_row(midpoint, target.end, target.flags, second_offset,
+                        target.dev, target.inode, target.name);
+    std::string split = base;
+    split.replace(target_begin, target_end - target_begin, rows);
+    return {base, std::move(split)};
+}
+static std::string whitespace_variant(const std::string &base)
+{
+    const size_t first_space = base.find(' ');
+    require(first_space != std::string::npos, "real maps whitespace");
+    std::string variant = base;
+    variant.insert(first_space, "\t");
+    return variant;
+}
 // One real guest syscall through the production engine. do_single_syscall owns
 // the user->entry and (suppressed) entry->exit resumes, so the unprotected
 // resume under test is the engine's, not a harness reimplementation. Register
@@ -128,6 +497,10 @@ struct CaptureLayoutMode {
 static detsim::CaptureLayoutCacheStats capture_layout_stats() {
     return detsim::capture_layout_cache_stats();
 }
+struct CaptureOutcome {
+    sys_state state;
+    detsim::CaptureLayoutCacheStats stats;
+};
 int main(int argc, char**)
 {
     pid_t children[NP]{};
@@ -312,6 +685,42 @@ int main(int argc, char**)
             require(second.ss_hash == first.ss_hash, "cached layout changed identity");
             compare_full(second);
 
+            // A warmed raw alias must survive loss of the resident proof for an
+            // unchanged stopped target, and the on path must still read the
+            // designated maps file to EOF before consulting it.
+            {
+                // Resident admissions carry no live alias, so warm the raw
+                // aliases with a no-resident capture first.
+                detsim::resident::invalidate_all();
+                const auto before_warm = capture_layout_stats();
+                sys_state warmed(info, &source);
+                const auto warmed_stats = capture_layout_stats();
+                require(warmed.ss_hash == second.ss_hash,
+                        "raw alias warm changed unchanged identity");
+                require(warmed_stats.builds == before_warm.builds + NP,
+                        "raw alias warm did not build every layout");
+                require(warmed_stats.hits == before_warm.hits,
+                        "raw alias warm unexpectedly hit");
+                const std::string live_maps = read_maps_file(children[1]);
+                const auto before_refresh = capture_layout_stats();
+                detsim::resident::invalidate_all();
+                MapsStreamScope stream(children[1], live_maps);
+                sys_state refreshed(info, &source);
+                const auto refreshed_stats = capture_layout_stats();
+                require(refreshed.ss_hash == second.ss_hash,
+                        "raw alias refresh changed unchanged identity");
+                require(refreshed_stats.hits == before_refresh.hits + NP,
+                        "warmed raw alias did not hit after resident invalidation");
+                require(refreshed_stats.builds == before_refresh.builds,
+                        "warmed raw alias rebuilt a layout");
+                require(refreshed_stats.entries == before_refresh.entries,
+                        "raw alias hit changed the cache entry count");
+                require(maps_override_opens >= 1 &&
+                        maps_override_bytes == live_maps.size(),
+                        "on mode did not freshly read the designated maps file");
+                compare_full(refreshed);
+            }
+
             const auto mapped = tracee_do_syscall(children[1], SYS_mmap, 0, 4096,
                 PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, uint64_t(-1), 0);
             require(mapped > 0 && mapped < uint64_t(-4095), "layout cache fixture mapping");
@@ -401,8 +810,8 @@ int main(int argc, char**)
                 const auto seeded_stats = capture_layout_stats();
                 require(verify_original.ss_hash == source.ss_hash,
                         "verify mode changed restored identity");
-                require(seeded_stats.lookups == 0 && seeded_stats.builds == NP,
-                        "verify seed did not rebuild from live maps");
+                require(seeded_stats.lookups == NP && seeded_stats.builds == NP,
+                        "verify seed did not miss raw text and rebuild each layout");
                 require(seeded_stats.admits >= 1,
                         "verify seed did not admit canonical layout");
                 const auto before_verify = capture_layout_stats();
@@ -420,6 +829,23 @@ int main(int argc, char**)
                         verify_stats.verify_mismatches == 0,
                         "canonical text did not rebuild the original layout");
                 compare_full(verified);
+
+                // Losing the resident proof must fall back to the raw aliases
+                // admitted when verify seeded the cache, and verify must still
+                // rebuild rather than reuse.
+                detsim::resident::invalidate_all();
+                const auto before_raw_verify = capture_layout_stats();
+                sys_state raw_verified(info, &source);
+                const auto raw_verify_stats = capture_layout_stats();
+                require(raw_verified.ss_hash == verify_original.ss_hash,
+                        "raw verify changed restored identity");
+                require(raw_verify_stats.hits == before_raw_verify.hits + NP &&
+                        raw_verify_stats.builds == before_raw_verify.builds + NP,
+                        "raw verify did not hit the active aliases and rebuild");
+                require(raw_verify_stats.verify_checks ==
+                        before_raw_verify.verify_checks + NP &&
+                        raw_verify_stats.verify_mismatches == 0,
+                        "raw verify did not rebuild and compare every layout");
             }
 
             {
@@ -444,6 +870,484 @@ int main(int argc, char**)
             require(default_stats.lookups == 0 && default_stats.builds == 0 &&
                     default_stats.entries == 0,
                     "default layout cache mode was not off");
+        }
+        // Synthetic maps streams exercise reader boundaries, fallback, parser
+        // equivalence, admission and alias replacement. Off mode is the
+        // independent oracle for every accepted or rejected synthetic text.
+        detsim::clear_capture_layout_cache();
+        {
+            detsim::resident::Scope controlled;
+            source.recover_running_state();
+            const std::string base = read_maps_file(children[0]);
+            auto capture_off = [&](pid_t target, const std::string& maps) {
+                detsim::resident::invalidate_all();
+                MapsStreamScope stream(target, maps);
+                CaptureLayoutMode mode("off");
+                sys_state state(info, &source);
+                return CaptureOutcome{std::move(state), capture_layout_stats()};
+            };
+            auto capture_on = [&](pid_t target, const std::string& maps,
+                                  bool clear) {
+                detsim::resident::invalidate_all();
+                if (clear) detsim::clear_capture_layout_cache();
+                MapsStreamScope stream(target, maps);
+                CaptureLayoutMode mode("on");
+                sys_state state(info, &source);
+                return CaptureOutcome{std::move(state), capture_layout_stats()};
+            };
+            auto capture_cached = [&](pid_t target, const std::string& maps) {
+                MapsStreamScope stream(target, maps);
+                CaptureLayoutMode mode("on");
+                sys_state state(info, &source);
+                return CaptureOutcome{std::move(state), capture_layout_stats()};
+            };
+            auto failure_of = [](auto&& operation) -> std::string {
+                try { operation(); }
+                catch (const std::runtime_error& error) { return error.what(); }
+                return "";
+            };
+            auto saved_successors = [&]() {
+                return StateStore::instance().get_stats().save_calls;
+            };
+
+            const std::string maps_65536 = pad_maps_to(base, 64 * 1024);
+            require(maps_65536.size() == 64 * 1024, "65536 maps fixture size");
+            const auto off_65536 = capture_off(children[0], maps_65536);
+            const auto on_65536 = capture_on(children[0], maps_65536, true);
+            require(on_65536.state.ss_hash == off_65536.state.ss_hash,
+                    "65536-byte raw maps changed identity");
+            require(on_65536.stats.oversize == 0,
+                    "65536-byte raw maps were treated as oversized");
+            require(on_65536.stats.builds == NP,
+                    "65536-byte raw maps did not build exactly once");
+            // compare_full cannot see a synthetic resident proof: full capture
+            // mode rejects resident images and reads live maps. Off mode is the
+            // independent oracle for this synthetic text.
+
+            const auto reuse_65536 = capture_on(children[0], maps_65536, false);
+            require(reuse_65536.state.ss_hash == on_65536.state.ss_hash,
+                    "65536-byte raw alias reuse changed identity");
+            require(reuse_65536.stats.hits == on_65536.stats.hits + NP &&
+                    reuse_65536.stats.builds == on_65536.stats.builds,
+                    "65536-byte raw alias did not hit without rebuilding");
+            const auto cached_65536 = capture_cached(children[0], maps_65536);
+            require(cached_65536.state.ss_hash == on_65536.state.ss_hash,
+                    "canonical hit after raw reuse changed identity");
+            require(cached_65536.stats.hits == reuse_65536.stats.hits + NP &&
+                    cached_65536.stats.builds == reuse_65536.stats.builds,
+                    "canonical hit after raw reuse rebuilt a layout");
+
+            {
+                // Two equivalent raw partitions must share one canonical entry.
+                // Re-observing either partition replaces the one alias, never
+                // allocates another slot, and both directions must hit.
+                const auto parts = make_equivalent_partitions(base);
+                const auto seed_split = capture_on(children[0], parts.split, true);
+                require(seed_split.stats.oversize == 0,
+                        "small partition fixture was treated as oversized");
+                const auto merged_miss = capture_on(children[0], parts.merged, false);
+                require(merged_miss.state.ss_hash == seed_split.state.ss_hash,
+                        "equivalent merged partition changed identity");
+                require(merged_miss.stats.builds == seed_split.stats.builds + 1 &&
+                        merged_miss.stats.hits == seed_split.stats.hits + 1,
+                        "equivalent merged partition did not miss the raw alias");
+                require(merged_miss.stats.admits == seed_split.stats.admits &&
+                        merged_miss.stats.entries == seed_split.stats.entries,
+                        "equivalent merged partition allocated a new slot");
+                const auto merged_hit = capture_on(children[0], parts.merged, false);
+                require(merged_hit.stats.builds == merged_miss.stats.builds &&
+                        merged_hit.stats.hits == merged_miss.stats.hits + NP,
+                        "replaced raw alias did not hit the merged partition");
+                const auto split_miss = capture_on(children[0], parts.split, false);
+                require(split_miss.state.ss_hash == seed_split.state.ss_hash,
+                        "equivalent split partition changed identity");
+                require(split_miss.stats.builds == merged_hit.stats.builds + 1 &&
+                        split_miss.stats.hits == merged_hit.stats.hits + 1,
+                        "equivalent split partition did not replace the alias");
+                require(split_miss.stats.admits == merged_hit.stats.admits &&
+                        split_miss.stats.entries == merged_hit.stats.entries,
+                        "equivalent split partition allocated a new slot");
+                const auto split_hit = capture_on(children[0], parts.split, false);
+                require(split_hit.stats.builds == split_miss.stats.builds &&
+                        split_hit.stats.hits == split_miss.stats.hits + NP,
+                        "replaced raw alias did not hit the split partition");
+            }
+            {
+                // Same canonical key, different raw whitespace. Re-observing
+                // the second spelling must replace the first alias in place;
+                // the old spelling then misses and the new one hits.
+                const std::string maps_ws = whitespace_variant(base);
+                require(maps_ws.size() != base.size(),
+                        "whitespace variant did not change the raw text");
+                const auto seed = capture_on(children[0], base, true);
+                const auto ws_miss = capture_on(children[0], maps_ws, false);
+                require(ws_miss.state.ss_hash == seed.state.ss_hash,
+                        "whitespace variant changed identity");
+                require(ws_miss.stats.builds == seed.stats.builds + 1 &&
+                        ws_miss.stats.hits == seed.stats.hits + 1,
+                        "whitespace variant did not miss the raw alias");
+                require(ws_miss.stats.admits == seed.stats.admits &&
+                        ws_miss.stats.entries == seed.stats.entries,
+                        "whitespace variant allocated a new slot");
+                const auto ws_hit = capture_on(children[0], maps_ws, false);
+                require(ws_hit.stats.builds == ws_miss.stats.builds &&
+                        ws_hit.stats.hits == ws_miss.stats.hits + NP,
+                        "replaced whitespace alias did not hit");
+                const auto base_miss = capture_on(children[0], base, false);
+                require(base_miss.state.ss_hash == seed.state.ss_hash,
+                        "old whitespace alias changed identity");
+                require(base_miss.stats.builds == ws_hit.stats.builds + 1 &&
+                        base_miss.stats.hits == ws_hit.stats.hits + 1,
+                        "old alias did not miss after whitespace replacement");
+                require(base_miss.stats.admits == ws_hit.stats.admits &&
+                        base_miss.stats.entries == ws_hit.stats.entries,
+                        "old alias replacement allocated a new slot");
+                const auto base_hit = capture_on(children[0], base, false);
+                require(base_hit.stats.builds == base_miss.stats.builds &&
+                        base_hit.stats.hits == base_miss.stats.hits + NP,
+                        "restored base alias did not hit");
+            }
+            {
+                // An oversize partition can share the <=64 KiB canonical key
+                // of a resident raw alias. Its canonical admission must keep
+                // that alias rather than erase it.
+                const SplitFixture equivalent = make_split_fixture(base);
+                const auto seed_single = capture_on(children[0], equivalent.single, true);
+                require(seed_single.stats.oversize == 0,
+                        "single oversize fixture exceeded the raw cap");
+                const auto single_hit = capture_on(children[0], equivalent.single, false);
+                require(single_hit.stats.builds == seed_single.stats.builds &&
+                        single_hit.stats.hits == seed_single.stats.hits + NP,
+                        "single partition raw alias did not hit");
+                const auto oversize = capture_on(children[0], equivalent.split, false);
+                require(oversize.state.ss_hash == seed_single.state.ss_hash,
+                        "equivalent oversize partition changed identity");
+                require(oversize.stats.oversize >= 1,
+                        "equivalent oversize partition was not reported oversized");
+                require(oversize.stats.builds == single_hit.stats.builds + 1 &&
+                        oversize.stats.hits == single_hit.stats.hits + 1,
+                        "equivalent oversize partition did not rebuild exactly once");
+                require(oversize.stats.admits == single_hit.stats.admits &&
+                        oversize.stats.entries == single_hit.stats.entries,
+                        "equivalent oversize admission allocated a new slot");
+                const auto preserved = capture_on(children[0], equivalent.single, false);
+                require(preserved.stats.builds == oversize.stats.builds &&
+                        preserved.stats.hits == oversize.stats.hits + NP,
+                        "oversize canonical admission dropped the existing raw alias");
+            }
+
+            const std::string maps_65535 = pad_maps_to(base, 64 * 1024 - 1);
+            const auto seed_65535 = capture_on(children[0], maps_65535, true);
+            require(seed_65535.stats.oversize == 0,
+                    "65535-byte raw maps were treated as oversized");
+            const auto reuse_65535 = capture_on(children[0], maps_65535, false);
+            require(reuse_65535.state.ss_hash == seed_65535.state.ss_hash,
+                    "65535-byte raw alias reuse changed identity");
+            require(reuse_65535.stats.hits == seed_65535.stats.hits + NP &&
+                    reuse_65535.stats.builds == seed_65535.stats.builds,
+                    "65535-byte raw alias did not hit");
+
+            const std::string maps_65537 = pad_maps_to(base, 64 * 1024 + 1);
+            const auto off_65537 = capture_off(children[0], maps_65537);
+            const auto seed_65537 = capture_on(children[0], maps_65537, true);
+            require(seed_65537.state.ss_hash == off_65537.state.ss_hash,
+                    "65537-byte fallback changed identity");
+            require(seed_65537.stats.oversize >= 1,
+                    "65537-byte raw maps were not reported oversized");
+            require(seed_65537.stats.builds == NP,
+                    "65537-byte fallback did not build exactly once");
+            const auto reuse_65537 = capture_on(children[0], maps_65537, false);
+            require(reuse_65537.state.ss_hash == seed_65537.state.ss_hash,
+                    "65537-byte fallback reuse changed identity");
+            require(reuse_65537.stats.builds == seed_65537.stats.builds + 1 &&
+                    reuse_65537.stats.hits == seed_65537.stats.hits + 1,
+                    "65537-byte raw maps reused a raw alias or disturbed the peer");
+
+            const std::string maps_80k = pad_maps_to(base, 80 * 1024);
+            const auto seed_80k = capture_on(children[0], maps_80k, true);
+            require(seed_80k.stats.oversize >= 1,
+                    "over-limit raw maps were not reported oversized");
+            require(seed_80k.stats.builds == NP,
+                    "over-limit fallback did not build exactly once");
+            const auto reuse_80k = capture_on(children[0], maps_80k, false);
+            require(reuse_80k.state.ss_hash == seed_80k.state.ss_hash,
+                    "over-limit fallback reuse changed identity");
+            require(reuse_80k.stats.builds == seed_80k.stats.builds + 1 &&
+                    reuse_80k.stats.hits == seed_80k.stats.hits + 1,
+                    "over-limit raw maps reused a raw alias or disturbed the peer");
+
+            {
+                detsim::resident::invalidate_all();
+                MapsStreamScope stream(children[0], maps_80k, SIZE_MAX, true, false);
+                CaptureLayoutMode mode("on");
+                const auto before_stats = capture_layout_stats();
+                const auto before_saves = saved_successors();
+                const std::string error = failure_of([&] {
+                    sys_state bad(info, &source);
+                });
+                require(error == "Failed to read tracee memory mappings",
+                        "seek failure was not rejected as a maps read failure");
+                require(saved_successors() == before_saves,
+                        "seek failure saved a successor state");
+                const auto after_stats = capture_layout_stats();
+                require(after_stats.lookups == before_stats.lookups &&
+                        after_stats.hits == before_stats.hits &&
+                        after_stats.builds == before_stats.builds &&
+                        after_stats.admits == before_stats.admits &&
+                        after_stats.entries == before_stats.entries,
+                        "seek failure consulted or mutated the layout cache");
+            }
+            {
+                detsim::resident::invalidate_all();
+                MapsStreamScope stream(children[0], maps_80k, SIZE_MAX, false, true);
+                CaptureLayoutMode mode("on");
+                const auto before_stats = capture_layout_stats();
+                const auto before_saves = saved_successors();
+                const std::string error = failure_of([&] {
+                    sys_state bad(info, &source);
+                });
+                require(error == "Failed to read tracee memory mappings",
+                        "fallback read failure was not rejected");
+                require(saved_successors() == before_saves,
+                        "fallback read failure saved a successor state");
+                const auto after_stats = capture_layout_stats();
+                require(after_stats.lookups == before_stats.lookups &&
+                        after_stats.hits == before_stats.hits &&
+                        after_stats.builds == before_stats.builds &&
+                        after_stats.admits == before_stats.admits &&
+                        after_stats.entries == before_stats.entries,
+                        "fallback read failure consulted or mutated the layout cache");
+            }
+            {
+                capture_on(children[0], base, true);
+                require(detsim::resident::get(children[0]).snapshot != nullptr,
+                        "resident proof absent before empty-read test");
+                detsim::resident::invalidate_all();
+                const auto before_stats = capture_layout_stats();
+                const auto before_saves = saved_successors();
+                MapsStreamScope stream(children[0], "");
+                CaptureLayoutMode mode("on");
+                const std::string error = failure_of([&] {
+                    sys_state bad(info, &source);
+                });
+                require(error == "Failed to read tracee memory mappings",
+                        "empty live maps was not rejected");
+                require(saved_successors() == before_saves,
+                        "empty live maps saved a successor state");
+                const auto after_stats = capture_layout_stats();
+                require(after_stats.lookups == before_stats.lookups &&
+                        after_stats.hits == before_stats.hits &&
+                        after_stats.builds == before_stats.builds &&
+                        after_stats.admits == before_stats.admits &&
+                        after_stats.entries == before_stats.entries,
+                        "empty live maps was looked up");
+                require(detsim::resident::get(children[0]).snapshot == nullptr,
+                        "empty live maps published resident proof");
+            }
+            {
+                detsim::resident::invalidate_all();
+                const auto before_stats = capture_layout_stats();
+                const auto before_saves = saved_successors();
+                MapsStreamScope stream(children[0], base, 64);
+                CaptureLayoutMode mode("on");
+                const std::string error = failure_of([&] {
+                    sys_state bad(info, &source);
+                });
+                require(error == "Failed to read tracee memory mappings",
+                        "partial read with EIO was not rejected");
+                require(saved_successors() == before_saves,
+                        "partial read with EIO saved a successor state");
+                const auto after_stats = capture_layout_stats();
+                require(after_stats.lookups == before_stats.lookups &&
+                        after_stats.hits == before_stats.hits &&
+                        after_stats.builds == before_stats.builds &&
+                        after_stats.admits == before_stats.admits &&
+                        after_stats.entries == before_stats.entries,
+                        "partial read with EIO hit the cache or built a layout");
+            }
+            {
+                // The raw alias already describes exactly this text. EIO on
+                // the EOF probe must still reject instead of treating the
+                // valid prefix as a cache hit.
+                detsim::resident::invalidate_all();
+                const auto before_stats = capture_layout_stats();
+                const auto before_saves = saved_successors();
+                MapsStreamScope stream(children[0], base, base.size());
+                CaptureLayoutMode mode("on");
+                const std::string error = failure_of([&] {
+                    sys_state bad(info, &source);
+                });
+                require(error == "Failed to read tracee memory mappings",
+                        "cached text with EOF EIO was not rejected");
+                require(saved_successors() == before_saves,
+                        "cached text with EOF EIO saved a successor state");
+                const auto after_stats = capture_layout_stats();
+                require(after_stats.lookups == before_stats.lookups &&
+                        after_stats.hits == before_stats.hits &&
+                        after_stats.builds == before_stats.builds &&
+                        after_stats.admits == before_stats.admits &&
+                        after_stats.entries == before_stats.entries,
+                        "cached text with EOF EIO hit the cache or built a layout");
+                require(detsim::resident::get(children[0]).snapshot == nullptr,
+                        "cached text with EOF EIO published resident proof");
+            }
+            {
+                // A valid resident capture must not open or read the live maps
+                // stream: the saved canonical text stays authoritative.
+                const auto resident_capture = capture_on(children[0], base, true);
+                require(detsim::resident::get(children[0]).snapshot != nullptr,
+                        "resident proof absent before resident-reuse test");
+                const auto before_stats = capture_layout_stats();
+                MapsStreamScope stream(children[0], "");
+                CaptureLayoutMode mode("on");
+                sys_state reused(info, &source);
+                require(reused.ss_hash == resident_capture.state.ss_hash,
+                        "resident reuse changed unchanged identity");
+                require(maps_override_opens == 0,
+                        "resident capture opened the live maps stream");
+                const auto after_stats = capture_layout_stats();
+                require(after_stats.hits == before_stats.hits + NP &&
+                        after_stats.builds == before_stats.builds,
+                        "resident capture did not reuse the canonical layout");
+            }
+            {
+                detsim::resident::invalidate_all();
+                const std::string malformed = base + "not-a-mapping\n";
+                MapsStreamScope stream(children[0], malformed);
+                CaptureLayoutMode mode("on");
+                const auto before_stats = capture_layout_stats();
+                const auto before_saves = saved_successors();
+                const std::string error = failure_of([&] {
+                    sys_state bad(info, &source);
+                });
+                require(error == "Invalid memory mapping text",
+                        "malformed live tail was not rejected");
+                require(saved_successors() == before_saves,
+                        "malformed live tail saved a successor state");
+                const auto after_stats = capture_layout_stats();
+                require(after_stats.lookups == before_stats.lookups + 1 &&
+                        after_stats.hits == before_stats.hits &&
+                        after_stats.builds == before_stats.builds &&
+                        after_stats.admits == before_stats.admits &&
+                        after_stats.entries == before_stats.entries,
+                        "malformed live tail was rebuilt or published");
+            }
+
+            {
+                std::string parser_maps = rewrite_first_line(base,
+                    [](const TestMapRow& row) { return row.name == "[stack]"; },
+                    [](const TestMapRow& row) {
+                        std::string line = format_test_row(row.start, row.end,
+                            row.flags, row.offset, row.dev, row.inode,
+                            "long-" + std::string(600, 'n'));
+                        line.insert(line.size() - 1,
+                            std::string(1, '\0') + "ignored-tail");
+                        return line;
+                    });
+                parser_maps +=
+                    "ffffffffff600000-ffffffffff601000 r-xp 1 0:0 0 [vvar-no-newline]";
+                require(parser_maps.back() != '\n', "no-newline fixture");
+                const auto off = capture_off(children[0], parser_maps);
+                const auto on = capture_on(children[0], parser_maps, true);
+                require(off.state.ss_hash == on.state.ss_hash,
+                        "NUL, long-name or missing-final-newline parse differed");
+            }
+            {
+                const size_t prefix = strlen(maps_padding_prefix());
+                std::string line = maps_padding_prefix();
+                line += "[vvar";
+                line.append(1023 - prefix - 5 - 1, 'p');
+                line += "\n";
+                require(line.size() == 1023, "1023-byte parser fixture size");
+                const auto off = capture_off(children[0], base + line);
+                const auto on = capture_on(children[0], base + line, true);
+                require(off.state.ss_hash == on.state.ss_hash,
+                        "1023-byte parser line differed");
+            }
+            {
+                const size_t prefix = strlen(maps_padding_prefix());
+                std::string line = maps_padding_prefix();
+                line += "[vvar";
+                line.append(1024 - prefix - 5 - 1, 'q');
+                line += "\n";
+                require(line.size() == 1024, "1024-byte parser fixture size");
+                const auto before_saves = saved_successors();
+                const std::string off_error = failure_of([&] {
+                    (void)capture_off(children[0], base + line);
+                });
+                const std::string on_error = failure_of([&] {
+                    (void)capture_on(children[0], base + line, false);
+                });
+                require(off_error == "Invalid memory mapping text" &&
+                        on_error == off_error,
+                        "1024-byte parser line disagreement");
+                require(saved_successors() == before_saves,
+                        "1024-byte parser rejection saved a successor state");
+            }
+
+            const auto warm = capture_on(children[0], base, true);
+            auto changed_check = [&](const std::string& maps, const char *label) {
+                const auto before = capture_layout_stats();
+                const auto changed = capture_on(children[0], maps, false);
+                require(changed.state.ss_hash != warm.state.ss_hash, label);
+                require(changed.stats.builds == before.builds + 1, label);
+                require(changed.stats.hits == before.hits + 1, label);
+                const auto off = capture_off(children[0], maps);
+                require(off.state.ss_hash == changed.state.ss_hash, label);
+            };
+            changed_check(change_stack_flags(base, "r--p"),
+                          "permission change did not miss and match off");
+            changed_check(rename_stack(base, "renamed-stack"),
+                          "name change did not miss and match off");
+            changed_check(change_file_backing(base),
+                          "backing change did not miss and match off");
+            {
+                const std::string shared = change_stack_flags(base, "r--s");
+                const auto before_saves = saved_successors();
+                const std::string off_error = failure_of([&] {
+                    (void)capture_off(children[0], shared);
+                });
+                const std::string on_error = failure_of([&] {
+                    (void)capture_on(children[0], shared, false);
+                });
+                require(off_error == on_error &&
+                        off_error.find("Unsupported snapshot mapping") !=
+                            std::string::npos,
+                        "shared mapping rejection differed between paths");
+                require(saved_successors() == before_saves,
+                        "shared mapping rejection saved a successor state");
+            }
+
+            // A raw hit must move the shared entry to MRU. The canonical hit
+            // path is covered by the pressure loop above; this isolates the raw
+            // path because a stale tail is evicted immediately afterwards.
+            {
+                detsim::clear_capture_layout_cache();
+                const std::string a = pad_maps_to(base, 65535);
+                const std::string b = pad_maps_to(base, 65536);
+                const std::string c = pad_maps_to(base, 65530);
+                const std::string d = pad_maps_to(base, 65531);
+                const std::string e = pad_maps_to(base, 65532);
+                const auto seed_a = capture_on(children[0], a, true);
+                capture_on(children[0], b, false);
+                const auto seed_c = capture_on(children[0], c, false);
+                require(seed_c.stats.entries == 4,
+                        "LRU fixture did not fill the cache");
+                const auto before_hit = capture_layout_stats();
+                const auto hit_a = capture_on(children[0], a, false);
+                require(hit_a.stats.builds == before_hit.builds &&
+                        hit_a.stats.hits == before_hit.hits + NP,
+                        "raw hit did not reuse the LRU entry");
+                capture_on(children[0], d, false);
+                capture_on(children[0], e, false);
+                const auto before_reuse = capture_layout_stats();
+                const auto reuse_a = capture_on(children[0], a, false);
+                require(reuse_a.state.ss_hash == seed_a.state.ss_hash,
+                        "raw LRU reuse changed identity");
+                require(reuse_a.stats.hits == before_reuse.hits + NP &&
+                        reuse_a.stats.builds == before_reuse.builds,
+                        "raw hit did not move the shared entry to MRU");
+            }
         }
         for (int i=0;i<NP;++i)
             require(source.child[i].process_state==initial_process_states[i],"process model state absent from capture");

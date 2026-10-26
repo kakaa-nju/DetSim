@@ -1587,3 +1587,16 @@ restore, store poison/reopen and resident-verify lifecycle gates pass. All-node
 preflight ordering remains. This strengthens scoped C08 evidence without closing
 its general state-equivalence/external-mutation limits. See
 [the performance and verification report](serial-bfs-1500-2026-10-26.md).
+
+
+### Fresh maps-text layout reuse (2026-10-26)
+
+The opt-in layout cache now accepts a bounded exact raw-text alias only after
+a complete successful live read. Resident canonical reuse and the disabled
+reader remain unchanged. Normal/tiny capture and mapping gates cover byte/hash
+equivalence, fresh reads on raw hits, alias replacement/eviction, equivalent
+partitions,65535/65536/65537-byte bounds, seek/read faults, invalid tails, NUL,
+long-line/name and no-final-newline behavior. Real full/pages Raft healthy/mutant
+verify/replay passes. Context variation and forced cache-corruption mismatch
+remain untested; this is scoped C08 evidence, not closure of general equivalence.
+[Long-window performance and verification](serial-bfs-1500-2026-10-26.md).
