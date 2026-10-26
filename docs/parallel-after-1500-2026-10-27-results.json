@@ -1,0 +1,1270 @@
+{
+  "scope": "1000-stage frozen tracer vs1500-stage; native parallel BFS; depth16; same-cpu; shared/pages; sequential reversed-order pairs",
+  "host": {
+    "system": "Linux",
+    "node": "tilnel",
+    "release": "6.12.105+deb13-amd64",
+    "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "execution_options": {
+    "DETSIM_RESIDENT_MEMORY": "on",
+    "DETSIM_OBSERVATION_CACHE": "on",
+    "DETSIM_CAPTURE_LAYOUT_CACHE": "on"
+  },
+  "common_inputs": {
+    "binary_sha256": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+    "plugins_sha256": [
+      "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+      "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce"
+    ],
+    "seed_shim_sha256": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+    "seed": 1,
+    "backend": "pages",
+    "depth": 16,
+    "rounds": 100,
+    "storage": "shared"
+  },
+  "nodes": 63418,
+  "edges": 112305,
+  "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+  "summary": [
+    {
+      "workers": 1,
+      "samples": {
+        "baseline": [
+          153.413627767,
+          148.640620826
+        ],
+        "current": [
+          113.020490654,
+          110.852058053
+        ]
+      },
+      "old_seconds": 151.0271242965,
+      "new_seconds": 111.9362743535,
+      "throughput_gain": 0.3492241471209705,
+      "time_reduction": 0.25883330643478275,
+      "new_edges_per_second": 1003.294067527525,
+      "old_speedup_vs_1": 1.0,
+      "new_speedup_vs_1": 1.0
+    },
+    {
+      "workers": 6,
+      "samples": {
+        "baseline": [
+          33.752085681,
+          33.777252507
+        ],
+        "current": [
+          26.82174919,
+          27.482242954
+        ]
+      },
+      "old_seconds": 33.764669094,
+      "new_seconds": 27.151996072,
+      "throughput_gain": 0.24354279532395773,
+      "time_reduction": 0.19584593006347795,
+      "new_edges_per_second": 4136.159997305409,
+      "old_speedup_vs_1": 4.472933641850428,
+      "new_speedup_vs_1": 4.122579940593474
+    },
+    {
+      "workers": 12,
+      "samples": {
+        "baseline": [
+          28.846990103,
+          29.410831537
+        ],
+        "current": [
+          23.312405086,
+          26.158482922
+        ]
+      },
+      "old_seconds": 29.12891082,
+      "new_seconds": 24.735444004,
+      "throughput_gain": 0.17761827179207001,
+      "time_reduction": 0.15082839324645914,
+      "new_edges_per_second": 4540.245971806247,
+      "old_speedup_vs_1": 5.184784464814397,
+      "new_speedup_vs_1": 4.525339198900114
+    }
+  ],
+  "rows": [
+    {
+      "name": "r1-w01-baseline",
+      "round": 1,
+      "workers": 1,
+      "version": "baseline",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w01-baseline/run-3wbjcpbx/results.json",
+      "report_sha256": "238a2f5d92243b81a2bf11057b96ec59809d682621731689625abc4f396b0783",
+      "seconds": 153.413627767,
+      "edges_per_second": 732.0405731527674,
+      "tracer_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.16433640895411372,
+      "command_seconds": 153.68538648099639
+    },
+    {
+      "name": "r1-w01-current",
+      "round": 1,
+      "workers": 1,
+      "version": "current",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w01-current/run-oqjln51l/results.json",
+      "report_sha256": "28f8b82c96cafeb15be35a568ab26c200ca9660be6eb21534f21380de0acfb15",
+      "seconds": 113.020490654,
+      "edges_per_second": 993.6693722540066,
+      "tracer_sha256": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.11426241998560727,
+      "command_seconds": 113.27888119895943
+    },
+    {
+      "name": "r1-w06-baseline",
+      "round": 1,
+      "workers": 6,
+      "version": "baseline",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w06-baseline/run-3tz8wxyh/results.json",
+      "report_sha256": "bc5bf2ce18b1055267908347af9e37acc2493ba60d61da89f1a30378abb429c9",
+      "seconds": 33.752085681,
+      "edges_per_second": 3327.349932132332,
+      "tracer_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        },
+        {
+          "worker": 2,
+          "host_cpu": 3
+        },
+        {
+          "worker": 3,
+          "host_cpu": 1
+        },
+        {
+          "worker": 4,
+          "host_cpu": 4
+        },
+        {
+          "worker": 5,
+          "host_cpu": 2
+        },
+        {
+          "worker": 6,
+          "host_cpu": 5
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.7655251850374043,
+      "command_seconds": 34.022575557930395
+    },
+    {
+      "name": "r1-w06-current",
+      "round": 1,
+      "workers": 6,
+      "version": "current",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w06-current/run-2izjhq8t/results.json",
+      "report_sha256": "33898184e37699af45bf647f84b0734f871a28a6298f9886ef83521a062c29e3",
+      "seconds": 26.82174919,
+      "edges_per_second": 4187.087098773964,
+      "tracer_sha256": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        },
+        {
+          "worker": 2,
+          "host_cpu": 3
+        },
+        {
+          "worker": 3,
+          "host_cpu": 1
+        },
+        {
+          "worker": 4,
+          "host_cpu": 4
+        },
+        {
+          "worker": 5,
+          "host_cpu": 2
+        },
+        {
+          "worker": 6,
+          "host_cpu": 5
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.36458994215354323,
+      "command_seconds": 27.091876566177234
+    },
+    {
+      "name": "r1-w12-baseline",
+      "round": 1,
+      "workers": 12,
+      "version": "baseline",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w12-baseline/run-ocxc56tc/results.json",
+      "report_sha256": "1f5ec438fd29e66cfc4e9ea9b4b2e7cdd766d32161d60df9fc4eb98ef508c700",
+      "seconds": 28.846990103,
+      "edges_per_second": 3893.1271373203203,
+      "tracer_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        },
+        {
+          "worker": 2,
+          "host_cpu": 3
+        },
+        {
+          "worker": 3,
+          "host_cpu": 1
+        },
+        {
+          "worker": 4,
+          "host_cpu": 4
+        },
+        {
+          "worker": 5,
+          "host_cpu": 2
+        },
+        {
+          "worker": 6,
+          "host_cpu": 5
+        },
+        {
+          "worker": 7,
+          "host_cpu": 6
+        },
+        {
+          "worker": 8,
+          "host_cpu": 9
+        },
+        {
+          "worker": 9,
+          "host_cpu": 7
+        },
+        {
+          "worker": 10,
+          "host_cpu": 10
+        },
+        {
+          "worker": 11,
+          "host_cpu": 8
+        },
+        {
+          "worker": 12,
+          "host_cpu": 11
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.21418530098162591,
+      "command_seconds": 29.11480165179819
+    },
+    {
+      "name": "r1-w12-current",
+      "round": 1,
+      "workers": 12,
+      "version": "current",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w12-current/run-slbe8fec/results.json",
+      "report_sha256": "97b1231090f3caded9d83c7e9b7026b0be5af6426c38e946e46ad5b4ba60cc24",
+      "seconds": 23.312405086,
+      "edges_per_second": 4817.39226758047,
+      "tracer_sha256": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        },
+        {
+          "worker": 2,
+          "host_cpu": 3
+        },
+        {
+          "worker": 3,
+          "host_cpu": 1
+        },
+        {
+          "worker": 4,
+          "host_cpu": 4
+        },
+        {
+          "worker": 5,
+          "host_cpu": 2
+        },
+        {
+          "worker": 6,
+          "host_cpu": 5
+        },
+        {
+          "worker": 7,
+          "host_cpu": 6
+        },
+        {
+          "worker": 8,
+          "host_cpu": 9
+        },
+        {
+          "worker": 9,
+          "host_cpu": 7
+        },
+        {
+          "worker": 10,
+          "host_cpu": 10
+        },
+        {
+          "worker": 11,
+          "host_cpu": 8
+        },
+        {
+          "worker": 12,
+          "host_cpu": 11
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 1.0156518411822617,
+      "command_seconds": 23.56983199203387
+    },
+    {
+      "name": "r2-w12-current",
+      "round": 2,
+      "workers": 12,
+      "version": "current",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w12-current/run-epa3b24q/results.json",
+      "report_sha256": "53c564fb8f3e786faf656a766fb92fefd4d55135422a08be662b6b3b8d805b29",
+      "seconds": 26.158482922,
+      "edges_per_second": 4293.25356271133,
+      "tracer_sha256": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        },
+        {
+          "worker": 2,
+          "host_cpu": 3
+        },
+        {
+          "worker": 3,
+          "host_cpu": 1
+        },
+        {
+          "worker": 4,
+          "host_cpu": 4
+        },
+        {
+          "worker": 5,
+          "host_cpu": 2
+        },
+        {
+          "worker": 6,
+          "host_cpu": 5
+        },
+        {
+          "worker": 7,
+          "host_cpu": 6
+        },
+        {
+          "worker": 8,
+          "host_cpu": 9
+        },
+        {
+          "worker": 9,
+          "host_cpu": 7
+        },
+        {
+          "worker": 10,
+          "host_cpu": 10
+        },
+        {
+          "worker": 11,
+          "host_cpu": 8
+        },
+        {
+          "worker": 12,
+          "host_cpu": 11
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.21425721212290227,
+      "command_seconds": 26.421721674967557
+    },
+    {
+      "name": "r2-w12-baseline",
+      "round": 2,
+      "workers": 12,
+      "version": "baseline",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w12-baseline/run-cju2twmk/results.json",
+      "report_sha256": "8f023b4cb727a683e7f7d2fa4628953d3b8c30d43d0f07653000eb3956da371f",
+      "seconds": 29.410831537,
+      "edges_per_second": 3818.491152102103,
+      "tracer_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        },
+        {
+          "worker": 2,
+          "host_cpu": 3
+        },
+        {
+          "worker": 3,
+          "host_cpu": 1
+        },
+        {
+          "worker": 4,
+          "host_cpu": 4
+        },
+        {
+          "worker": 5,
+          "host_cpu": 2
+        },
+        {
+          "worker": 6,
+          "host_cpu": 5
+        },
+        {
+          "worker": 7,
+          "host_cpu": 6
+        },
+        {
+          "worker": 8,
+          "host_cpu": 9
+        },
+        {
+          "worker": 9,
+          "host_cpu": 7
+        },
+        {
+          "worker": 10,
+          "host_cpu": 10
+        },
+        {
+          "worker": 11,
+          "host_cpu": 8
+        },
+        {
+          "worker": 12,
+          "host_cpu": 11
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.4146675639785826,
+      "command_seconds": 29.67348036984913
+    },
+    {
+      "name": "r2-w06-current",
+      "round": 2,
+      "workers": 6,
+      "version": "current",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w06-current/run-g1qd76ny/results.json",
+      "report_sha256": "2a383baf6c9e9acbc23e3965adb27d508b9f983ec151b3abd0122a5ac95755ab",
+      "seconds": 27.482242954,
+      "edges_per_second": 4086.4568509920027,
+      "tracer_sha256": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        },
+        {
+          "worker": 2,
+          "host_cpu": 3
+        },
+        {
+          "worker": 3,
+          "host_cpu": 1
+        },
+        {
+          "worker": 4,
+          "host_cpu": 4
+        },
+        {
+          "worker": 5,
+          "host_cpu": 2
+        },
+        {
+          "worker": 6,
+          "host_cpu": 5
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.5649997079744935,
+      "command_seconds": 27.74630599701777
+    },
+    {
+      "name": "r2-w06-baseline",
+      "round": 2,
+      "workers": 6,
+      "version": "baseline",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w06-baseline/run-yehrlc7_/results.json",
+      "report_sha256": "42b4d502e1c47e27cad364298e3af9f5219752e886dd1b6b552b5356e827bbba",
+      "seconds": 33.777252507,
+      "edges_per_second": 3324.870783280135,
+      "tracer_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        },
+        {
+          "worker": 2,
+          "host_cpu": 3
+        },
+        {
+          "worker": 3,
+          "host_cpu": 1
+        },
+        {
+          "worker": 4,
+          "host_cpu": 4
+        },
+        {
+          "worker": 5,
+          "host_cpu": 2
+        },
+        {
+          "worker": 6,
+          "host_cpu": 5
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.46476403600536287,
+      "command_seconds": 34.03530189488083
+    },
+    {
+      "name": "r2-w01-current",
+      "round": 2,
+      "workers": 1,
+      "version": "current",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w01-current/run-jagugxn1/results.json",
+      "report_sha256": "e4a21b13409dbea76be58a4433e4bd7b979c2444f4980d41ef2201d0b12ed00e",
+      "seconds": 110.852058053,
+      "edges_per_second": 1013.1070362834881,
+      "tracer_sha256": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer": "b53755a5805c95f4cbbf181c8ced8f6f18cd7fb2eae4fff6f87d62b57aeeed6a",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.26463630399666727,
+      "command_seconds": 111.11253969999962
+    },
+    {
+      "name": "r2-w01-baseline",
+      "round": 2,
+      "workers": 1,
+      "version": "baseline",
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w01-baseline/run-fch1zpfe/results.json",
+      "report_sha256": "05a9dd5f6c629693b93e6b15d83a02e383f91301b26ee20f4a9117eb42ac0e20",
+      "seconds": 148.640620826,
+      "edges_per_second": 755.5471672273571,
+      "tracer_sha256": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+      "graph_sha256": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "worker_placement": [
+        {
+          "worker": 1,
+          "host_cpu": 0
+        }
+      ],
+      "inputs_sha256": {
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer": "9ee454c6c99a046dc57f6021b3d436332532704e1dabd6dfb10f67c9944323f4",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+        "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+        "/home/kaguya/code/detsim/examples/redisraft/parallel_benchmark.py": "732b75a110a137bfe78dd93efee27c6d653cd3a0fcdc291ebca07f513ba68326"
+      },
+      "finalization_seconds": 0.11395787191577256,
+      "command_seconds": 148.91051672608592
+    }
+  ],
+  "commands": [
+    {
+      "name": "r1-w01-baseline",
+      "round": 1,
+      "workers": 1,
+      "version": "baseline",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w01-baseline",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "1",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-reference/run-6nzmkxyc/results.json"
+      ],
+      "started": 1793030335.5158386,
+      "driver_pid": 890137,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w01-baseline/run-3wbjcpbx/results.json",
+      "seconds": 153.413627767,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r1-w01-current",
+      "round": 1,
+      "workers": 1,
+      "version": "current",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w01-current",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "1",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-reference/run-bg8n0lpv/results.json"
+      ],
+      "started": 1793030498.8643112,
+      "driver_pid": 894415,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w01-current/run-oqjln51l/results.json",
+      "seconds": 113.020490654,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r1-w06-baseline",
+      "round": 1,
+      "workers": 6,
+      "version": "baseline",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w06-baseline",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "6",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-reference/run-6nzmkxyc/results.json"
+      ],
+      "started": 1793030621.1323175,
+      "driver_pid": 894681,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w06-baseline/run-3tz8wxyh/results.json",
+      "seconds": 33.752085681,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r1-w06-current",
+      "round": 1,
+      "workers": 6,
+      "version": "current",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w06-current",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "6",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-reference/run-bg8n0lpv/results.json"
+      ],
+      "started": 1793030664.9967842,
+      "driver_pid": 894852,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w06-current/run-2izjhq8t/results.json",
+      "seconds": 26.82174919,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r1-w12-baseline",
+      "round": 1,
+      "workers": 12,
+      "version": "baseline",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w12-baseline",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "12",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-reference/run-6nzmkxyc/results.json"
+      ],
+      "started": 1793030701.343454,
+      "driver_pid": 894980,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w12-baseline/run-ocxc56tc/results.json",
+      "seconds": 28.846990103,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r1-w12-current",
+      "round": 1,
+      "workers": 12,
+      "version": "current",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w12-current",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "12",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-reference/run-bg8n0lpv/results.json"
+      ],
+      "started": 1793030739.7006009,
+      "driver_pid": 895142,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r1-w12-current/run-slbe8fec/results.json",
+      "seconds": 23.312405086,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r2-w12-current",
+      "round": 2,
+      "workers": 12,
+      "version": "current",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w12-current",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "12",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-reference/run-bg8n0lpv/results.json"
+      ],
+      "started": 1793030773.2819648,
+      "driver_pid": 895295,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w12-current/run-epa3b24q/results.json",
+      "seconds": 26.158482922,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r2-w12-baseline",
+      "round": 2,
+      "workers": 12,
+      "version": "baseline",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w12-baseline",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "12",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-reference/run-6nzmkxyc/results.json"
+      ],
+      "started": 1793030808.831501,
+      "driver_pid": 895434,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w12-baseline/run-cju2twmk/results.json",
+      "seconds": 29.410831537,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r2-w06-current",
+      "round": 2,
+      "workers": 6,
+      "version": "current",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w06-current",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "6",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-reference/run-bg8n0lpv/results.json"
+      ],
+      "started": 1793030848.4602377,
+      "driver_pid": 895608,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w06-current/run-g1qd76ny/results.json",
+      "seconds": 27.482242954,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r2-w06-baseline",
+      "round": 2,
+      "workers": 6,
+      "version": "baseline",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w06-baseline",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "6",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-reference/run-6nzmkxyc/results.json"
+      ],
+      "started": 1793030885.6219454,
+      "driver_pid": 895734,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w06-baseline/run-yehrlc7_/results.json",
+      "seconds": 33.777252507,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r2-w01-current",
+      "round": 2,
+      "workers": 1,
+      "version": "current",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w01-current",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "1",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/current-reference/run-bg8n0lpv/results.json"
+      ],
+      "started": 1793030929.151051,
+      "driver_pid": 895872,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w01-current/run-jagugxn1/results.json",
+      "seconds": 110.852058053,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    },
+    {
+      "name": "r2-w01-baseline",
+      "round": 2,
+      "workers": 1,
+      "version": "baseline",
+      "argv": [
+        "python3",
+        "examples/redisraft/parallel_benchmark.py",
+        "--tracer",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-tracer",
+        "--binary",
+        "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--output",
+        "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w01-baseline",
+        "--backend",
+        "pages",
+        "--depth",
+        "16",
+        "--rounds",
+        "100",
+        "--seed",
+        "1",
+        "--timeout",
+        "1800",
+        "--workers",
+        "1",
+        "--strategies",
+        "bfs",
+        "--worker-placement",
+        "same-cpu",
+        "--storage",
+        "shared",
+        "--parallel-first",
+        "--reference-report",
+        "/home/kaguya/code/detsim/build/parallel-after-serial-20261026/next-reference/run-6nzmkxyc/results.json"
+      ],
+      "started": 1793031049.3688624,
+      "driver_pid": 896129,
+      "exit": 0,
+      "report": "/home/kaguya/code/detsim/build/parallel-after-1500/r2-w01-baseline/run-fch1zpfe/results.json",
+      "seconds": 148.640620826,
+      "edges": 112305,
+      "nodes": 63418,
+      "graph": "7eba9a268e4fd2bc45bce49b59c02e85389b743c53a9a25214d59dd3569f2630",
+      "retries": 0
+    }
+  ],
+  "audit": "all12 fresh runs passed, zero retries, identical complete canonical labeled graph, verified copied worker executables and CPU placement; both version references have local serial coverage validation",
+  "audited_cpu_sets": {
+    "1": [
+      0
+    ],
+    "6": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "12": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11
+    ]
+  }
+}

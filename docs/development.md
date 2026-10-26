@@ -2,7 +2,8 @@
 
 [单实例1500 BFS验收](serial-bfs-1500-2026-10-26.md)、
 [此前1000 BFS验收](serial-bfs-performance-2026-10-25.md)及
-[优化对并行的影响](parallel-after-serial-2026-10-26.md)记录性能测量；
+[此前优化对并行的影响](parallel-after-serial-2026-10-26.md)及
+[1500阶段后的并行对照](parallel-after-1500-2026-10-27.md)记录性能测量；
 请按报告中的硬件、负载与统计口径读取。
 
 [并行性能优化归档](archive/parallel-performance-2026-10-24.md)汇总已测路线、未采用
