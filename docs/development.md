@@ -20,7 +20,9 @@ reuse and shared snapshot transport, see the
 worker expansion; `off` uses observed memory and `verify` adds full-byte oracle
 checks. Reuse assumes no external writes to target memory/file backing and no
 plugin writes bypassing framework helpers. It does not track arbitrary dirty
-pages. Snapshot backend selection remains `DETSIM_SNAPSHOT_BACKEND=full|pages`.
+pages. A separate known heap endpoint survives only protected execution and
+read-only injection; native/unknown execution invalidates it. Resident `verify`
+audits cached endpoints with real brk queries before capture/restore use. Snapshot backend selection remains `DETSIM_SNAPSHOT_BACKEND=full|pages`.
 Parallel transport defaults to buffered sockets. `DETSIM_SHARED_OBJECTS=on`
 opts into sealed-memfd transfer for complete bundles; `off` selects buffered
 complete-bundle transfer. This comparison concerns `parallel --storage durable`.

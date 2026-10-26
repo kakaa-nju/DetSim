@@ -7,6 +7,7 @@
 #include <linux/futex.h>
 #include "state/state_transition.h"
 #include "state/state_store.h"
+#include "state/resident_memory.h"
 #include "state/sysstate_store.h"
 #include "engine/exec_engine.h"
 #include "engine/thread_carrier.h"
@@ -18,6 +19,7 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <cstring>
 #include <filesystem>
 #include <stdexcept>
@@ -336,6 +338,10 @@ static void run_case(bool tiny)
         ptmc_state.running_state = initial;
         thread::init_all(ptmc_state);
         exec::init_all();
+        // Keep the default fresh path, but allow the same native lifecycle
+        // oracle to exercise residency and heap-proof audits explicitly.
+        std::optional<detsim::resident::Scope> resident_scope;
+        if (std::getenv("DETSIM_RESIDENT_MEMORY")) resident_scope.emplace();
         syscall_info name_query{};name_query.nr=SYS_prctl;name_query.args[0]=PR_GET_NAME;
         name_query.args[1]=reinterpret_cast<uint64_t>(&bootstrap_name_output);
         ptmc_state.cursor=0;ptmc_state.current_thread_idx[0]=0;

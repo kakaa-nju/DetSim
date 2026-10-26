@@ -71,6 +71,21 @@ static void checked_memory_io(bool write, pid_t pid, const iovec* local,
                              " incomplete: " + std::to_string(n) + "/" + std::to_string(expected));
 }
 
+/* Only call after the corresponding capture/restore barrier: the audit below
+   injects a real brk(0) and must not run for a process that is not checked. */
+static std::optional<uint64_t> checked_known_brk(pid_t pid)
+{
+  const auto proof = detsim::resident::known_brk(pid);
+  if (proof && detsim::resident::verify()) {
+    const uint64_t actual = tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
+    if (actual != *proof) {
+      detsim::resident::invalidate(pid);
+      throw std::runtime_error("resident heap proof disagrees with actual brk");
+    }
+  }
+  return proof;
+}
+
 /* ======================================================================
  * Section 1: Global State Variables
  * ====================================================================== */
@@ -1361,10 +1376,13 @@ void tracee_state::recover_stopped(int index, hash_type ts_hash) const
 {
   (void)discard_zero_guards();
   const pid_t main_pid = ptmc_state.pids[index];
-  /* Restore the kernel heap extent before reconciling VMAs. */
-  const auto resident = detsim::resident::get(main_pid);
-  if ((!resident.snapshot || resident.brk != brk) &&
-      tracee_do_syscall(main_pid, SYS_brk, brk, 0, 0, 0, 0, 0) != brk)
+  /* Restore the kernel heap extent before reconciling VMAs. The independent
+     heap proof is the only cached authority; an image does not imply it. A
+     present proof is audited even when it does not match the target, so a
+     stale claim can never be silently repaired by the setter. */
+  const auto proof = checked_known_brk(main_pid);
+  const bool brk_proven = proof && *proof == brk;
+  if (!brk_proven && tracee_do_syscall(main_pid, SYS_brk, brk, 0, 0, 0, 0, 0) != brk)
     throw std::runtime_error("Cannot restore snapshot brk");
   // Both callers already ran verify_thread_pool() on the affected owned
   // carriers: one node from tracee_state::recover_running_state, every node
@@ -1745,9 +1763,10 @@ hash_type tracee_state::save(int pid, hash_type comparison_hash)
 
 hash_type tracee_state::save_stopped(pid_t pid, hash_type comparison_hash)
 {
-  /* Record brk */
-  const auto known = detsim::resident::get(pid);
-  brk = known.snapshot ? known.brk : tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
+  /* Record brk. The independent heap proof is the only cached authority;
+     verify mode audits every used claim against the real kernel endpoint. */
+  const auto proof = checked_known_brk(pid);
+  brk = proof ? *proof : tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
   LOG_DEBUG("recorded brk = 0x%x", brk);
 
   /* Capture memory state (includes tstate) */

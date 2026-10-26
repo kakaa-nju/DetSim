@@ -26,11 +26,15 @@ struct Entry {
     Image image;
     Image protected_image;
     Image object_hint; // immutable saved-object cache only, never a live proof
+    // Published heap endpoint only. Never derived from object_hint or a saved
+    // child brk: demotion keeps it, invalidation clears it.
+    std::optional<uint64_t> heap_brk;
     std::vector<bool> protected_valid;
     std::string eligible_maps;
     std::vector<bool> eligible;
     void clear() {
         image = {}; object_hint = {};
+        heap_brk.reset();
         protected_image = {}; protected_valid.clear(); eligible_maps.clear(); eligible.clear();
         if (pidfd >= 0) close(pidfd);
         pidfd = -1; pid = 0; generation = 0;
@@ -144,6 +148,7 @@ void invalidate(pid_t tid) {
     const int node = node_for(tid);
     if (node < 0) { invalidate_all(); return; }
     entries[node].image = {};
+    entries[node].heap_brk.reset();
     entries[node].protected_image = {}; entries[node].protected_valid.clear();
 }
 void writing(pid_t tid, uintptr_t address, size_t length) {
@@ -186,6 +191,10 @@ Image get(pid_t pid) {
     const auto* entry = checked(pid);
     return entry ? entry->image : Image{};
 }
+std::optional<uint64_t> known_brk(pid_t pid) {
+    const auto* entry = checked(pid);
+    return entry ? entry->heap_brk : std::nullopt;
+}
 ReadOnlyImage get_read_only(pid_t pid) {
     ReadOnlyImage result;
     if (const auto* entry = checked(pid)) {
@@ -214,7 +223,12 @@ void publish(pid_t pid, uint64_t root, uint64_t brk) {
     if (entry.pid != pid || entry.generation != StateStore::instance().generation()) entry.clear();
     auto snapshot = SnapshotView::open(root);
     if (entry.pid == pid && entry.image.root == root &&
-        entry.generation == StateStore::instance().generation()) return;
+        entry.generation == StateStore::instance().generation()) {
+        // Publication already proved this root for this incarnation; keep the
+        // independent endpoint proof even when the full image is reused.
+        entry.heap_brk = brk;
+        return;
+    }
     std::shared_ptr<const Image::Pages> pages;
     // Live authority can expire while the immutable saved objects remain valid.
     // Reuse their index only after opening the new root and comparing all page
@@ -265,6 +279,7 @@ void publish(pid_t pid, uint64_t root, uint64_t brk) {
     entry.generation = StateStore::instance().generation();
     describe_protected(entry, *snapshot, pid);
     entry.image = {std::move(snapshot), root, brk, std::move(pages)};
+    entry.heap_brk = brk;
     entry.object_hint = entry.image;
     entry.protected_image = {}; entry.protected_valid.clear();
 }

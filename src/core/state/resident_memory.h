@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <memory>
+#include <optional>
 #include <vector>
 #include <string_view>
 #include <sys/types.h>
@@ -38,6 +39,13 @@ struct Image {
 bool enabled();
 bool verify();
 Image get(pid_t pid);
+// The heap break is an independent transient proof. It is established only by
+// successful actual capture/restore publication for this scope/process/store
+// generation, and it proves the endpoint alone: no bytes, mappings, registers or
+// stoppedness. Demotion and ordinary guest writes keep it because only the full
+// image lost live authority; explicit invalidation, incarnation/store changes,
+// scope entry/exit and non-read-only resumes revoke it.
+std::optional<uint64_t> known_brk(pid_t pid);
 // This capability exposes only selected immutable regions, never a complete
 // live image, mappings, brk or register state after user instructions ran.
 class ReadOnlyImage {

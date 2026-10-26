@@ -10,21 +10,28 @@
 #include "page_snapshot.h"
 #include "state.h"
 #include "resident_memory.h"
+#include "shared_object_pool.h"
 #include "engine/exec_engine.h"
 #include "engine/thread_pool.h"
 #include "state_transition.h"
 #include <array>
+#include <atomic>
+#include <csignal>
 #include <cstdarg>
 #include <cstdio>
 #include <arpa/inet.h>
+#include <cerrno>
+#include <cstddef>
 #include <cstring>
 #include <filesystem>
+#include <linux/prctl.h>
 #include <stdexcept>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/wait.h>
 #include <sys/rseq.h>
 #include <sys/syscall.h>
+#include <sys/user.h>
 
 static long guest_value = 17;
 alignas(4096) static const long readonly_value __attribute__((used)) = 31;
@@ -33,6 +40,17 @@ static_assert(NP == 2, "capture oracle requires two processes");
 // The rseq fixture is registered through the host-only injection path. Count
 // only PTRACE_GET_RSEQ_CONFIGURATION, never aggregate syscalls.
 static unsigned long rseq_configuration_calls = 0;
+static std::atomic<bool> fail_store_sync{false};
+extern "C" int __real_fsync(int fd);
+extern "C" int __wrap_fsync(int fd)
+{
+    if (fail_store_sync.load()) { errno = EIO; return -1; }
+    return __real_fsync(fd);
+}
+// Test-only: fail the next read-only injection after its real stop has been
+// consumed. Corrupting the reported wait status, rather than throwing out of a
+// libc wrapper, makes tracee_do_syscall throw through its normal status check.
+static pid_t fail_wait_pid = 0;
 extern "C" long __real_ptrace(enum __ptrace_request request, ...);
 extern "C" long __wrap_ptrace(enum __ptrace_request request, ...)
 {
@@ -45,8 +63,61 @@ extern "C" long __wrap_ptrace(enum __ptrace_request request, ...)
     if (request == PTRACE_GET_RSEQ_CONFIGURATION) ++rseq_configuration_calls;
     return __real_ptrace(request, pid, addr, data);
 }
+extern "C" pid_t __real_waitpid(pid_t, int*, int);
+extern "C" pid_t __wrap_waitpid(pid_t pid, int* status, int options)
+{
+    const pid_t got = __real_waitpid(pid, status, options);
+    if (got == pid && pid == fail_wait_pid) {
+        fail_wait_pid = 0;
+        *status = 0; // WIFEXITED: not the SIGTRAP stop the caller expects.
+    }
+    return got;
+}
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui() { return nullptr; }
+// Linker wrappers count the actual injected heap operations, following the
+// mapping gate's convention. A capture/restore that reuses a published heap
+// endpoint must inject no brk at all; anything else proves a real query ran.
+static unsigned injected_brk_questions = 0;
+static unsigned injected_brk_moves = 0;
+extern "C" uint64_t __real__Z17tracee_do_syscalliimmmmmm(
+    int, int, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
+extern "C" uint64_t __wrap__Z17tracee_do_syscalliimmmmmm(
+    int pid, int number, uint64_t rdi, uint64_t rsi, uint64_t rdx,
+    uint64_t r10, uint64_t r8, uint64_t r9)
+{
+    if (number == SYS_brk) {
+        if (rdi == 0) ++injected_brk_questions;
+        else ++injected_brk_moves;
+    }
+    return __real__Z17tracee_do_syscalliimmmmmm(pid, number, rdi, rsi, rdx, r10, r8, r9);
+}
 static void require(bool ok, const char *why) { if (!ok) throw std::runtime_error(why); }
+// One real guest syscall through the production engine. do_single_syscall owns
+// the user->entry and (suppressed) entry->exit resumes, so the unprotected
+// resume under test is the engine's, not a harness reimplementation. Register
+// setup and restoration only place the guest at the scratch syscall.
+static uint64_t native_guest_syscall(pid_t pid, int cursor, int number, uint64_t argument)
+{
+    user_regs_struct saved{}, injected{};
+    ptrace_right(PTRACE_GETREGS, pid, nullptr, &saved);
+    injected = saved;
+    injected.rip = scratch_page + 0xff0;
+    injected.orig_rax = number;
+    injected.rax = number;
+    injected.rdi = argument;
+    injected.rsi = injected.rdx = injected.r10 = injected.r8 = injected.r9 = 0;
+    ptrace_right(PTRACE_SETREGS, pid, nullptr, &injected);
+    const int previous_cursor = ptmc_state.cursor;
+    ptmc_state.cursor = cursor;
+    syscall_info info{};
+    ExecutionEngine engine;
+    const int decision = engine.execute_syscall(pid, info);
+    ptmc_state.cursor = previous_cursor;
+    ptrace_right(PTRACE_SETREGS, pid, nullptr, &saved);
+    require(info.nr == number, "engine did not classify the native syscall");
+    require(decision != CKPT_STOP, "engine stopped on the native syscall");
+    return info.rval;
+}
 struct CaptureLayoutMode {
     explicit CaptureLayoutMode(const char *mode) {
         if (mode) setenv("DETSIM_CAPTURE_LAYOUT_CACHE", mode, 1);
@@ -596,6 +667,294 @@ int main(int argc, char**)
         require(!detsim::resident::get(children[1]).snapshot, "resident proof escaped closed scope");
         unsetenv("DETSIM_RESIDENT_MEMORY");
         unsetenv("DETSIM_SNAPSHOT_BACKEND");
+        // Heap endpoint proof: established only by actual publication, retained
+        // through demotion by ordinary guest writes, then used to avoid injected
+        // brk queries while bytes and identity still match the full path.
+        {
+            require(!detsim::resident::known_brk(children[1]), "scope entry inherited a heap endpoint");
+            detsim::resident::Scope heap_scope;
+            require(!detsim::resident::known_brk(children[1]), "scope entry retained a heap endpoint");
+            source.recover_running_state();
+            const uint64_t heap_brk = source.child[1].brk;
+            const long proof_value = 93;
+            require(guest_write_exact(children[1], &guest_value, &proof_value, sizeof proof_value),
+                    "heap proof fixture write");
+            require(!detsim::resident::get(children[1]).snapshot,
+                    "guest write retained the resident full image");
+            injected_brk_questions = injected_brk_moves = 0;
+            sys_state proof_capture(info, &source);
+            require(injected_brk_questions == 0, "capture re-queried a proven heap endpoint");
+            require(injected_brk_moves == 0, "capture moved a proven heap endpoint");
+            require(detsim::resident::known_brk(children[1]).value_or(0) == heap_brk,
+                    "actual capture did not publish the heap endpoint");
+            require(proof_capture.ts_hash[1] != source.ts_hash[1],
+                    "heap proof fixture write absent from capture identity");
+            compare_full(proof_capture);
+            injected_brk_questions = injected_brk_moves = 0;
+            // Force the restore path: the selected state already owns identity.
+            for (int i = 0; i < NP; ++i) ptmc_state.tracee_image_dirty[i] = true;
+            source.recover_running_state();
+            require(injected_brk_questions == 0, "equal-heap restore re-queried a proven endpoint");
+            require(injected_brk_moves == 0, "equal-heap restore moved a proven endpoint");
+            long restored_value = 0;
+            require(guest_read_exact(children[1], &guest_value, &restored_value, sizeof restored_value) &&
+                    restored_value == 17, "equal-heap restore retained changed bytes");
+            require(detsim::resident::known_brk(children[1]).value_or(0) == heap_brk,
+                    "actual restore did not republish the heap endpoint");
+            sys_state proof_replayed(info, &source);
+            require(proof_replayed.ss_hash == source.ss_hash, "proven heap restore identity drift");
+            require(detsim::resident::known_brk(children[1]).value_or(0) == heap_brk,
+                    "same-root publication dropped the heap endpoint");
+            compare_full(proof_replayed);
+
+            // Whitelisted read-only injections retain the proof; a plain resume
+            // and an ordinary injection revoke it.
+            require(tracee_do_syscall(children[1], SYS_brk, 0, 0, 0, 0, 0, 0) == heap_brk,
+                    "safe brk query changed the heap");
+            require(detsim::resident::known_brk(children[1]).value_or(0) == heap_brk,
+                    "safe brk query revoked the heap endpoint");
+            require(tracee_do_syscall(children[1], SYS_prctl, PR_GET_TID_ADDRESS,
+                    scratch_page + 0x800, 0, 0, 0, 0) == 0,
+                    "safe GET_TID_ADDRESS injection failed");
+            require(detsim::resident::known_brk(children[1]).value_or(0) == heap_brk,
+                    "safe GET_TID_ADDRESS injection revoked the heap endpoint");
+            detsim::resident::resuming(children[1]);
+            require(!detsim::resident::known_brk(children[1]),
+                    "unprotected resume retained the heap endpoint");
+            injected_brk_questions = injected_brk_moves = 0;
+            source.recover_running_state();
+            require(injected_brk_moves == 1,
+                    "restore after an unprotected resume reused a revoked heap endpoint");
+
+            (void)tracee_do_syscall(children[1], SYS_getuid, 0, 0, 0, 0, 0, 0);
+            require(!detsim::resident::known_brk(children[1]) &&
+                    !detsim::resident::get(children[1]).snapshot,
+                    "ordinary injection retained the heap endpoint");
+            injected_brk_questions = injected_brk_moves = 0;
+            sys_state unaudited_capture(info, &source);
+            require(injected_brk_questions == 1,
+                    "capture did not fall back to one brk query after an ordinary injection");
+            source.recover_running_state();
+
+            const uintptr_t remapped_page = provenance_page;
+            require(tracee_do_syscall(children[1], SYS_mprotect, remapped_page, 4096, PROT_READ, 0, 0, 0) == 0,
+                    "heap proof mprotect fixture");
+            require(!detsim::resident::known_brk(children[1]),
+                    "mapping change retained the heap endpoint");
+            injected_brk_questions = injected_brk_moves = 0;
+            sys_state remapped_capture(info, &source);
+            require(remapped_capture.ts_hash[1] != source.ts_hash[1],
+                    "mapping change absent from capture identity");
+            require(injected_brk_questions == 1,
+                    "capture did not fall back to one brk query after a mapping change");
+            source.recover_running_state();
+
+            // Real guest brk transitions run after an unprotected resume. Grow,
+            // shrink and failed requests all revoke the proof; only the absent
+            // proof makes the following restore fall back to the target brk.
+            require(detsim::resident::known_brk(children[1]).value_or(0) == heap_brk,
+                    "restore did not republish the heap endpoint before native brk");
+            const uint64_t grown_brk = native_guest_syscall(children[1], 1, SYS_brk, heap_brk + 0x4000);
+            require(grown_brk == heap_brk + 0x4000, "native brk grow failed");
+            require(!detsim::resident::known_brk(children[1]),
+                    "native brk grow retained the heap endpoint");
+            injected_brk_questions = injected_brk_moves = 0;
+            sys_state grown_capture(info, &source);
+            require(injected_brk_questions == 1,
+                    "capture after a native grow did not query the heap");
+            require(grown_capture.child[1].brk == grown_brk,
+                    "capture after a native grow lost the endpoint");
+            compare_full(grown_capture);
+            injected_brk_questions = injected_brk_moves = 0;
+            source.recover_running_state();
+            require(injected_brk_moves == 1, "unequal-heap restore skipped the brk move");
+            require(detsim::resident::known_brk(children[1]).value_or(0) == heap_brk,
+                    "unequal-heap restore did not republish the source endpoint");
+            // A real emulated getpid engine step proves the production
+            // classification: the full image demotes on the protected
+            // user->entry resume, while the independent heap proof survives the
+            // suppressed entry->exit resume.
+            require(detsim::resident::get(children[1]).snapshot != nullptr,
+                    "engine getpid fixture lacks a full resident image");
+            const uint64_t engine_pid = native_guest_syscall(children[1], 1, SYS_getpid, 0);
+            require(engine_pid == static_cast<uint64_t>(logical_process_id(1)),
+                    "engine getpid did not emulate the logical pid");
+            require(!detsim::resident::get(children[1]).snapshot,
+                    "engine getpid retained the full resident image");
+            require(detsim::resident::known_brk(children[1]).value_or(0) == heap_brk,
+                    "engine getpid revoked the heap endpoint");
+            const uint64_t shrunk_brk = heap_brk - 0x1000;
+            require(native_guest_syscall(children[1], 1, SYS_brk, shrunk_brk) == shrunk_brk,
+                    "native brk shrink failed");
+            require(!detsim::resident::known_brk(children[1]),
+                    "native brk shrink retained the heap endpoint");
+            injected_brk_questions = injected_brk_moves = 0;
+            source.recover_running_state();
+            require(injected_brk_moves == 1,
+                    "restore after a native shrink skipped the brk move");
+            require(native_guest_syscall(children[1], 1, SYS_brk, 0x7ffffffffffff000ULL) == heap_brk,
+                    "failed native brk changed the endpoint");
+            require(!detsim::resident::known_brk(children[1]),
+                    "failed native brk retained the heap endpoint");
+            injected_brk_questions = injected_brk_moves = 0;
+            source.recover_running_state();
+            require(injected_brk_moves == 1,
+                    "restore after a failed native brk skipped the fallback query");
+            require(detsim::resident::known_brk(children[1]).value_or(0) == heap_brk,
+                    "restore after a failed native brk lost the endpoint");
+        }
+        require(!detsim::resident::known_brk(children[1]), "heap endpoint escaped its closed scope");
+
+        // Off and full-capture bypasses must behave like the simple path.
+        {
+            setenv("DETSIM_RESIDENT_MEMORY", "off", 1);
+            detsim::resident::Scope disabled_scope;
+            // Without residency the selected identity may legitimately skip a
+            // clean restore, so force the image path the bypass must exercise.
+            for (int i = 0; i < NP; ++i) ptmc_state.tracee_image_dirty[i] = true;
+            injected_brk_questions = injected_brk_moves = 0;
+            source.recover_running_state();
+            require(injected_brk_moves == NP, "disabled residency skipped brute-force heap restores");
+            injected_brk_questions = injected_brk_moves = 0;
+            sys_state disabled_capture(info, &source);
+            require(injected_brk_questions == NP, "disabled residency reused a heap endpoint");
+            require(!detsim::resident::known_brk(children[1]),
+                    "disabled residency published a heap endpoint");
+        }
+        unsetenv("DETSIM_RESIDENT_MEMORY");
+        {
+            detsim::resident::Scope full_scope;
+            source.recover_running_state();
+            setenv("DETSIM_CAPTURE_MODE", "full", 1);
+            injected_brk_questions = injected_brk_moves = 0;
+            sys_state full_capture(info, &source);
+            require(injected_brk_questions == NP, "full capture bypass reused a heap endpoint");
+            require(full_capture.ss_hash == source.ss_hash, "full capture bypass identity drift");
+            injected_brk_questions = injected_brk_moves = 0;
+            source.recover_running_state();
+            require(injected_brk_moves == NP, "full restore bypass reused a heap endpoint");
+            unsetenv("DETSIM_CAPTURE_MODE");
+            require(detsim::resident::known_brk(children[1]).value_or(0) == source.child[1].brk,
+                    "full bypass left the published endpoint unusable");
+        }
+
+        // A store epoch change invalidates every entry, including its endpoint.
+        {
+            detsim::resident::Scope epoch_scope;
+            source.recover_running_state();
+            require(detsim::resident::known_brk(children[1]).value_or(0) == source.child[1].brk,
+                    "epoch fixture did not establish a heap endpoint");
+            const auto generation_before = StateStore::instance().generation();
+            detsim::snapshot::SharedObjectPool epoch_pool("epoch-pool");
+            StateStore::instance().attach_shared_pool("epoch-pool", false);
+            require(StateStore::instance().generation() != generation_before,
+                    "shared-pool attachment did not change the store epoch");
+            require(!detsim::resident::known_brk(children[1]) &&
+                    !detsim::resident::get(children[1]).snapshot,
+                    "store epoch change retained a stale heap endpoint");
+        }
+
+        // Poisoning the store must reject an otherwise valid retained endpoint;
+        // reopening it must start without that old authority.
+        {
+            detsim::resident::Scope poisoned_scope;
+            source.recover_running_state();
+            auto& store = StateStore::instance();
+            require(detsim::resident::known_brk(children[0]).has_value(),
+                    "poison fixture has no heap endpoint");
+            store.wait_for_completion();
+            fail_store_sync = true;
+            bool sync_failed = false;
+            try { store.wait_for_completion(); }
+            catch (const std::exception&) { sync_failed = true; }
+            fail_store_sync = false;
+            require(sync_failed, "heap poison fixture did not fail storage");
+            bool heap_rejected = false;
+            try { (void)detsim::resident::known_brk(children[0]); }
+            catch (const std::exception&) { heap_rejected = true; }
+            require(heap_rejected, "heap endpoint bypassed a poisoned store");
+            bool shutdown_failed = false;
+            try { store.shutdown(); }
+            catch (const std::exception&) { shutdown_failed = true; }
+            require(shutdown_failed, "poisoned store lost its shutdown failure");
+            store.init(config);
+            require(!detsim::resident::known_brk(children[0]),
+                    "reopened store reused an old heap endpoint");
+            source.recover_running_state();
+            require(detsim::resident::known_brk(children[0]).value_or(0) == source.child[0].brk,
+                    "fresh restoration did not reestablish the heap endpoint");
+        }
+
+        // Verify mode validates every used proof against a real brk query. A
+        // test-only publication of the valid root with a wrong argument must be
+        // rejected before any successor save, and must not be repaired silently.
+        setenv("DETSIM_RESIDENT_MEMORY", "verify", 1);
+        {
+            detsim::resident::Scope verify_scope;
+            source.recover_running_state();
+            const uint64_t live_brk = source.child[0].brk;
+            require(detsim::resident::known_brk(children[0]).value_or(0) == live_brk,
+                    "verify fixture did not establish a heap endpoint");
+            // A failed read-only injection must revoke every proof through
+            // ReadOnlyInjection unwinding. The wait wrapper consumes the real
+            // entry stop but reports a non-stop, so tracee_do_syscall throws
+            // through its normal status check, never across the libc ABI.
+            fail_wait_pid = children[1];
+            bool injection_failed = false;
+            try {
+                (void)tracee_do_syscall(children[1], SYS_brk, 0, 0, 0, 0, 0, 0);
+            } catch (const std::runtime_error&) {
+                injection_failed = true;
+            }
+            require(fail_wait_pid == 0 && injection_failed,
+                    "injection failure fixture did not throw");
+            require(!detsim::resident::known_brk(children[0]) &&
+                    !detsim::resident::known_brk(children[1]) &&
+                    !detsim::resident::get(children[1]).snapshot,
+                    "injection failure retained heap authority");
+            // The wrapper consumed the real entry stop; finish that syscall so
+            // the tracee is at the usual exit stop, then recover normally.
+            ptrace_right(PTRACE_SYSCALL, children[1], nullptr, nullptr);
+            int normalized = 0;
+            require(waitpid(children[1], &normalized, 0) == children[1] &&
+                    WIFSTOPPED(normalized) &&
+                    WSTOPSIG(normalized) == (SIGTRAP | 0x80),
+                    "injection failure left an unknown stop state");
+            source.recover_running_state();
+            detsim::resident::invalidate(children[0]);
+            detsim::resident::publish(children[0], source.ts_hash[0], live_brk - 0x1000);
+            require(detsim::resident::known_brk(children[0]).value_or(0) == live_brk - 0x1000,
+                    "test-only wrong heap endpoint was not published");
+            const auto saves_before = StateStore::instance().get_stats().save_calls;
+            std::string rejected;
+            try { sys_state rejected_capture(info, &source); }
+            catch (const std::runtime_error& error) { rejected = error.what(); }
+            require(rejected.find("heap proof") != std::string::npos,
+                    "verify accepted a mismatched heap endpoint");
+            require(StateStore::instance().get_stats().save_calls == saves_before,
+                    "mismatched heap endpoint reached a successor save");
+            require(!detsim::resident::known_brk(children[0]) &&
+                    !detsim::resident::get(children[0]).snapshot,
+                    "mismatched heap endpoint was silently retained or repaired");
+            // A proof that disagrees with the restore target must be audited and
+            // rejected before the brk setter, not silently repaired.
+            detsim::resident::publish(children[0], source.ts_hash[0], live_brk - 0x1000);
+            require(detsim::resident::known_brk(children[0]).value_or(0) == live_brk - 0x1000,
+                    "stale restore proof was not republished");
+            for (int i = 0; i < NP; ++i) ptmc_state.tracee_image_dirty[i] = true;
+            injected_brk_questions = injected_brk_moves = 0;
+            std::string stale_rejected;
+            try { source.recover_running_state(); }
+            catch (const std::runtime_error& error) { stale_rejected = error.what(); }
+            require(stale_rejected.find("heap proof") != std::string::npos,
+                    "restore accepted a stale heap proof");
+            require(injected_brk_questions == 1 && injected_brk_moves == 0,
+                    "stale heap proof reached the brk setter");
+            require(!detsim::resident::known_brk(children[0]) &&
+                    !detsim::resident::get(children[0]).snapshot,
+                    "stale heap proof survived the restore audit");
+        }
+        unsetenv("DETSIM_RESIDENT_MEMORY");
         // A virtual exit parks the OS task. Restoring its product-state image
         // must restore memory/resources even while that node cannot execute.
         source.recover_running_state();
@@ -750,9 +1109,15 @@ int main(int argc, char**)
         // status, budget, or store record changes.
         require(ptrace(PTRACE_POKEDATA,children[0],&guest_value,456)==0,"edit preflight witness");
         ptmc_state.error_bound=3;
+        // The proof must not outlive the process incarnation that established it.
+        {
+        detsim::resident::Scope death_scope;
         sys_state before_death(info,&source);
         ptmc_state.running_state=before_death;
+        const pid_t vanished=children[1];
         kill(children[1],SIGKILL);waitpid(children[1],nullptr,0);children[1]=0;
+        require(!detsim::resident::known_brk(vanished) && !detsim::resident::get(vanished).snapshot,
+                "dead process retained a usable heap endpoint");
         user_regs_struct before_failure{},after_failure{};
         require(ptrace(PTRACE_GETREGS,children[0],nullptr,&before_failure)==0,"preflight registers");
         bool vanished_rejected=false;
@@ -769,6 +1134,7 @@ int main(int argc, char**)
         try {sys_state refused(info,&source);}catch(const std::runtime_error&){capture_rejected=true;}
         require(capture_rejected && StateStore::instance().get_stats().save_calls==save_calls,
                 "failed all-node capture preflight published an earlier node");
+        }
         // Clearing runtime provenance must not grant a disk-loaded snapshot
         // ownership of whatever physical process happens to occupy this slot.
         clear_snapshot_thread_bindings();

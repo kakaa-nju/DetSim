@@ -1573,3 +1573,17 @@ The baseline/fixed private harness additionally exercises NP3. These tests do
 not prove arbitrary concurrent thread creation cannot race with enumeration,
 and do not simulate allocation failure or closedir failure. Performance binaries
 remain frozen without this independent correctness change.
+
+
+### Scoped heap endpoint reuse (2026-10-26)
+
+A transient known-brk capability is established by successful capture/restore
+publication and retained only through the existing protected execution/read-only
+injection paths. It does not prove memory bytes, map geometry or thread stops.
+Native execution/injection, scope/incarnation/store changes invalidate; verify
+queries before use and rejects mismatches before repair. Query count, actual
+engine emulated/native brk, injection failure, full/off bypass, stale capture and
+restore, store poison/reopen and resident-verify lifecycle gates pass. All-node
+preflight ordering remains. This strengthens scoped C08 evidence without closing
+its general state-equivalence/external-mutation limits. See
+[the performance and verification report](serial-bfs-1500-2026-10-26.md).

@@ -1,0 +1,285 @@
+{
+  "scope": "one60s baseline/candidate pair plus prior candidate screen; no long-window goal acceptance",
+  "rows": [
+    {
+      "kind": "baseline",
+      "report": "build/serial-bfs-1500/known-brk-pair-baseline/run-qabcrrez/result.json",
+      "report_sha256": "3f5e835dc556b34e12f8faee426d1f0727a58515006930c6baffa4a5780f446e",
+      "result": {
+        "host": {
+          "system": "Linux",
+          "node": "tilnel",
+          "release": "6.12.105+deb13-amd64",
+          "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+          "machine": "x86_64",
+          "processor": ""
+        },
+        "backend": "pages",
+        "seed": 1,
+        "rounds": 100,
+        "requested_seconds": 60.0,
+        "inputs_sha256": {
+          "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+          "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-stop-query": "18b32a3ba14a0e3c3e0d9929855ccf4c4e30ceee0fa3fb4715f59bbf7c7784b4",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+          "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ce4c80fddaf20a1c466cca4052c5289f8bd143152bd3616f1d5d627f23502346"
+        },
+        "cpu_affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "tracer_cpu_affinity": [
+          2
+        ],
+        "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+        "checkout_commit": "54fc5115c30a4f577bf441f91a8a9cf842f9babd",
+        "execution_options": {
+          "DETSIM_RESIDENT_MEMORY": "on",
+          "DETSIM_CAPTURE_MODE": null,
+          "DETSIM_CAPTURE_VERIFY": null,
+          "DETSIM_SOFT_DIRTY": null,
+          "DETSIM_OBSERVATION_CACHE": "on",
+          "DETSIM_OBSERVATION_CACHE_STATS": null,
+          "DETSIM_CAPTURE_LAYOUT_CACHE": "on"
+        },
+        "prefix_nodes": [
+          {
+            "node": 0,
+            "state": 4,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 1,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 2,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          }
+        ],
+        "root": "a55c1e6e67b77928",
+        "root_budget": 2,
+        "command_seconds": 60.05080458079465,
+        "search_metrics": {
+          "engine": "builtin_cli",
+          "completion": "interrupted",
+          "searched": 82898,
+          "new": 25902,
+          "unique": 25902,
+          "elapsed_s": 60.04118,
+          "states_per_s": 1380.685725,
+          "state_store": {
+            "loads": 406497,
+            "l1": 399116,
+            "l2": 7381,
+            "disk": 0,
+            "hit_pct": 100.0,
+            "saves": 379190,
+            "new": 4482,
+            "dedup_pct": 98.8
+          },
+          "new_states_per_s": 431.40391311429926
+        },
+        "search_work": {
+          "transitions": 82897,
+          "restore_us": 12238331,
+          "capture_check_commit_us": 39619154
+        },
+        "first_parent_edges": 46894,
+        "generated_new_nodes_including_budget_cuts": 46594,
+        "generated_new_nodes_per_s": 776.0340486312895,
+        "counter_scope": "CLI searched counts root plus transitions; CLI new excludes model-budget-cut successors; generated_new_nodes counts all saved new identities relative to the deterministic prefix, including budget cuts",
+        "evidence_scope": "native BFS; tree is first-parent witnesses, not every edge",
+        "tracer_exit": 0,
+        "passed": true
+      }
+    },
+    {
+      "kind": "candidate",
+      "report": "build/serial-bfs-1500/known-brk-pair-candidate/run-w8perq9x/result.json",
+      "report_sha256": "4ca034d8b4e274a0a520be15350e778f59b08e8d4a6afd39a60d8494fd8af54d",
+      "result": {
+        "host": {
+          "system": "Linux",
+          "node": "tilnel",
+          "release": "6.12.105+deb13-amd64",
+          "version": "#1 SMP PREEMPT_DYNAMIC Debian 6.12.105-1 (2026-08-24)",
+          "machine": "x86_64",
+          "processor": ""
+        },
+        "backend": "pages",
+        "seed": 1,
+        "rounds": 100,
+        "requested_seconds": 60.0,
+        "inputs_sha256": {
+          "/home/kaguya/code/detsim/build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case": "c510d58c0c9d82f47fc513ac925d0764639b71a2400bec5c46bf45c7d588574d",
+          "/home/kaguya/code/detsim/build/serial-bfs-1500/tracer-known-brk": "8983753b700ceb84cde287322a4a5cb5f2091430959a4507a907969f082476b7",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/choose.so": "aa9703dec8da0a58fa2116fab0d274cebb3aadb831a4a034df776a9a801ffcc2",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/check.so": "c8b926e232def34b6a4170def997970e5b6de95f38089da296d2d48bac2f35ce",
+          "/home/kaguya/code/detsim/build/release/np3/examples/redisraft/seed.so": "7e79fc608e1953fc0e8cfc4487e8296699268052353f8f21bcd3cb8c5c2550f0",
+          "/home/kaguya/code/detsim/examples/redisraft/serial_benchmark.py": "ce4c80fddaf20a1c466cca4052c5289f8bd143152bd3616f1d5d627f23502346"
+        },
+        "cpu_affinity": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11
+        ],
+        "tracer_cpu_affinity": [
+          2
+        ],
+        "cpu_model": "AMD Ryzen 5 2600 Six-Core Processor",
+        "checkout_commit": "54fc5115c30a4f577bf441f91a8a9cf842f9babd",
+        "execution_options": {
+          "DETSIM_RESIDENT_MEMORY": "on",
+          "DETSIM_CAPTURE_MODE": null,
+          "DETSIM_CAPTURE_VERIFY": null,
+          "DETSIM_SOFT_DIRTY": null,
+          "DETSIM_OBSERVATION_CACHE": "on",
+          "DETSIM_OBSERVATION_CACHE_STATS": null,
+          "DETSIM_CAPTURE_LAYOUT_CACHE": "on"
+        },
+        "prefix_nodes": [
+          {
+            "node": 0,
+            "state": 4,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 1,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          },
+          {
+            "node": 2,
+            "state": 1,
+            "current_term": 1,
+            "commit_idx": 3,
+            "last_applied_idx": 3,
+            "snapshot_last_idx": 0
+          }
+        ],
+        "root": "5ad5042f094161e2",
+        "root_budget": 2,
+        "command_seconds": 60.0176852948498,
+        "search_metrics": {
+          "engine": "builtin_cli",
+          "completion": "interrupted",
+          "searched": 86181,
+          "new": 26942,
+          "unique": 26942,
+          "elapsed_s": 60.006047,
+          "states_per_s": 1436.205254,
+          "state_store": {
+            "loads": 424306,
+            "l1": 416550,
+            "l2": 7756,
+            "disk": 0,
+            "hit_pct": 100.0,
+            "saves": 394373,
+            "new": 4639,
+            "dedup_pct": 98.8
+          },
+          "new_states_per_s": 448.98808281772
+        },
+        "search_work": {
+          "transitions": 86180,
+          "restore_us": 12719346,
+          "capture_check_commit_us": 38776794
+        },
+        "first_parent_edges": 48772,
+        "generated_new_nodes_including_budget_cuts": 48472,
+        "generated_new_nodes_per_s": 807.7852553760123,
+        "counter_scope": "CLI searched counts root plus transitions; CLI new excludes model-budget-cut successors; generated_new_nodes counts all saved new identities relative to the deterministic prefix, including budget cuts",
+        "evidence_scope": "native BFS; tree is first-parent witnesses, not every edge",
+        "tracer_exit": 0,
+        "passed": true
+      }
+    }
+  ],
+  "gain": 0.04021156154127681,
+  "commands": [
+    {
+      "kind": "baseline",
+      "argv": [
+        "python3",
+        "examples/redisraft/serial_benchmark.py",
+        "--tracer",
+        "build/serial-bfs-1500/tracer-stop-query",
+        "--output",
+        "build/serial-bfs-1500/known-brk-pair-baseline",
+        "--binary",
+        "build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--cpu",
+        "2",
+        "--seconds",
+        "60"
+      ],
+      "exit": 0
+    },
+    {
+      "kind": "candidate",
+      "argv": [
+        "python3",
+        "examples/redisraft/serial_benchmark.py",
+        "--tracer",
+        "build/serial-bfs-1500/tracer-known-brk",
+        "--output",
+        "build/serial-bfs-1500/known-brk-pair-candidate",
+        "--binary",
+        "build/serial-bfs-700/run-amp4exo8/target/healthy/raft-case",
+        "--cpu",
+        "2",
+        "--seconds",
+        "60"
+      ],
+      "exit": 0
+    }
+  ],
+  "validation": [
+    "NP2 final capture normal/tiny including store poison/reopen exit0",
+    "NP1 mappings exit0",
+    "NP1 lifecycle and pending syscall exit0",
+    "NP1 lifecycle with DETSIM_RESIDENT_MEMORY=verify full/pages normal/tiny exit0",
+    "NP3 production build, Raft full/pages healthy/mutant all three cache modes verify +3x replay exit0",
+    "NP3 make check exit0"
+  ],
+  "evidence_notes": "build/serial-bfs-1500/known-brk-notes.md; root additions known-brk-poison-check.log and known-brk-lifecycle-verify.log"
+}
