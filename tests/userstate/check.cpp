@@ -7,7 +7,6 @@
  */
 
 #include "debug.h"
-#include "user_state.h"
 #include "utils/expr_eval.hpp"
 #include <cstring>
 

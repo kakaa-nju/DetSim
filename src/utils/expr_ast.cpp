@@ -3,10 +3,14 @@
 #include "dwarf_info.h"
 #include "monitor.h"
 #include "state/state.h"
+#include "state/page_snapshot.h"
+#include "state/resident_memory.h"
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <sys/ptrace.h>
+#include <stdexcept>
+#include <limits>
 
 // namespace removed
 
@@ -20,8 +24,31 @@ const char *g_input_string = nullptr;
 
 /* External parser interface */
 extern int yyparse(void);
-extern void yy_scan_string(const char *str);
-extern void yylex_destroy(void);
+struct yy_buffer_state;
+extern yy_buffer_state *yy_scan_string(const char *str);
+extern int yylex_destroy(void);
+
+namespace {
+thread_local const detsim::ExpressionObservation* observation = nullptr;
+struct ObservationScope {
+  const detsim::ExpressionObservation* previous;
+  explicit ObservationScope(const detsim::ExpressionObservation& view)
+      : previous(observation) { observation = &view; }
+  ~ObservationScope() { observation = previous; }
+};
+}
+int64_t detsim::evaluate_observation(const ExpressionObservation& view, size_t node,
+                                   std::string_view expression) {
+  if (node >= view.process_count()) throw std::out_of_range("Observation process index");
+  auto ast = ExprCache::instance().get(expression);
+  if (!ast) throw std::runtime_error("Invalid observation expression: " + std::string(expression));
+  if (!ast->is_read_only()) throw std::runtime_error("Observation expression must be read-only");
+  ObservationScope scope(view);
+  bool ok = true;
+  const auto result = ast->eval(int(node + 1), ok);
+  if (!ok) throw std::runtime_error("Cannot evaluate observation expression: " + std::string(expression));
+  return result.as_value();
+}
 
 /* Base class */
 ExprNode::~ExprNode() = default;
@@ -80,18 +107,20 @@ static hash_type get_current_ts_hash(int pid)
 /* Memory read - optimized to use snapshot instead of ptrace */
 static long read_memory_long(int pid, uint64_t addr, bool &success)
 {
+  if (observation) {
+    long result;
+    observation->read(size_t(pid - 1), addr, &result, sizeof(result));
+    success = true;
+    return result;
+  }
   // Try to read from snapshot first (much faster than ptrace)
   hash_type ts_hash = get_current_ts_hash(pid);
   if (ts_hash != 0)
   {
-    void *data = read_mem(pid, ts_hash, addr, sizeof(long));
-    if (data)
-    {
-      long result = *(long *)data;
-      free(data);
-      success = true;
-      return result;
-    }
+    long result;
+    SnapshotView::open(ts_hash)->read_into(addr, &result, sizeof(result));
+    success = true;
+    return result;
   }
 
   // Fallback to ptrace if snapshot read fails
@@ -104,6 +133,16 @@ static long read_memory_long(int pid, uint64_t addr, bool &success)
   }
   success = true;
   return data;
+}
+
+static void require_observation_type(int pid, std::string name) {
+  if (!observation) return;
+  for (auto& c : name) if (c == '*') c = ' ';
+  std::string normalized;
+  for (const auto c : name) if (c != ' ') normalized += c;
+  static const std::string primitive[] = {"int","long","longlong","short","char","bool","float","double","void","unsigned","signed","unsignedint","signedint","unsignedlong","signedlong","unsignedlonglong","signedlonglong","unsignedshort","signedshort","unsignedchar","signedchar"};
+  for (const auto& type : primitive) if (normalized == type) return;
+  observation->require_symbols(size_t(pid - 1));
 }
 
 static int get_type_size(const type_info &info)
@@ -182,15 +221,21 @@ EvalResult VariableNode::eval(int pid, bool &success) const
 
 EvalResult VariableNode::eval_address(int pid, bool &success) const
 {
+  if (observation) observation->require_symbols(size_t(pid - 1));
   /* Try DWARF/ELF main executable first */
   uintptr_t addr = dwarf_get_global_addr(name_.c_str());
   if (addr != 0)
   {
+    if (observation) observation->require_symbol_address(size_t(pid - 1), addr);
     success = true;
     EvalResult res(static_cast<uint64_t>(addr));
     res.type_name = dwarf_get_global_type(name_.c_str());
     return res;
   }
+
+  // An observation never inspects live mappings or registers to resolve a name.
+  // Main/shared symbols must already be loaded by the configured symbol service.
+  if (observation) { success = false; return EvalResult(0L); }
 
   /* Try loading shared library symbols and search again */
   dwarf_load_shared_library_symbols(pid);
@@ -250,9 +295,30 @@ EvalResult BinaryOpNode::eval(int pid, bool &success) const
   long l = left.as_value();
   long r = right.as_value();
   long result = 0;
+  if (observation) {
+    bool invalid = false;
+    switch (op_) {
+      case BinaryOp::ADD: invalid = __builtin_add_overflow(l, r, &result); break;
+      case BinaryOp::SUB: invalid = __builtin_sub_overflow(l, r, &result); break;
+      case BinaryOp::MUL: invalid = __builtin_mul_overflow(l, r, &result); break;
+      case BinaryOp::DIV:
+      case BinaryOp::MOD:
+        invalid = r == 0 || (l == std::numeric_limits<long>::min() && r == -1); break;
+      case BinaryOp::SHL:
+      case BinaryOp::SHR:
+        invalid = r < 0 || r >= long(sizeof(long) * 8) ||
+            (op_ == BinaryOp::SHL && (l < 0 || l > (std::numeric_limits<long>::max() >> r))); break;
+      default: break;
+    }
+    if (invalid) throw std::runtime_error("Invalid arithmetic in observation expression");
+  }
 
   switch (op_)
   {
+    case BinaryOp::AND:
+    case BinaryOp::OR:
+      success = false;
+      return EvalResult(0L);
     case BinaryOp::ADD:
       result = l + r;
       break;
@@ -380,6 +446,8 @@ EvalResult UnaryOpNode::eval(int pid, bool &success) const
 
   long v = op.as_value();
   long result = 0;
+  if (observation && op_ == UnaryOp::NEG && op.as_value() == std::numeric_limits<long>::min())
+    throw std::runtime_error("Invalid negation in observation expression");
 
   switch (op_)
   {
@@ -419,6 +487,7 @@ std::string UnaryOpNode::to_string() const
 /* PrefixOpNode */
 EvalResult PrefixOpNode::eval(int pid, bool &success) const
 {
+  if (observation) throw std::runtime_error("Observation cannot modify guest memory");
   EvalResult addr_res = operand_->eval_address(pid, success);
   if (!success)
     return EvalResult(0L);
@@ -430,6 +499,7 @@ EvalResult PrefixOpNode::eval(int pid, bool &success) const
 
   long new_val = (op_ == PrefixOp::PRE_INC) ? old_val + 1 : old_val - 1;
 
+  detsim::resident::writing(pid, addr, sizeof(new_val));
   if (ptrace(PTRACE_POKEDATA, pid, addr, new_val) < 0)
   {
     success = false;
@@ -449,6 +519,7 @@ std::string PrefixOpNode::to_string() const
 /* PostfixOpNode */
 EvalResult PostfixOpNode::eval(int pid, bool &success) const
 {
+  if (observation) throw std::runtime_error("Observation cannot modify guest memory");
   EvalResult addr_res = operand_->eval_address(pid, success);
   if (!success)
     return EvalResult(0L);
@@ -460,6 +531,7 @@ EvalResult PostfixOpNode::eval(int pid, bool &success) const
 
   long new_val = (op_ == PostfixOp::POST_INC) ? old_val + 1 : old_val - 1;
 
+  detsim::resident::writing(pid, addr, sizeof(new_val));
   if (ptrace(PTRACE_POKEDATA, pid, addr, new_val) < 0)
   {
     success = false;
@@ -581,7 +653,8 @@ EvalResult MemberAccessNode::eval_address(int pid, bool &success) const
   ptrdiff_t offset = -1;
   std::string member_type;
 
-  if (offset_computed_ && cached_base_type_ == base_type)
+  if (offset_computed_ && cached_base_type_ == base_type &&
+      cached_symbol_generation_ == dwarf_symbol_generation())
   {
     offset = cached_offset_;
     member_type = cached_member_type_;
@@ -605,6 +678,7 @@ EvalResult MemberAccessNode::eval_address(int pid, bool &success) const
       cached_offset_ = offset;
       cached_member_type_ = member_type;
       cached_base_type_ = base_type;
+      cached_symbol_generation_ = dwarf_symbol_generation();
       offset_computed_ = true;
     }
   }
@@ -856,6 +930,7 @@ std::string ConditionalNode::to_string() const
 /* AssignNode */
 EvalResult AssignNode::eval(int pid, bool &success) const
 {
+  if (observation) throw std::runtime_error("Observation cannot modify guest memory");
   EvalResult addr_res = left_->eval_address(pid, success);
   if (!success)
     return EvalResult(0L);
@@ -868,6 +943,7 @@ EvalResult AssignNode::eval(int pid, bool &success) const
 
   long val = val_res.as_value();
 
+  detsim::resident::writing(pid, addr, sizeof(val));
   if (ptrace(PTRACE_POKEDATA, pid, addr, val) < 0)
   {
     success = false;
@@ -888,6 +964,7 @@ EvalResult CastNode::eval(int pid, bool &success) const
 {
   /* Get the target type name from the type node */
   std::string target_type = type_->to_string();
+  require_observation_type(pid, target_type);
 
   /* Evaluate the operand */
   EvalResult result = operand_->eval(pid, success);
@@ -946,6 +1023,7 @@ std::string SizeofExprNode::to_string() const
 /* SizeofTypeNode */
 EvalResult SizeofTypeNode::eval(int pid, bool &success) const
 {
+  require_observation_type(pid, type_name_);
   int size = dwarf_type_size(type_name_.c_str());
 
   /* If type not found, try evaluating as expression */
@@ -975,6 +1053,7 @@ std::string SizeofTypeNode::to_string() const
 /* OffsetofNode */
 EvalResult OffsetofNode::eval(int pid, bool &success) const
 {
+  if (observation) observation->require_symbols(size_t(pid - 1));
   ptrdiff_t offset = dwarf_member_offset(type_name_.c_str(), member_.c_str());
   if (offset < 0)
   {
@@ -1015,6 +1094,8 @@ std::string TypeofNode::get_type_name() const { return operand_->to_string(); }
 /* ProcessQualifiedNode */
 int ProcessQualifiedNode::get_target_pid() const
 {
+  if (observation)
+    return proc_id_ >= 0 && size_t(proc_id_) < observation->process_count() ? proc_id_ + 1 : -1;
   if (proc_id_ >= 0 && proc_id_ < g_num_processes && g_ptmc_state.pids)
   {
     return g_ptmc_state.pids[proc_id_];
@@ -1025,7 +1106,7 @@ int ProcessQualifiedNode::get_target_pid() const
 EvalResult ProcessQualifiedNode::eval(int pid, bool &success) const
 {
   int target_pid = get_target_pid();
-  if (target_pid == 0)
+  if (target_pid <= 0)
   {
     success = false;
     return EvalResult(0L);
@@ -1036,7 +1117,7 @@ EvalResult ProcessQualifiedNode::eval(int pid, bool &success) const
 EvalResult ProcessQualifiedNode::eval_address(int pid, bool &success) const
 {
   int target_pid = get_target_pid();
-  if (target_pid == 0)
+  if (target_pid <= 0)
   {
     success = false;
     return EvalResult(0L);
@@ -1057,7 +1138,7 @@ ExprCache &ExprCache::instance()
   return instance;
 }
 
-std::shared_ptr<ExprNode> ExprCache::get(const std::string &expr)
+std::shared_ptr<ExprNode> ExprCache::get(std::string_view expr)
 {
   std::lock_guard<std::mutex> lock(mutex_);
 
@@ -1067,7 +1148,9 @@ std::shared_ptr<ExprNode> ExprCache::get(const std::string &expr)
     return it->second;
   }
 
-  ExprNode *ast = parse_expression(expr);
+  // The scanner requires a terminated string; a borrowed view may be a slice.
+  std::string owned(expr);
+  ExprNode *ast = parse_expression(owned);
   if (!ast)
   {
     return nullptr;
@@ -1080,7 +1163,7 @@ std::shared_ptr<ExprNode> ExprCache::get(const std::string &expr)
     std::advance(mid, cache_.size() / 2);
     cache_.erase(cache_.begin(), mid);
   }
-  cache_[expr] = result;
+  cache_.emplace(std::move(owned), result);
   return result;
 }
 

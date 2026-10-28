@@ -12,8 +12,5 @@
   "ChoosePoint": [
     {"syscall":"gettimeofday", "choose": 2}
   ],
-  "Checkpoint": [
-    "recvfrom", "gettimeofday"
-  ],
   "ChooseFunc": "./plugins/choose.so"
 }

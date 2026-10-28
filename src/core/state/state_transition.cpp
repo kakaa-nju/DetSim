@@ -1,9 +1,17 @@
 #include "state_transition.h"
-#include "../engine/exec_engine.h"
-#include "../engine/signal_handler.h"
-#include "../engine/thread_manager.h"
-#include "../syscall/dispatcher.h"
+#include "config.h"
+#include <algorithm>
+#include "state_view.h"
+#include <array>
+#include "user_plugin.h"
+#include "search/compatibility.h"
 #include "common.h"
+#include "runtime_profile.h"
+#include "engine/thread_pool.h"
+#include "engine/pending_syscall.h"
+#include "pending_io.h"
+#include <stdexcept>
+#include <algorithm>
 #include "emu.h"
 #include "fsstate.h"
 #include "futexstate.h"
@@ -12,13 +20,20 @@
 #include "ncurses_ui.h"
 #include "proc_status.h"
 #include "state_store.h"
+#include "sysstate_store.h"
 #include "utils.h"
+#include "../engine/exec_engine.h"
+#include "../engine/thread_manager.h"
+#include "../engine/signal_handler.h"
+#include "../syscall/dispatcher.h"
 #include <fcntl.h>
 #include <readline/readline.h>
 #include <stddef.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <sys/ptrace.h>
+#include <sys/prctl.h>
+#include <sys/personality.h>
 #include <sys/syscall.h>
 #include <sys/user.h>
 #include <sys/wait.h>
@@ -38,12 +53,17 @@ struct VfsMmapState
 };
 static VfsMmapState g_vfs_mmap = {false, -1, 0, 0};
 
+/* Upper bound on enumerated outcomes of a single syscall choice point. */
+static constexpr int kMaxSyscallChoices = 1024;
+
 int analyze_choose(struct syscall_info &info)
 {
   // Check if syscall has predefined choose count
   int predefined = choose_many[info.nr];
   if (predefined > 0)
   {
+    if (predefined > kMaxSyscallChoices)
+      throw std::runtime_error("ChoosePoint exceeds the supported choice count");
     return predefined;
   }
 
@@ -92,11 +112,23 @@ void handle_user_choice()
     static char *line_read;
     UI_LOG_INFO("Here comes with %d choices.", ptmc_state.n_choose);
     line_read = readline("You choose? [0, N): ");
+    if (!line_read)
+    {
+      /* End of input (batch script or pipe): take the first outcome. */
+      ptmc_state.choose = 0;
+      return;
+    }
     while (sscanf(line_read, "%d", &ptmc_state.choose) != 1 ||
-           ptmc_state.choose < 0 || ptmc_state.choose >= ptmc_state.n_choose)
+           ptmc_state.choose < 0 ||
+           ptmc_state.choose >= ptmc_state.n_choose)
     {
       free(line_read);
       line_read = readline("Please make legal choice: ");
+      if (!line_read)
+      {
+        ptmc_state.choose = 0;
+        return;
+      }
     }
     free(line_read);
   }
@@ -125,17 +157,15 @@ void handle_auto_choice()
 
 int exec_once(const sys_state &s, syscall_info &info)
 {
-  ExecutionEngine *engine = exec::get_engine();
-  if (!engine)
-  {
+  ExecutionEngine* engine = exec::get_engine();
+  if (!engine) {
     LOG_ERROR("ExecutionEngine not initialized");
     return CKPT_STOP;
   }
 
   ExecResult result = engine->execute_step(s, info);
 
-  switch (result.status)
-  {
+  switch (result.status) {
     case ExecStatus::EXIT:
       LOG_INFO("Tracee %d exited", ptmc_state.cursor);
       break;
@@ -152,9 +182,93 @@ int exec_once(const sys_state &s, syscall_info &info)
   return result.checkpoint_decision;
 }
 
-TransitionResult state_transition(const sys_state &source_state,
-                                  int process_index)
+static bool check_assertions(const sys_state& state, unsigned actor)
 {
+  if (ptmc_state.assertions.empty()) return false;
+  const detsim::StateView view(state);
+  bool violated = false;
+  for (const auto& assertion : ptmc_state.assertions) {
+    if (!view.evaluate(actor, assertion)) {
+      detsim::ui::ui_printf("Assertion \"%s\" fail at sys_state " HASH_FORMAT "!\n",
+                            assertion.c_str(), state.ss_hash);
+      violated = true;
+    }
+  }
+  if (violated) return true;
+  if (detsim::user_plugin::check_state(state, actor)) {
+    detsim::ui::ui_printf("User check failed at sys_state " HASH_FORMAT "!\n", state.ss_hash);
+    return true;
+  }
+  return false;
+}
+
+timeval timeout_action_clock(const sys_state& source,int process,int thread) {
+  if (process<0 || process>=NP) throw std::runtime_error("Timeout process index out of range");
+  if (DISDEAD(source.status[process]) || source.property_failed)
+    throw ActionRejected("actor belongs to a terminal state");
+  const auto& child=source.child[process];
+  validate_pending_syscalls(child);
+  if (thread<0 || thread>=static_cast<int>(child.threads.size()))
+    throw ActionRejected("thread index out of range");
+  const auto& actor=child.threads[thread];
+  if (!actor.alive || !actor.pending_syscall || actor.pending_syscall->phase!=PendingPhase::Waiting || !actor.pending_syscall->deadline)
+    throw ActionRejected("actor requires a waiting syscall with a finite deadline");
+  const auto& pending=*actor.pending_syscall;
+  syscall_info call{};call.nr=pending.nr;
+  std::copy(std::begin(pending.args),std::end(pending.args),call.args);
+  if (pending.reason==PendingReason::Io && io_retry_ready(child,call))
+    throw ActionRejected("I/O is already ready");
+  return pending_timeout_clock(child.tv,*pending.deadline);
+}
+
+std::vector<ActorAction> enabled_actor_actions(const sys_state& source) {
+  std::vector<ActorAction> result;
+  if (source.property_failed) return result;
+  for (int process=0;process<NP;++process) {
+    if (DISDEAD(source.status[process])) continue;
+    const auto& child=source.child[process];
+    child.validate_io_state();
+    for (size_t thread=0;thread<child.threads.size();++thread) {
+      const auto& actor=child.threads[thread];
+      if (!actor.alive) continue;
+      if (!actor.pending_syscall || actor.pending_syscall->phase!=PendingPhase::Waiting) {
+        result.push_back({process,static_cast<int>(thread),TransitionAction::Normal});
+      } else if (actor.pending_syscall->deadline) {
+        try { (void)timeout_action_clock(source,process,thread); }
+        catch (const ActionRejected&) { continue; }
+        result.push_back({process,static_cast<int>(thread),TransitionAction::Timeout});
+      }
+    }
+  }
+  return result;
+}
+
+TransitionResult state_transition(const sys_state &source_state,
+                                  int process_index, int requested_thread, TransitionAction action)
+{
+  if (&source_state == &ptmc_state.running_state) {
+    const sys_state detached_source=source_state;
+    return state_transition(detached_source,process_index,requested_thread,action);
+  }
+  if (process_index < 0 || process_index >= NP)
+    throw std::runtime_error("Transition process index out of range");
+  if (action != TransitionAction::Normal && action != TransitionAction::Timeout)
+    throw std::runtime_error("Invalid transition action");
+  if (action == TransitionAction::Timeout) {
+    if (requested_thread == -1) requested_thread = source_state.child[process_index].current_thread_idx;
+    (void)timeout_action_clock(source_state,process_index,requested_thread);
+  }
+  if (DISDEAD(source_state.status[process_index]))
+    throw std::runtime_error("Cannot execute a terminated process; load a predecessor state first");
+  if (source_state.property_failed)
+    throw std::runtime_error("Cannot execute a terminal property violation; load a predecessor state first");
+  if (requested_thread < -1 || requested_thread >= static_cast<int>(source_state.child[process_index].threads.size()))
+    throw std::runtime_error("Transition thread index out of range");
+  if (action == TransitionAction::Normal && requested_thread >= 0) {
+    const auto& actor=source_state.child[process_index].threads[requested_thread];
+    if (!actor.alive || (actor.pending_syscall && actor.pending_syscall->phase == PendingPhase::Waiting))
+      throw std::runtime_error("Transition thread is not runnable");
+  }
   TransitionResult result;
   ptmc_state.cursor = process_index;
 
@@ -165,19 +279,69 @@ TransitionResult state_transition(const sys_state &source_state,
   result.restore_time =
       std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
 
+  if (requested_thread >= 0) {
+    ptmc_state.current_thread_idx[process_index]=requested_thread;
+    ptmc_state.running_state.child[process_index].current_thread_idx=requested_thread;
+  }
+
   // do syscalls - copy per-thread syscall info for each process
   syscall_info new_syscalls[NP][MAX_THREADS_PER_PROCESS];
   for (int i = 0; i < NP; i++)
-    memcpy(new_syscalls[i], source_state.child[i].si,
-           sizeof(syscall_info) * MAX_THREADS_PER_PROCESS);
+    memcpy(new_syscalls[i], source_state.child[i].si, sizeof(syscall_info) * MAX_THREADS_PER_PROCESS);
 
   // Get current thread index for the active process
   int thread_idx = ptmc_state.current_thread_idx[process_index];
-  int ckpt = exec_once(source_state, new_syscalls[process_index][thread_idx]);
+  syscall_info executed = new_syscalls[process_index][thread_idx];
+  int ckpt;
+  // A pending completion/timeout does not pass through syscall choice discovery.
+  // Every action starts without the previous actor's cardinality, while an
+  // explicit preset remains available to this action's actual syscall handler.
+  ptmc_state.n_choose=0;
+  if (action == TransitionAction::Timeout) {
+    timeval target;
+    try { target=timeout_action_clock(ptmc_state.running_state,process_index,thread_idx); }
+    catch (const ActionRejected& error) {
+      throw std::runtime_error(std::string("Admitted timeout became ineligible after restore: ")+error.what());
+    }
+    const auto& actor = ptmc_state.running_state.child[process_index].threads.at(thread_idx);
+    const auto logical_tid = actor.tid;
+    const auto physical_tid = actor.physical_tid;
+    ptmc_state.time[process_index] = target;
+    ptmc_state.tracee_image_dirty[process_index] = true;
+    if (!expire_pending_syscall(process_index, logical_tid) ||
+        !complete_pending_syscall(process_index, physical_tid, executed))
+      throw std::runtime_error("Admitted timeout failed to complete");
+    ckpt = CKPT_YES;
+  } else {
+    ckpt = exec_once(source_state, executed);
+  }
+  const int transition_choice = action == TransitionAction::Timeout ? DETSIM_CHOICE_TIMEOUT :
+      (ptmc_state.n_choose ? ptmc_state.choose : -1);
+  // Automatic execution may skip a blocked/exited thread. Attribute the
+  // completed syscall to the actor that actually ran, preserving other slots.
+  thread_idx = ptmc_state.current_thread_idx[process_index];
+  if (requested_thread>=0 && thread_idx!=requested_thread)
+    throw std::runtime_error("Explicit transition actor changed during execution");
+  new_syscalls[process_index][thread_idx] = executed;
+  // A modeled clone publishes a stopped logical child during this transition.
+  // Carry its initial child-side syscall result into the candidate snapshot.
+  const auto& runtime_child=ptmc_state.running_state.child[process_index];
+  for (size_t slot=source_state.child[process_index].threads.size(); slot<runtime_child.threads.size(); ++slot)
+    new_syscalls[process_index][slot]=runtime_child.si[slot];
+
+  // Grant readiness without consuming a peer's data or publishing its return.
+  refresh_pending_syscalls();
 
   // save state with timing
   auto t3 = std::chrono::high_resolution_clock::now();
-  result.new_state = sys_state(new_syscalls);
+  result.new_state = sys_state(new_syscalls, &source_state, false);
+  /* User-visible property surface: the state assertions and the UserCheck
+   * hook observe every newly captured state (including discarded steps, as
+   * the historical tracer did) without changing branch ownership. */
+  result.property_violation = check_assertions(result.new_state, process_index);
+  // Property result and user state are committed with the product-state identity.
+  result.new_state.property_failed = result.property_violation;
+  result.new_state.commit_metadata();
   auto t4 = std::chrono::high_resolution_clock::now();
   result.save_time =
       std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3);
@@ -185,29 +349,108 @@ TransitionResult state_transition(const sys_state &source_state,
 
   // add to state tree for future exploration
   state_tree_add(source_state, result.new_state, process_index,
-                 ptmc_state.n_choose ? ptmc_state.choose : -1);
+                 transition_choice);
   ptmc_state.running_state = result.new_state;
+  for (int node=0; node<NP; ++node) ptmc_state.tracee_image_dirty[node]=false;
   return result;
 }
 
-static void exit_all(int _)
+static pid_t tracer_owner = 0;
+static SysStateStore *metadata_store = nullptr;
+static StateStore *snapshot_store = nullptr;
+
+// Only the tracer owns these children. Never signal its whole process group:
+// that group may also contain a shell, test driver, or unrelated workload.
+static void terminate_tracees()
 {
-  /* Shutdown StateStore to flush pending writes */
-  StateStore::instance().shutdown();
-  kill(0, SIGTERM);
-  exit(EXIT_SUCCESS);
+  if (getpid() != tracer_owner)
+    return;
+  for (int i = 0; i < NP; ++i)
+  {
+    pid_t child = pids[i];
+    if (child <= 0)
+      continue;
+    int status = 0;
+    pid_t result;
+    do {
+      result = waitpid(child, &status, WNOHANG);
+    } while (result < 0 && errno == EINTR);
+    // An exited/reaped tracee PID may have been reused: only kill an owned child.
+    if (result >= 0 && !(result == child && (WIFEXITED(status) || WIFSIGNALED(status))))
+    {
+      const bool isolated = getpgid(child) == child;
+      kill(child, SIGKILL);
+      // A ptraced group leader cannot be reaped before its worker tasks.
+      // Wait only for this tracee's dedicated group, never unrelated children.
+      if (isolated) {
+        for (;;) {
+          const auto reaped = waitpid(-child, nullptr, __WALL);
+          if (reaped > 0 || (reaped < 0 && errno == EINTR)) continue;
+          break;
+        }
+      } else {
+        // Startup failed before group isolation; no guest threads could start.
+        while (waitpid(child, nullptr, __WALL) < 0 && errno == EINTR) {}
+      }
+    }
+    pids[i] = 0;
+  }
+}
+
+static void exit_all(int sig)
+{
+  // No locks, logging, allocation, or store shutdown from a signal handler.
+  terminate_tracees();
+  _exit(128 + sig);
 }
 
 static void exit_all(void)
 {
-  /* Shutdown StateStore to flush pending writes */
-  StateStore::instance().shutdown();
-  kill(0, SIGTERM);
-  exit(EXIT_SUCCESS);
+  if (getpid() != tracer_owner) return;
+  // Persistence failures must not turn into a throwing atexit handler or a
+  // successful checker exit. Always reap owned tracees, even after I/O failure.
+  bool failed = false;
+  try { if (snapshot_store) snapshot_store->shutdown(); }
+  catch (const std::exception &error) {
+    fprintf(stderr, "Snapshot shutdown failed: %s\n", error.what());
+    failed = true;
+  }
+  try { if (metadata_store) metadata_store->shutdown(); }
+  catch (const std::exception &error) {
+    fprintf(stderr, "Metadata shutdown failed: %s\n", error.what());
+    failed = true;
+  }
+  terminate_tracees();
+  if (failed) _Exit(EXIT_FAILURE);
 }
 
-extern std::unordered_map<int, void *> rseq_struct;
-extern std::unordered_map<int, int> rseq_len;
+static int resume_startup_syscall(pid_t pid)
+{
+  ptrace_right(PTRACE_SYSCALL, pid, nullptr, nullptr);
+  for (;;) {
+    int status = 0;
+    pid_t waited;
+    do { waited = waitpid(pid, &status, 0); } while (waited < 0 && errno == EINTR);
+    if (waited != pid)
+      throw std::runtime_error("Cannot wait for tracee during configured startup prelude");
+    if (!WIFSTOPPED(status)) {
+      const std::string result = WIFEXITED(status) ?
+          "exit status " + std::to_string(WEXITSTATUS(status)) :
+          "signal " + std::to_string(WTERMSIG(status));
+      throw std::runtime_error("Startup prelude ended with " + result +
+          " before reaching the configured boundary; check RuntimeProfile startup_syscall/startup_syscalls");
+    }
+    if (WSTOPSIG(status) == PTRACE_TRAP_SIG) return status;
+    try {
+      auto signal = sig::process(pid, status);
+      if (!sig::should_continue(signal))
+        throw std::runtime_error("tracee terminated by signal " + std::to_string(WSTOPSIG(status)));
+    } catch (const std::exception& error) {
+      throw std::runtime_error(std::string("Startup prelude did not reach configured RuntimeProfile boundary: ") + error.what());
+    }
+    ptrace_right(PTRACE_SYSCALL, pid, nullptr, nullptr);
+  }
+}
 
 /* Extract one entire syscall, preserve its original effect */
 syscall_info extract_one_syscall(pid_t pid)
@@ -215,182 +458,91 @@ syscall_info extract_one_syscall(pid_t pid)
   /* ptrace(2): When delivering system call traps, set bit 7 in the signal     *
    * number (i.e., deliver SIGTRAP|0x80). This makes it easy for the tracer to *
    * distinguish normal traps from those caused by a system call. */
-  int wstatus = 0;
   struct ptrace_syscall_info info;
   syscall_info ret = {}; /* Zero-initialize all fields */
 
   /* entry */
-  ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
-  waitpid(pid, &wstatus, 0);
-  /* Handle SIGURG from Go runtime (preemption signal) */
-  while (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGURG)
-  {
-    ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
-    waitpid(pid, &wstatus, 0);
-  }
-  assert(WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == PTRACE_TRAP_SIG);
+  resume_startup_syscall(pid);
 
   ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(info), &info);
 
-  assert(info.op == PTRACE_SYSCALL_INFO_ENTRY);
+  if (info.op != PTRACE_SYSCALL_INFO_ENTRY)
+    throw std::runtime_error("Unexpected syscall phase before configured RuntimeProfile startup boundary");
   ret.nr = info.entry.nr;
   for (int i = 0; i < 6; i++)
     ret.args[i] = info.entry.args[i];
 
-  /* Handle clone: add CLONE_PTRACE flag to auto-trace child threads */
-  if (ret.nr == SYS_clone)
-  {
-    uint64_t new_flags = ret.args[0] | 0x00002000; /* CLONE_PTRACE */
-    tracee_set_rdi(pid, new_flags);
-    LOG_INFO("Modified clone flags to add CLONE_PTRACE");
+  // Thread ownership begins at exec, even in the trusted loader prelude.
+  // The prelude must end before births; children cannot run outside the model.
+  if (ret.nr == SYS_clone || ret.nr == SYS_clone3 || ret.nr == SYS_fork || ret.nr == SYS_vfork)
+    throw std::runtime_error("RuntimeProfile startup boundary must precede thread creation");
+  if (ret.nr == SYS_setpgid || ret.nr == SYS_setsid)
+    throw std::runtime_error("Startup prelude cannot change the owned process group");
+  if (ret.nr == SYS_set_tid_address) tracee_set_rdi(pid,0);
+  // The execution environment exposes no rseq syscall, including the loader.
+  // A successful initial registration followed by child ENOSYS breaks libc.
+  if (ret.nr == SYS_rseq || ret.nr == SYS_set_robust_list || ret.nr == SYS_get_robust_list) {
+    tracee_set_orig_rax(pid,-1);tracee_set_rax(pid,-1);
   }
-
-  /* Handle clone3: modify clone_args.flags to add CLONE_PTRACE */
-  if (ret.nr == SYS_clone3)
-  {
-    uint64_t args_ptr = ret.args[0];
-    if (args_ptr != 0)
-    {
-      // Read flags from clone_args (first field)
-      uint64_t flags = ptrace(PTRACE_PEEKDATA, pid, args_ptr, NULL);
-      // Add CLONE_PTRACE flag
-      flags |= 0x00002000; /* CLONE_PTRACE */
-      ptrace(PTRACE_POKEDATA, pid, args_ptr, flags);
-      LOG_INFO("Modified clone3 args at %p, flags=0x%lx", (void *)args_ptr,
-               flags);
-    }
+  if (ret.nr == SYS_rt_sigprocmask) {
+    if (ptmc_state.running_state.child[ptmc_state.cursor].threads.empty())
+      adopt_thread_signal_mask(ptmc_state.cursor,pid);
+    tracee_set_orig_rax(pid,-1);tracee_set_rax(pid,-1);
   }
 
   /* exit */
-  ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
-  waitpid(pid, &wstatus, 0);
-  /* Handle SIGURG from Go runtime (preemption signal) */
-  while (WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGURG)
-  {
-    ptrace_right(PTRACE_SYSCALL, pid, NULL, NULL);
-    waitpid(pid, &wstatus, 0);
-  }
-  assert(WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == PTRACE_TRAP_SIG);
+  resume_startup_syscall(pid);
 
   ptrace_right(PTRACE_GET_SYSCALL_INFO, pid, (void *)sizeof(info), &info);
-  assert(info.op == PTRACE_SYSCALL_INFO_EXIT);
+  if (info.op != PTRACE_SYSCALL_INFO_EXIT)
+    throw std::runtime_error("Unexpected syscall phase before configured RuntimeProfile startup boundary");
   ret.rval = info.exit.rval;
 
-  /* eliminate indeterministic syscall result */
-  /* set_tid_address */
-  if (ret.nr == SYS_set_tid_address)
-  {
-    ret.rval = 114514;
-    tracee_set_rax(pid, 114514);
-    LOG_INFO("Neutralize set_tid_address, return 114514");
+  if (ret.nr == SYS_set_robust_list) {
+    ret.rval=emulate_set_robust_list(ptmc_state.cursor,pid,ret.args[0],ret.args[1]);
+    tracee_set_rax(pid,ret.rval);
+  } else if (ret.nr == SYS_get_robust_list) {
+    ret.rval=emulate_get_robust_list(ptmc_state.cursor,pid,static_cast<int32_t>(ret.args[0]),ret.args[1],ret.args[2]);
+    tracee_set_rax(pid,ret.rval);
+  } else if (ret.nr == SYS_rseq) {
+    ret.rval = -ENOSYS;
+    tracee_set_rax(pid,ret.rval);
+  } else if (ret.nr == SYS_rt_sigprocmask) {
+    ret.rval=emulate_thread_sigprocmask(ptmc_state.cursor,pid,ret.args[0],ret.args[1],ret.args[2],ret.args[3]);
+    tracee_set_rax(pid,ret.rval);
+  } else if (ret.nr == SYS_set_tid_address) {
+    if (static_cast<int64_t>(ret.rval)<0)
+      throw std::runtime_error("Cannot detach startup clear_child_tid registration");
+    tracee_set_rdi(pid,ret.args[0]);
+    ret.rval=record_logical_clear_tid(ptmc_state.cursor,pid,ret.args[0]);
+    tracee_set_rax(pid,ret.rval);
+  } else if (ret.nr == SYS_getpid || ret.nr == SYS_gettid) {
+    ret.rval=logical_process_id(ptmc_state.cursor);
+    tracee_set_rax(pid,ret.rval);
   }
   /* getrandom */
-  if (ret.nr == SYS_getrandom)
+  if (ret.nr == SYS_getrandom && ret.rval > 0)
   {
-    memcpy_host2guest((void *)ret.args[0], "\0\0\0\0\0\0\0\0", 8);
-    LOG_INFO("Neutralize getrandom(%p, %d, %d)", (void *)ret.args[0],
-             ret.args[1], ret.args[2]);
+    const unsigned char zeros[4096]{};
+    size_t remaining = size_t(ret.rval);
+    if (remaining > ret.args[1])
+      throw std::runtime_error("Invalid startup getrandom result length");
+    uintptr_t address = ret.args[0];
+    while (remaining) {
+      size_t length = std::min(remaining, sizeof(zeros));
+      if (!guest_write_exact(pid, reinterpret_cast<void*>(address), zeros, length))
+        throw std::runtime_error("Cannot normalize startup getrandom output");
+      address += length;
+      remaining -= length;
+    }
   }
-  /* rseq mask */
-  if (ret.nr == SYS_rseq)
+  if (ret.nr == SYS_getcpu && ret.rval == 0)
   {
-    rseq_struct[pid] = (void *)ret.args[0];
-    rseq_len[pid] = ret.args[1];
-    LOG_INFO("Record rseq(%p, %d)", (void *)ret.args[0], ret.args[1]);
-  }
-
-  if (ret.nr == SYS_getcpu)
-  {
-    tracee_set_rax(pid, 0);
-    tracee_set_orig_rax(pid, 0);
-    LOG_INFO("Neutralize getcpu, return 0 and do nothing to arguments");
-  }
-
-  /* Record new thread creation from clone/clone3 */
-  if ((ret.nr == SYS_clone || ret.nr == SYS_clone3) && ret.rval > 0)
-  {
-    pid_t new_tid = (pid_t)ret.rval;
-    LOG_INFO("New thread created: TID %d from parent %d", new_tid, pid);
-
-    // Record thread creation in tracee_state
-    int tracee_idx = ptmc_state.cursor;
-    if (tracee_idx >= 0 && tracee_idx < NP)
-    {
-      auto &child_state = ptmc_state.running_state.child[tracee_idx];
-
-      // Get clone flags from arguments
-      uint64_t clone_flags = 0;
-      uint64_t stack_addr = 0;
-      if (ret.nr == SYS_clone)
-      {
-        clone_flags = ret.args[0];
-        stack_addr = ret.args[1];
-      }
-      else if (ret.nr == SYS_clone3)
-      {
-        uint64_t args_ptr = ret.args[0];
-        if (args_ptr != 0)
-        {
-          clone_flags = ptrace(PTRACE_PEEKDATA, pid, args_ptr, NULL);
-          // stack is at offset 5*8 = 40 bytes in clone_args (after flags,
-          // pidfd, child_tid, parent_tid, exit_signal)
-          stack_addr = ptrace(PTRACE_PEEKDATA, pid, args_ptr + 40, NULL);
-        }
-      }
-
-      // Add thread to state
-      child_state.add_thread(new_tid, clone_flags, stack_addr, pid, false);
-
-      LOG_INFO("Recorded thread %d in tracee %d state (flags=0x%lx)", new_tid,
-               tracee_idx, clone_flags);
-    }
-
-    // Wait for the new thread to stop (SIGSTOP from CLONE_PTRACE)
-    // This is crucial: the new thread is created in a stopped state, and we
-    // need to wait for it and continue it so it can initialize and signal
-    // the parent thread (which may be waiting on a futex)
-    int wstatus_new;
-    int wait_retries = 0;
-    pid_t waited = 0;
-
-    // Try non-blocking wait first, then blocking wait with timeout
-    while (wait_retries < 100 && waited == 0)
-    {
-      waited = waitpid(new_tid, &wstatus_new, WNOHANG);
-      if (waited == 0)
-      {
-        usleep(1000); // 1ms delay between retries
-        wait_retries++;
-      }
-    }
-
-    // If still not ready, try blocking wait as last resort
-    if (waited == 0)
-    {
-      waited = waitpid(new_tid, &wstatus_new, WNOHANG);
-    }
-
-    if (waited == new_tid && WIFSTOPPED(wstatus_new))
-    {
-      LOG_INFO(
-          "New thread %d stopped with signal %d after %d retries, continuing",
-          new_tid, WSTOPSIG(wstatus_new), wait_retries);
-
-      // Continue the new thread to its first syscall entry
-      // This is essential: the new thread must run to initialize itself
-      // and signal any waiting threads (via futex wake)
-      ptrace_right(PTRACE_SYSCALL, new_tid, NULL, NULL);
-
-      // Note: We don't wait here because the parent thread also needs to run.
-      // The new thread will hit a syscall entry and stop, then when the user
-      // switches to it with 'thread N', it will be ready to execute.
-    }
-    else
-    {
-      LOG_WARN(
-          "New thread %d not in expected stopped state (waited=%d, retries=%d)",
-          new_tid, waited, wait_retries);
-    }
+    const unsigned int zero = 0;
+    for (int argument = 0; argument < 2; ++argument)
+      if (ret.args[argument] &&
+          !guest_write_exact(pid, reinterpret_cast<void*>(ret.args[argument]), &zero, sizeof(zero)))
+        throw std::runtime_error("Cannot normalize startup getcpu output");
   }
 
   return ret;
@@ -400,41 +552,20 @@ static void init_tracee_state(int index)
 {
   int pid = pids[index];
   int wstatus = 0;
-  int stop_nr;
-  // Convert to absolute path for Go detection
-  char abs_path[PATH_MAX];
-  realpath(ptmc_state.tracee[index].executable, abs_path);
-  LOG_INFO("Checking if %s (abs: %s) is a Go program",
-           ptmc_state.tracee[index].executable, abs_path);
-  int go_check = is_go_program(abs_path);
-  LOG_INFO("is_go_program result: %d", go_check);
-  // Hardcoded detection for Go programs (workaround for is_go_program issues)
-  if (!go_check && strstr(ptmc_state.tracee[index].executable, "go_program") ||
-      strstr(ptmc_state.tracee[index].executable, "detsim") != NULL)
-  {
-    LOG_INFO("Hardcoded: treating as Go program due to 'test' in name");
-    go_check = 1;
-  }
-  if (go_check)
-  {
-    // Go programs: stop at first mmap after initialization
-    LOG_INFO("Detected Go program, using SYS_mmap as stop_nr");
-    stop_nr = SYS_mmap;
-  }
-  else if (is_dynamically_linked(ptmc_state.tracee[index].executable))
-  {
-    stop_nr = SYS_munmap;
-  }
-  else
-  {
-    stop_nr = SYS_mprotect;
-  }
-  Assert(waitpid(pid, &wstatus, 0) == pid, "%s", strerror(errno));
-  assert(WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGSTOP);
+  const auto& profile = detsim::runtime_profile();
+  // A deterministic machine clock origin, configurable independently of the
+  // target. Nonzero by default; this is not automatic elapsed-time advancement.
+  ptmc_state.time[index] = {profile.initial_time_us / 1000000,
+                           profile.initial_time_us % 1000000};
+  const int stop_nr = detsim::startup_syscall_for_node(index);
+  LOG_INFO("Startup prelude boundary: syscall %d (limit %zu)",
+           stop_nr, profile.startup_syscall_limit);
+  if (waitpid(pid, &wstatus, 0) != pid || !WIFSTOPPED(wstatus) || WSTOPSIG(wstatus) != SIGSTOP)
+    throw std::runtime_error("Tracee failed to reach initial startup stop");
   /* tracee: stop at raise(SIGSTOP) */
 
   /* ptrace_right(PTRACE_SEIZE, pid, 0, 0); */
-  ptrace_right(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACESYSGOOD);
+  ptrace_right(PTRACE_SETOPTIONS, pid, 0, PTRACE_O_TRACESYSGOOD | PTRACE_O_EXITKILL);
 
   /* skip execve */
   while (extract_one_syscall(pid).nr != SYS_execve)
@@ -443,28 +574,57 @@ static void init_tracee_state(int index)
   /* execve(2): after a successful execve, a SIGTRAP *
    * (instead of SIGTRAP | 0x80) will be sent to it  */
   ptrace_right(PTRACE_SYSCALL, pid, 0, 0);
-  waitpid(pid, &wstatus, 0);
-  assert(WIFSTOPPED(wstatus) && WSTOPSIG(wstatus) == SIGTRAP);
+  if (waitpid(pid, &wstatus, 0) != pid || !WIFSTOPPED(wstatus) || WSTOPSIG(wstatus) != SIGTRAP)
+    throw std::runtime_error("Tracee failed to exec before configured RuntimeProfile startup boundary");
+  if (profile.fixed_layout && !detsim::tracee_has_fixed_layout(pid))
+    throw std::runtime_error("RuntimeProfile fixed_layout was not preserved across tracee exec");
 
-  remove_vdso(pid);
-  patch_at_random(pid);
+  // exec replaced the old user image; adopt its inherited task mask before
+  // executing the loader prelude through the same rt_sigprocmask model.
+  ptmc_state.running_state.child[index]=tracee_state{};
+  adopt_thread_signal_mask(index,pid);
+  if (profile.disable_vdso) remove_vdso(pid);
+  if (profile.deterministic_at_random && patch_at_random(pid) != 0)
+    throw std::runtime_error("Cannot normalize tracee AT_RANDOM");
 
-  /* skip non-user code: *
-   * Libc initialization ends with an `munmap` call */
-  while (extract_one_syscall(pid).nr != stop_nr)
-    ;
-  patch_cpu_features_elf(pid);
+  bool reached = false;
+  for (size_t count = 0; count < profile.startup_syscall_limit; ++count) {
+    if (extract_one_syscall(pid).nr == stop_nr) { reached = true; break; }
+  }
+  if (!reached)
+    throw std::runtime_error("Runtime startup syscall boundary was not reached");
 
   /* Preserve memory for parameters. Need recover registers *
    * for the original first syscall. */
   tracee_reserve_temp_page(pid);
   tracee_write_mem(pid, (void *)(scratch_page + 0xff0),
                    "\x0f\x05\x0f\x05\x0f\x05\x0f\x05", 8);
+  capture_process_kernel_state(pid,index);
+  adopt_clear_child_tid(index,pid);
+  adopt_thread_robust_list(index,pid);
 }
 
 /* prepare tracee for ptrace, and execve */
 static void start_tracee(int id)
 {
+  if (detsim::runtime_profile().fixed_layout) {
+    // Change only the forked tracee before exec. No parent personality or host
+    // ASLR sysctl change; fail closed if the kernel refuses this profile.
+    const long flags = syscall(SYS_personality, 0xffffffffUL);
+    const long applied = flags < 0 ? -1 :
+        syscall(SYS_personality, static_cast<unsigned long>(flags) | ADDR_NO_RANDOMIZE);
+    const long verified = applied < 0 ? -1 : syscall(SYS_personality, 0xffffffffUL);
+    if (verified < 0 || !(verified & ADDR_NO_RANDOMIZE)) {
+      static constexpr char message[] = "Cannot establish RuntimeProfile fixed_layout before exec\n";
+      (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+      _exit(125);
+    }
+  }
+  if (!tracee_native_cwd.empty() && chdir(tracee_native_cwd.c_str()) != 0) {
+    static constexpr char message[] = "Cannot establish native tracee cwd before exec\n";
+    (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+    _exit(125);
+  }
   signal(SIGINT, SIG_IGN);
   ptrace_right(PTRACE_TRACEME, 0, NULL, NULL);
   // detsim::ui::ui_printf("Will start executable %s\n",
@@ -473,34 +633,55 @@ static void start_tracee(int id)
     fclose(log_fp);
   raise(SIGSTOP);
 
-  execv(ptmc_state.tracee[id].executable, ptmc_state.tracee[id].argv);
+  execv(ptmc_state.tracee[id].executable, ptmc_state.tracee[id].argv.data());
 
   perror("exec");
+  _exit(127);
 }
 
 int state_initialization()
 {
+  clear_snapshot_thread_bindings();
+  for (int node=0; node<NP; ++node) ptmc_state.tracee_image_dirty[node]=false;
   /* initialization for multiple process */
   // setpgid(0, pgid);
   setbuf(stdout, NULL);
+  tracer_owner = getpid();
+  // Construct before registering cleanup, so the singleton outlives this callback.
+  snapshot_store = &StateStore::instance();
+  metadata_store = &SysStateStore::instance();
   atexit(exit_all);
   signal(SIGTERM, exit_all);
   // signal(SIGINT, exit_all);
 
-  pids[0] = fork();
-  for (int i = 0; i < NP - 1; i++)
-  {
-    if (pids[i])
-      pids[i + 1] = fork();
-    else
-    {
-      // setpgid(0, pgid);
-      start_tracee(i);
+  // The cleanup wait set must include retained worker carriers, without
+  // touching the shell, driver or another tracee. Publish groups atomically
+  // with respect to our SIGTERM handler.
+  sigset_t blocked, previous_mask;
+  sigemptyset(&blocked);sigaddset(&blocked,SIGTERM);
+  if (sigprocmask(SIG_BLOCK,&blocked,&previous_mask))
+    throw std::runtime_error("Cannot protect tracee startup from SIGTERM");
+  try {
+    for (int i=0;i<NP;++i) {
+      const pid_t child=fork();
+      if (child<0) throw std::runtime_error("Cannot fork tracee");
+      if (!child) {
+        if (setpgid(0,0) || prctl(PR_SET_PDEATHSIG,SIGKILL) || getppid()!=tracer_owner)
+          _exit(126);
+        if (sigprocmask(SIG_SETMASK,&previous_mask,nullptr)) _exit(126);
+        start_tracee(i);
+        _exit(127);
+      }
+      pids[i]=child;
+      if (setpgid(child,child) && getpgid(child)!=child)
+        throw std::runtime_error("Cannot isolate tracee process group");
     }
+  } catch (...) {
+    sigprocmask(SIG_SETMASK,&previous_mask,nullptr);
+    throw;
   }
-
-  if (!pids[NP - 1])
-    start_tracee(NP - 1);
+  if (sigprocmask(SIG_SETMASK,&previous_mask,nullptr))
+    throw std::runtime_error("Cannot restore tracer signal mask after startup");
 
   detsim::ui::ui_printf("Instance #pid = %d\n", getpid());
 
@@ -511,8 +692,8 @@ int state_initialization()
     ptmc_state.fs_states[i].set_fd_manager(ptmc_state.fd_managers[i]);
     ptmc_state.sock_states[i].set_fd_manager(ptmc_state.fd_managers[i]);
 
-    /* Initialize execution engine */
-    exec::init_all();
+  /* Initialize execution engine */
+  exec::init_all();
   }
 
   /* here goes to first state */
@@ -528,7 +709,15 @@ int state_initialization()
   memset(syscall_info, 0, sizeof(syscall_info));
   ptmc_state.cursor = -1;
 
-  sys_state first_state(syscall_info);
+  sys_state first_state(syscall_info, nullptr, false);
+  first_state.model_identity = ptmc_state.model_identity;
+  detsim::search::initialize_compatibility_manifest(first_state);
+  first_state.ss_hash = first_state.identity_hash();
+  bool violation = check_assertions(first_state, 0);
+  first_state.property_failed = violation;
+  first_state.commit_metadata();
   ptmc_state.running_state = first_state;
+  for (int node=0; node<NP; ++node) ptmc_state.tracee_image_dirty[node]=false;
+  if (violation) throw std::runtime_error("Initial state violates configured properties");
   return 0;
 }

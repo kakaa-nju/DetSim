@@ -1,20 +1,34 @@
+
 /*
  * state.cpp - State management
  */
 
 #include "state.h"
-#include "../fs/fd_manager.h"
-#include "../fs/fsstate.h"
+#include "xstate.h"
+#include "../engine/thread_control.h"
+#include "../engine/thread_pool.h"
+#include "../engine/pending_syscall.h"
+#include <poll.h>
+#include "soft_dirty_experiment.h"
+#include "page_capture.h"
+#include "snapshot_memory.h"
+#include "page_restore_stats.h"
+#include "resident_memory.h"
+#include <stdexcept>
+#include <climits>
+#include <charconv>
+#include <string_view>
 #include "cereal/archives/binary.hpp"
 #include "config.h"
 #include "debug.h"
+#include "../fs/fd_manager.h"
+#include "../fs/fsstate.h"
 #include "guest.h"
 #include "monitor.h"
 #include "proc_status.h"
 #include "state_store.h"
 #include "syscall_fmt.h"
 #include "sysstate_store.h"
-#include "user_state.h"
 #include "utils.h"
 #include <assert.h>
 #include <cstdlib>
@@ -22,6 +36,8 @@
 #include <dirent.h>
 #include <fcntl.h>
 #include <fmt/format.h>
+#include <memory>
+#include <mutex>
 #include <set>
 #include <stack>
 #include <stdint.h>
@@ -36,6 +52,40 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 
+static void checked_memory_io(bool write, pid_t pid, const iovec* local,
+                              const iovec* remote, size_t count)
+{
+  size_t expected = 0;
+  for (size_t i = 0; i < count; ++i) {
+    if (local[i].iov_len != remote[i].iov_len ||
+        local[i].iov_len > size_t(SSIZE_MAX) - expected)
+      throw std::runtime_error("Invalid snapshot memory transfer size");
+    expected += local[i].iov_len;
+  }
+  if (!expected) return;
+  if (write) detsim::resident::invalidate(pid);
+  const ssize_t n = write ? process_vm_writev(pid, local, count, remote, count, 0)
+                          : process_vm_readv(pid, local, count, remote, count, 0);
+  if (n < 0 || size_t(n) != expected)
+    throw std::runtime_error(std::string(write ? "Snapshot memory write" : "Snapshot memory read") +
+                             " incomplete: " + std::to_string(n) + "/" + std::to_string(expected));
+}
+
+/* Only call after the corresponding capture/restore barrier: the audit below
+   injects a real brk(0) and must not run for a process that is not checked. */
+static std::optional<uint64_t> checked_known_brk(pid_t pid)
+{
+  const auto proof = detsim::resident::known_brk(pid);
+  if (proof && detsim::resident::verify()) {
+    const uint64_t actual = tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
+    if (actual != *proof) {
+      detsim::resident::invalidate(pid);
+      throw std::runtime_error("resident heap proof disagrees with actual brk");
+    }
+  }
+  return proof;
+}
+
 /* ======================================================================
  * Section 1: Global State Variables
  * ====================================================================== */
@@ -43,9 +93,6 @@
 PTMC_STATE ptmc_state;
 TSS state_tree;
 SSS state_set;
-
-std::unordered_map<int, void *> rseq_struct;
-std::unordered_map<int, int> rseq_len;
 
 // Note: membuf removed - was never used, caused double free bug
 
@@ -67,8 +114,57 @@ static void format_syscall_for_history(char *buf, int pid, hash_type ts_hash)
   buf[1023] = '\0'; /* Ensure null termination */
 }
 
+bool syscall_history_enabled = true;
+
+// Scalar metadata only: observation must not load snapshots or dereference guest pointers.
+void show_syscall_current()
+{
+  const auto& state = ptmc_state.running_state;
+  const auto edge = state_tree.find(state.ss_hash);
+  if (edge == state_tree.end()) {
+    detsim::ui::ui_printf("Current state " HASH_FORMAT " (no predecessor).\n", state.ss_hash);
+    return;
+  }
+  const auto [predecessor, which, choice, slot] = edge->second;
+  detsim::ui::ui_printf(HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d", predecessor, state.ss_hash, which);
+  if (choice == DETSIM_CHOICE_TIMEOUT) detsim::ui::ui_printf(" (timeout)");
+  else if (choice >= 0) detsim::ui::ui_printf(" (choose %d)", choice);
+  detsim::ui::ui_printf(": ");
+  const int status = state.status[which];
+  if (DISCRASHED(status) || DISSIGNALED(status)) {
+    detsim::ui::ui_printf("<fatal signal %d>\n", DSTOPSIG(status));
+    return;
+  }
+  const auto& child = state.child[which];
+  if (slot < 0 || slot >= MAX_THREADS_PER_PROCESS || slot >= int(child.threads.size())) {
+    detsim::ui::ui_printf("<no syscall metadata>\n");
+    return;
+  }
+  const auto& thread = child.threads[slot];
+  const auto& info = child.si[slot];
+  const auto* pending = thread.pending_syscall ? &*thread.pending_syscall : nullptr;
+  const int nr = pending ? pending->nr : info.nr;
+  extern const char* syscalls[450];
+  const char* name = nr >= 0 && nr < 450 && syscalls[nr] ? syscalls[nr] : "unknown";
+  if (child.threads.size() > 1) detsim::ui::ui_printf("[TID:%d] ", thread.tid);
+  detsim::ui::ui_printf("%s(", name);
+  for (int i = 0; i < 6; ++i)
+    detsim::ui::ui_printf("%s0x%lx", i ? ", " : "", (unsigned long)(pending ? pending->args[i] : info.args[i]));
+  detsim::ui::ui_printf(")");
+  if (pending) {
+    const char* phase = pending->phase == PendingPhase::Waiting ? "waiting" :
+                        pending->phase == PendingPhase::Retry ? "retry" : "ready";
+    detsim::ui::ui_printf(" <pending:%s>\n", phase);
+  } else if (nr == SYS_exit || nr == SYS_exit_group) {
+    detsim::ui::ui_printf(" <nonreturning>\n");
+  } else {
+    detsim::ui::ui_printf(" = %ld\n", (long)info.rval);
+  }
+}
+
 void show_syscall_history()
 {
+  if (!syscall_history_enabled) return;
   hash_type ss = ptmc_state.running_state.ss_hash;
   std::stack<std::string> print_stack;
   int cnt = 0;
@@ -79,6 +175,8 @@ void show_syscall_history()
     hash_type pre = std::get<0>(state_tree[ss]);
     int which = std::get<1>(state_tree[ss]);
     int choose = std::get<2>(state_tree[ss]);
+    const int slot = std::get<3>(state_tree[ss]);
+    (void)slot;
 
     sys_state s = sys_state(ss);
 
@@ -86,7 +184,9 @@ void show_syscall_history()
     format_syscall_for_history(buf, ptmc_state.pids[which], s.ts_hash[which]);
     print_stack.push(std::string(buf) + "\n");
 
-    if (choose >= 0)
+    if (choose == DETSIM_CHOICE_TIMEOUT)
+      sprintf(buf, HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d (timeout): ", pre, ss, which);
+    else if (choose >= 0)
       sprintf(buf,
               HASH_FORMAT " => " HASH_FORMAT "\n Tracee %d (choose %d): ", pre,
               ss, which, choose);
@@ -109,321 +209,817 @@ void show_syscall_history()
  * Section 3: State Creation (from running processes)
  * ====================================================================== */
 
-/* Create sys_state from running processes' syscall info */
-/* will save ***ALL*** stuffs of a sys_state and its tracees */
-/* Create sys_state with incremental save optimization
- * Only the active process is fully saved.
- * Other processes reuse old hashes if their state is unchanged.
+/* A transition may name its restored source as a deduplication hint. We still
+ * capture every byte: a stopped task can have externally modified memory.
+ * Generic callers have no source hint and use the ordinary full-save path.
  */
-sys_state::sys_state(const struct syscall_info info[][MAX_THREADS_PER_PROCESS])
+sys_state::sys_state(const struct syscall_info info[][MAX_THREADS_PER_PROCESS],
+                     const sys_state *restored_source, bool persist)
 {
-  auto old_state = ptmc_state.running_state;
-  auto active_idx = ptmc_state.cursor;
-  hash_type ss_hash_tmp = 0;
+  const char *mode = getenv("DETSIM_CAPTURE_MODE");
+  const bool force_full = mode && !strcmp(mode, "full");
   error_bound = ptmc_state.error_bound;
-  extern int auto_mode; // For detecting manual mode
-
-  if (old_state.ss_hash == 0)
-  {
-    for (int j = 0; j < NP; j++)
-    {
-      child[j] = tracee_state(j, info[j]);
-      status[j] = ptmc_state.status[j];
-      ts_hash[j] = child[j].save(ptmc_state.pids[j]);
-      ss_hash_tmp ^= ts_hash[j];
-    }
-    ss_hash = ss_hash_tmp;
-    goto ret;
-  }
-
-  for (int j = 0; j < NP; j++)
-  {
-    /* Create new tracee_state from running process */
+  const auto& context = restored_source ? *restored_source : ptmc_state.running_state;
+  property_failed = context.property_failed;
+  user_state = context.user_state;
+  model_identity = context.model_identity;
+  // The product snapshot is one stopped cut: check every node before the
+  // first injected brk query or memory read in any node.
+  for (int j = 0; j < NP; ++j) {
     child[j] = tracee_state(j, info[j]);
-    status[j] = ptmc_state.status[j];
-
-    if (j == active_idx)
-    {
-      /* Active process: always full save */
-      ts_hash[j] = child[j].save(ptmc_state.pids[j]);
-      LOG_DEBUG("Active tstate %d saved: " HASH_FORMAT, j, ts_hash[j]);
-    }
-    else
-    {
-      /* Inactive process: check if state changed */
-      if (auto_mode &&
-          child[j].metadata_equal(
-              old_state.child[j])) // Disable optimization in manual mode
-      {
-        /* State unchanged, reuse old hash */
-        ts_hash[j] = old_state.ts_hash[j];
-        LOG_DEBUG("Inactive tstate %d reused: " HASH_FORMAT, j, ts_hash[j]);
-      }
-      else
-      {
-        /* State changed, full save */
-        ts_hash[j] = child[j].save(ptmc_state.pids[j]);
-        LOG_DEBUG("Inactive tstate %d changed, saved: " HASH_FORMAT, j,
-                  ts_hash[j]);
-      }
-    }
-
-    ss_hash_tmp ^= ts_hash[j];
+    child[j].prepare_capture(ptmc_state.pids[j]);
   }
+  for (int j = 0; j < NP; ++j) {
+    status[j] = ptmc_state.status[j];
+    const hash_type comparison_hash = !force_full && restored_source &&
+        j != ptmc_state.cursor && DISALIVE(status[j]) &&
+        DISALIVE(restored_source->status[j]) ? restored_source->ts_hash[j] : 0;
+    ts_hash[j] = child[j].save_stopped(ptmc_state.pids[j], comparison_hash);
+    if (!ts_hash[j]) throw std::runtime_error("Failed to capture tracee state");
+  }
+  if (persist) commit_metadata();
+  else ss_hash = identity_hash();
+  LOG_DEBUG("Create sstate " HASH_FORMAT, ss_hash);
+}
 
-ret:
-  ss_hash = ss_hash_tmp;
-  LOG_DEBUG("Create sstate (incremental) " HASH_FORMAT, ss_hash);
-  save_metadata();
+/* ======================================================================
+ * Model budget
+ *
+ * Upstream treats the budget as a hard exploration bound that is part of state
+ * identity. That is visible to users of this tracer: a search would stop with
+ * "Model budget exhausted" and a random walk would abort the whole run once
+ * the counter was spent. Here the counter is only a diagnostic: spending
+ * saturates at zero, no transition fails because of it, and every search
+ * command restarts from the initial budget.
+ * ====================================================================== */
+
+void reset_model_budget(void)
+{
+  ptmc_state.error_bound = kInitialModelBudget;
+}
+
+void consume_model_budget(int cost)
+{
+  if (cost <= 0)
+    return;
+  ptmc_state.error_bound =
+      ptmc_state.error_bound > cost ? ptmc_state.error_bound - cost : 0;
 }
 
 /* ======================================================================
  * Section 4: State Persistence (save/load to disk)
  * ====================================================================== */
 
+namespace {
+// The stored archive is the suffix of the identity encoding. Binary cereal
+// writes these two uint32_t values verbatim before the unchanged state archive.
+constexpr size_t system_identity_prefix_size = 2 * sizeof(uint32_t);
+std::string encode_system_identity(const sys_state& state)
+{
+  std::ostringstream encoded;
+  {
+    cereal::BinaryOutputArchive archive(encoded);
+    const uint32_t domain = 0x44535335;
+    const uint32_t nodes = NP;
+    archive(domain, nodes, state);
+  }
+  return std::move(encoded).str();
+}
+
+hash_type system_identity_key(std::string_view bytes)
+{
+  const hash_type result = XXHash64::hash(bytes.data(), bytes.size());
+  if (result == 0)
+    throw std::runtime_error("Reserved zero system-state identity");
+  return result;
+}
+
+int persist_system_metadata(hash_type key, const std::string& encoded)
+{
+  const std::vector<uint8_t> data(encoded.begin() + system_identity_prefix_size, encoded.end());
+  auto& store = SysStateStore::instance();
+  if (store.exists(key))
+  {
+    std::vector<uint8_t> previous;
+    if (!store.load(key, previous) || previous != data)
+      throw std::runtime_error("System-state identity collision or corrupt metadata");
+    return 0;
+  }
+  if (!store.save(key, data))
+    throw std::runtime_error("Failed to persist system-state metadata");
+  return 1;
+}
+} // namespace
+
+hash_type sys_state::identity_hash() const
+{
+  return system_identity_key(encode_system_identity(*this));
+}
+
+void sys_state::commit_metadata()
+{
+  const auto encoded = encode_system_identity(*this);
+  ss_hash = system_identity_key(encoded);
+  persist_system_metadata(ss_hash, encoded);
+}
+
 int sys_state::save_metadata() const
 {
-  LOG_DEBUG("to store sstate %016lx", ss_hash);
-
-  // Use SysStateStore for packed storage
-  SysStateStore &store = SysStateStore::instance();
-
-  if (!store.exists(ss_hash))
-  {
-    LOG_DEBUG("sys_state stores %016lx", ss_hash);
-
-    // Serialize to memory buffer
-    std::ostringstream oss;
-    try
-    {
-      cereal::BinaryOutputArchive outputArchive(oss);
-      outputArchive(*this);
-    }
-    catch (...)
-    {
-      LOG_CRIT("Failed to serialize sys_state %016lx", ss_hash);
-      return 0;
-    }
-
-    std::string data_str = oss.str();
-    std::vector<uint8_t> data(data_str.begin(), data_str.end());
-
-    if (!store.save(ss_hash, data))
-    {
-      LOG_CRIT("Failed to save metadata to SysStateStore");
-      return 0;
-    }
-
-    return 1;
-  }
-  return 0;
+  const auto encoded = encode_system_identity(*this);
+  if (ss_hash != system_identity_key(encoded))
+    throw std::runtime_error("System-state metadata does not match its identity");
+  return persist_system_metadata(ss_hash, encoded);
 }
 
 /* ======================================================================
  * Section 5: State Recovery (restore running process from snapshot)
  * ====================================================================== */
 
-/* Load tracee_state from integrated StateStore data */
-tracee_state::tracee_state(hash_type hash)
-    : threads(), thread_create_records(), main_tid(0), current_thread_idx(0),
-      futex_state(nullptr)
+void tracee_state::validate_io_state() const
 {
-  // Handle invalid hash (0 means uninitialized/invalid)
-  if (hash == 0)
-  {
-    return;
+  validate_pending_syscalls(*this);
+  auto require = [](bool condition) {
+    if (!condition) throw std::runtime_error("Invalid snapshot descriptor/resource graph");
+  };
+  const auto &manager = fd_manager_state;
+  const auto &files = fs_state.open_files;
+  const auto &sockets = sock_state.sockets();
+  const auto &epolls = sock_state.epoll_instances();
+  const auto &pipe_fds = fs_state.pipe_fds_;
+  for (const auto& thread:threads) {
+    if (!thread.pending_syscall || thread.pending_syscall->reason!=PendingReason::Io ||
+        thread.pending_syscall->phase==PendingPhase::Ready) continue;
+    const auto& call=*thread.pending_syscall;
+    const int fd=static_cast<int>(call.args[0]);
+    require(manager.is_allocated(fd));
+    const auto kind=manager.get_fd_type(fd);
+    if(call.nr==SYS_read || call.nr==SYS_write) require(kind==FdType::PIPE || kind==FdType::SOCKET);
+    else if(call.nr==SYS_recvfrom || call.nr==SYS_accept || call.nr==SYS_accept4) require(kind==FdType::SOCKET);
+    else require(kind==FdType::EPOLL);
   }
-
-  // Load integrated data from StateStore
-  LOG_DEBUG("tracee_state: loading hash %016lx", hash);
-  auto data_shared_ptr = StateStore::instance().load_shared(hash);
-
-  if (!data_shared_ptr)
-  {
-    LOG_CRIT("Cannot load tracee_state for hash %016lx", hash);
-    return;
+  for (int fd : manager.get_allocated_fds()) {
+    const auto kind = manager.get_fd_type(fd);
+    const bool file = files.contains(fd), socket = sockets.contains(fd);
+    const bool epoll = epolls.contains(fd), pipe = pipe_fds.contains(fd);
+    require(int(file) + int(socket) + int(epoll) + int(pipe) == 1);
+    require((file && (kind == FdType::FILE || kind == FdType::STDIO)) ||
+            (socket && kind == FdType::SOCKET) ||
+            (epoll && kind == FdType::EPOLL) || (pipe && kind == FdType::PIPE));
   }
-
-  const std::vector<uint8_t> &data = *data_shared_ptr;
-
-  // Parse header
-  if (data.size() < sizeof(StateDataHeader))
-  {
-    LOG_CRIT("Invalid state data for hash %016lx: too small", hash);
-    return;
+  for (const auto &[fd, file] : files) {
+    const auto kind = manager.get_fd_type(fd);
+    require(manager.is_allocated(fd) && (kind == FdType::FILE || kind == FdType::STDIO));
+    require(file.offset >= 0 && fs_state.filesystem.contains(file.path));
   }
-
-  StateDataHeader *header = (StateDataHeader *)data.data();
-  if (header->magic != 0x4453544D)
-  {
-    LOG_CRIT("Invalid state data for hash %016lx: bad magic", hash);
-    return;
+  std::map<int, std::pair<unsigned, unsigned>> pipe_ends;
+  for (const auto &[fd, signed_id] : pipe_fds) {
+    require(manager.get_fd_type(fd) == FdType::PIPE && signed_id != 0 && signed_id != INT_MIN);
+    const int id = signed_id > 0 ? signed_id : -signed_id;
+    require(fs_state.pipes_.contains(id));
+    const bool read_end = signed_id > 0;
+    require((manager.get_status_flags(fd) & O_ACCMODE) == (read_end ? O_RDONLY : O_WRONLY));
+    auto &ends = pipe_ends[id];
+    if (read_end) ++ends.first;
+    else ++ends.second;
   }
-
-  // Deserialize tracee_state from integrated data
-  if (header->version >= 2 && header->tstate_size > 0)
-  {
-    if (header->tstate_offset + header->tstate_size <= data.size())
-    {
-      std::istringstream iss(std::string(
-          (char *)data.data() + header->tstate_offset, header->tstate_size));
-      try
-      {
-        cereal::BinaryInputArchive ar(iss);
-        ar(*this);
-      }
-      catch (...)
-      {
-        LOG_ERROR("Failed to deserialize tracee_state for hash %016lx", hash);
-      }
+  for (const auto &[id, pipe] : fs_state.pipes_) {
+    require(pipe.buffer.size()<=FileSystemState::pipe_capacity);
+    require(id > 0 && !(pipe.read_closed && pipe.write_closed));
+    const auto ends = pipe_ends[id];
+    require(ends.first == unsigned(!pipe.read_closed) && ends.second == unsigned(!pipe.write_closed));
+  }
+  auto same_address = [](const sockaddr_in &a, const sockaddr_in &b) {
+    return a.sin_family == b.sin_family && a.sin_addr.s_addr == b.sin_addr.s_addr && a.sin_port == b.sin_port;
+  };
+  for (const auto &[fd, socket] : sockets) {
+    require(manager.get_fd_type(fd) == FdType::SOCKET && socket.fd == fd &&
+            socket.domain == AF_INET && (socket.type == SOCK_STREAM || socket.type == SOCK_DGRAM));
+    require(socket.keep_idle > 0 && socket.keep_idle <= 32767 && socket.keep_interval > 0 &&
+            socket.keep_interval <= 32767 && socket.keep_count > 0 && socket.keep_count <= 127);
+    const auto &connections = sock_state.tcp_connections();
+    require(connections.contains(fd) == socket.connected);
+    require(!socket.connected || (socket.type == SOCK_STREAM && !socket.listening));
+    require(!socket.listening || (socket.type == SOCK_STREAM && socket.bound && socket.backlog >= 0));
+    if (!socket.listening) require(socket.pending_connections.empty() && socket.established_connections.empty());
+    std::set<uint64_t> pending;
+    for (uint64_t endpoint : socket.pending_connections) {
+      require(pending.insert(endpoint).second && socket.established_connections.contains(endpoint));
+      const auto &connection = socket.established_connections.at(endpoint);
+      require(connection.local_fd >= 0 && connection.local_addr.sin_family == AF_INET &&
+              connection.peer_addr.sin_family == AF_INET &&
+              endpoint == ((uint64_t(connection.local_addr.sin_addr.s_addr) << 32) | connection.local_addr.sin_port));
+    }
+    require(pending.size() == socket.established_connections.size());
+  }
+  for (const auto &[fd, connection] : sock_state.tcp_connections()) {
+    const auto it = sockets.find(fd);
+    require(it != sockets.end() && it->second.type == SOCK_STREAM && it->second.connected);
+    require(connection.local_fd == fd && same_address(connection.local_addr, it->second.local_addr) &&
+            same_address(connection.peer_addr, it->second.peer_addr));
+  }
+  for (const auto &[fd, queue] : sock_state.udp_recv_buffers()) {
+    (void)queue;
+    const auto it = sockets.find(fd);
+    require(it != sockets.end() && it->second.type == SOCK_DGRAM);
+  }
+  for (const auto &[fd, epoll] : epolls) {
+    require(manager.get_fd_type(fd) == FdType::EPOLL && epoll.epoll_fd == fd);
+    for (const auto &[watched, watch] : epoll.watched_fds) {
+      const auto kind = manager.get_fd_type(watched);
+      require(watched != fd && (kind == FdType::SOCKET || kind == FdType::PIPE) &&
+              !(watch.events & ~(EPOLLIN | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLRDHUP)));
     }
   }
-  else
-  {
-    LOG_WARN("StateStore data for hash %016lx has no embedded tracee_state",
-             hash);
+}
+
+/* Load tracee_state from integrated StateStore data */
+tracee_state::tracee_state(hash_type hash)
+  : threads(), thread_create_records(), main_tid(0), current_thread_idx(0), futex_state()
+{
+  if (!hash) return;
+  const auto metadata = SnapshotView::load_metadata(hash);
+  std::istringstream encoded(std::string(reinterpret_cast<const char*>(metadata->data()), metadata->size()));
+  try {
+    cereal::BinaryInputArchive archive(encoded);
+    archive(*this);
+    if (encoded.peek() != std::char_traits<char>::eof())
+      throw std::runtime_error("Trailing tracee metadata bytes");
+    validate_io_state();
+  } catch (const std::exception& error) {
+    throw std::runtime_error(std::string("Failed to deserialize tracee_state snapshot: ") + error.what());
+  } catch (...) {
+    throw std::runtime_error("Failed to deserialize tracee_state snapshot");
   }
 }
 
 /* Load sys_state from state_store by hash */
-sys_state::sys_state(hash_type hash)
+sys_state::sys_state(hash_type hash) : sys_state()
 {
-  ss_hash = hash;
-
-  // Initialize ts_hash to 0 to avoid garbage values if loading fails
-  for (int i = 0; i < NP; i++)
-  {
-    ts_hash[i] = 0;
-  }
-
-  // Try SysStateStore first (new format)
-  SysStateStore &store = SysStateStore::instance();
+  if (!hash)
+    throw std::runtime_error("Cannot load zero system-state identity");
   std::vector<uint8_t> data;
-
-  LOG_DEBUG("sys_state: loading hash %016lx from SysStateStore", hash);
-
-  if (store.load(hash, data))
+  if (!SysStateStore::instance().load(hash, data))
+    throw std::runtime_error("Cannot load system-state metadata");
+  std::istringstream encoded(std::string(data.begin(), data.end()));
   {
-    LOG_DEBUG("sys_state: loaded hash %016lx, data size=%zu", hash,
-              data.size());
-    // Loaded from packed storage
-    try
-    {
-      std::istringstream iss(std::string((char *)data.data(), data.size()));
-      cereal::BinaryInputArchive inputArchive(iss);
-      inputArchive(*this);
-    }
-    catch (...)
-    {
-      LOG_CRIT("Failed to deserialize sys_state %016lx from packed store",
-               hash);
-    }
+    cereal::BinaryInputArchive archive(encoded);
+    archive(*this);
   }
-  else
+  if (encoded.peek() != std::char_traits<char>::eof() || identity_hash() != hash)
+    throw std::runtime_error("Incompatible or corrupt system-state metadata identity");
+  ss_hash = hash;
+  for (int i = 0; i < NP; ++i)
   {
-    LOG_CRIT("Failed to load sys_state %016lx from SysStateStore", hash);
+    if (!ts_hash[i])
+      throw std::runtime_error("Missing tracee identity in system-state metadata");
+    child[i] = tracee_state(ts_hash[i]);
+  }
+}
+
+struct CaptureLayoutContext {
+  uintptr_t scratch;
+  size_t page_size;
+
+  bool operator==(const CaptureLayoutContext& other) const
+  {
+    return scratch == other.scratch && page_size == other.page_size;
+  }
+};
+
+struct RegionToCapture {
+  uint64_t start, end;
+  size_t size;
+};
+
+// Immutable, text-derived capture layout. Shared with the opt-in cache; it
+// never contains kernel state, pid/store identity, or captured memory bytes.
+struct CaptureLayout {
+  std::vector<RegionInfo> regions;
+  std::vector<RegionToCapture> regions_to_capture;
+  size_t byte_count = 0;
+  std::string maps_text;
+};
+
+static bool excluded_mapping(const maps_item& item,
+                             const CaptureLayoutContext& context)
+{
+  if (item.start < context.scratch + context.page_size && context.scratch < item.end) {
+    if (item.start != context.scratch || item.end != context.scratch + context.page_size)
+      throw std::runtime_error("Unsupported mapping overlaps reserved scratch page");
+    return true;
+  }
+  return !strncmp(item.name, "[vvar", 5) || !strcmp(item.name, "[vdso]") ||
+         !strcmp(item.name, "[vsyscall]");
+}
+
+static bool excluded_mapping(const maps_item& item)
+{
+  return excluded_mapping(item, {scratch_page, PAGE_SIZE});
+}
+
+static int mapping_protection(const char* flags)
+{
+  return (flags[0] == 'r' ? PROT_READ : 0) |
+         (flags[1] == 'w' ? PROT_WRITE : 0) |
+         (flags[2] == 'x' ? PROT_EXEC : 0);
+}
+
+static void restore_protection(pid_t pid, uint64_t start, uint64_t end, int prot)
+{
+  if (tracee_do_syscall(pid, SYS_mprotect, start, end - start, prot, 0, 0, 0) != 0)
+    throw std::runtime_error("Cannot restore snapshot memory protection");
+}
+
+static bool discard_zero_guards()
+{
+  const char* mode = getenv("DETSIM_ZERO_GUARD_RESTORE");
+  if (!mode || !strcmp(mode, "discard")) return true;
+  if (!strcmp(mode, "write")) return false;
+  throw std::runtime_error("Invalid DETSIM_ZERO_GUARD_RESTORE: expected discard or write");
+}
+
+static bool private_anonymous_coverage(const std::vector<maps_item>& maps,
+                                       uint64_t start, uint64_t end)
+{
+  uint64_t cursor = start;
+  for (const auto& item : maps) {
+    if (item.end <= cursor) continue;
+    if (item.start > cursor || item.start >= end || item.flags[3] != 'p' ||
+        item.inode || item.name[0] || item.a || item.b) return false;
+    cursor = std::min(end, item.end);
+    if (cursor == end) return true;
+  }
+  return false;
+}
+
+static bool has_virtual_file_origin(const FileSystemState& state, uint64_t start, uint64_t end)
+{
+  if (state.overlaps_virtual_file_mapping(start, end)) return true;
+  // Check origins independently, including low-level callers with incomplete
+  // coverage metadata. A native anonymous VMA can carry a modeled file image.
+  for (const auto& [address, origin] : state.virtual_file_mapping_sources) {
+    if (address >= end) break;
+    if (origin.first > start) return true;
+  }
+  return false;
+}
+
+static bool same_backing(const maps_item& saved, const maps_item& live, uint64_t address)
+{
+  if (saved.flags[3] != live.flags[3] || saved.inode != live.inode ||
+      saved.a != live.a || saved.b != live.b)
+    return false;
+  // Anonymous splits need no file-offset adjustment. File mappings do.
+  return !saved.inode || uint64_t(saved.offset) + address - saved.start ==
+                          uint64_t(live.offset) + address - live.start;
+}
+
+// The one pure layout builder: canonical merging, scratch/pseudo-mapping
+// exclusion, validation, text formatting and raw capture offsets. It depends
+// only on the parsed text and the fixed exclusion context it is given.
+static std::shared_ptr<const CaptureLayout> build_capture_layout(
+    const std::vector<maps_item>& parsed_maps,
+    const CaptureLayoutContext& context)
+{
+  // Kernel VMA partitions can change after mprotect without changing memory
+  // semantics. Store one canonical partition for adjacent equivalent ranges.
+  std::vector<maps_item> maps;
+  maps.reserve(parsed_maps.size());
+  for (const auto& item : parsed_maps) {
+    bool merge = false;
+    if (!maps.empty()) {
+      const auto& previous = maps.back();
+      merge = previous.end == item.start && !excluded_mapping(previous, context) &&
+              !excluded_mapping(item, context) && !strcmp(previous.flags, item.flags) &&
+              !strcmp(previous.name, item.name) && same_backing(previous, item, item.start);
+    }
+    if (merge) maps.back().end = item.end;
+    else maps.push_back(item);
   }
 
-  // Load child states from integrated data (only for valid hashes)
-  for (int i = 0; i < NP; i++)
-  {
-    if (DISALIVE(status[i]) && ts_hash[i] != 0)
-    {
-      child[i] = tracee_state(ts_hash[i]);
-    }
+  CaptureLayout layout;
+  for (const auto& item : maps) {
+    layout.maps_text += fmt::format("{:x}-{:x} {} {:x} {:x}:{:x} {} {}\n", item.start,
+                            item.end, item.flags, item.offset, item.a, item.b,
+                            item.inode, item.name);
+    if (excluded_mapping(item, context)) continue;
+    const bool anonymous_guard = !strcmp(item.flags, "---p") &&
+                                 !item.inode && !item.name[0];
+    if (item.flags[3] != 'p' || (item.flags[0] != 'r' && !anonymous_guard))
+      throw std::runtime_error(fmt::format("Unsupported snapshot mapping {:x}-{:x} {} {}: requires private readable or anonymous PROT_NONE memory",
+                                         item.start, item.end, item.flags, item.name));
+    RegionInfo info{};
+    info.start = item.start; info.end = item.end;
+    info.prot = mapping_protection(item.flags);
+    memcpy(info.flags, item.flags, 5);
+    info.offset = layout.byte_count;
+    layout.regions.push_back(info);
+    layout.regions_to_capture.push_back({item.start, item.end, size_t(item.end - item.start)});
+    layout.byte_count += item.end - item.start;
   }
+  return std::make_shared<const CaptureLayout>(std::move(layout));
+}
+
+enum class CaptureLayoutCacheMode { off, on, verify };
+enum class CaptureLayoutKeyKind { canonical, raw };
+
+// Bounded cache of pure text-derived layouts. Four entries are enough for the
+// stopped target and its adjacent transitions; admission caps keep pathological
+// maps text from retaining unbounded metadata.
+struct CaptureLayoutCache {
+  static constexpr size_t max_entries = 4;
+  static constexpr size_t max_key_bytes = 64 * 1024;
+  static constexpr size_t max_layout_bytes = 256 * 1024;
+
+  struct Entry {
+    std::string key;
+    // One bounded alias for the exact live text that produced this layout. It
+    // is lookup metadata only; the layout remains derived from key.
+    std::string raw_alias;
+    CaptureLayoutContext context;
+    std::shared_ptr<const CaptureLayout> layout;
+  };
+
+  std::mutex mutex;
+  std::vector<Entry> entries; // most recently used first
+  uint64_t lookups = 0;
+  uint64_t hits = 0;
+  uint64_t misses = 0;
+  uint64_t builds = 0;
+  uint64_t admits = 0;
+  uint64_t evictions = 0;
+  uint64_t oversize = 0;
+  uint64_t verify_checks = 0;
+  uint64_t verify_mismatches = 0;
+};
+
+static CaptureLayoutCache& capture_layout_cache()
+{
+  static CaptureLayoutCache cache;
+  return cache;
+}
+
+static CaptureLayoutCacheMode capture_layout_cache_mode()
+{
+  const char* mode = getenv("DETSIM_CAPTURE_LAYOUT_CACHE");
+  if (!mode || !strcmp(mode, "off")) return CaptureLayoutCacheMode::off;
+  if (!strcmp(mode, "on")) return CaptureLayoutCacheMode::on;
+  if (!strcmp(mode, "verify")) return CaptureLayoutCacheMode::verify;
+  throw std::runtime_error("DETSIM_CAPTURE_LAYOUT_CACHE must be off, on or verify");
+}
+
+static size_t capture_layout_bytes(const CaptureLayout& layout)
+{
+  return layout.maps_text.size() + layout.regions.size() * sizeof(RegionInfo) +
+         layout.regions_to_capture.size() * sizeof(RegionToCapture);
+}
+
+static void note_capture_layout_build()
+{
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  ++cache.builds;
+}
+
+static void note_capture_layout_oversize()
+{
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  ++cache.oversize;
+}
+
+static std::shared_ptr<const CaptureLayout> build_capture_layout_counted(
+    const std::vector<maps_item>& parsed_maps,
+    const CaptureLayoutContext& context,
+    CaptureLayoutCacheMode mode)
+{
+  auto layout = build_capture_layout(parsed_maps, context);
+  if (mode != CaptureLayoutCacheMode::off) note_capture_layout_build();
+  return layout;
+}
+
+// Read at most one byte past the cache key cap. Exactly max_key_bytes is still
+// a valid raw key; max_key_bytes + 1 selects the checked seek/old-reader path.
+static std::string read_capture_maps(FILE* maps)
+{
+  std::string raw(CaptureLayoutCache::max_key_bytes + 1, '\0');
+  size_t used = 0;
+  bool eof = false;
+  while (used < raw.size()) {
+    const size_t got = fread(raw.data() + used, 1, raw.size() - used, maps);
+    if (got == 0) {
+      eof = feof(maps) != 0;
+      break;
+    }
+    used += got;
+  }
+  // A bounded key is only complete when the zero read reported EOF. A stream
+  // that stops without EOF is a read failure, not a short valid text.
+  if (ferror(maps) || used == 0 ||
+      (used <= CaptureLayoutCache::max_key_bytes && !eof))
+    throw std::runtime_error("Failed to read tracee memory mappings");
+  raw.resize(used);
+  return raw;
+}
+
+// Parse the exact observed text through the unchanged line reader. fmemopen
+// preserves its 1024-byte fgets chunks, NUL handling and missing-final-newline
+// behavior; the observed string outlives fclose.
+static void parse_observed_maps(std::string_view raw,
+                                std::vector<maps_item>& parsed_maps)
+{
+  FILE* maps = fmemopen(const_cast<char*>(raw.data()), raw.size(), "r");
+  if (!maps) throw std::runtime_error("Failed to read tracee memory mappings");
+  bool failed = false;
+  try {
+    get_maps_item(parsed_maps, maps);
+    failed = ferror(maps) != 0;
+  } catch (...) {
+    fclose(maps);
+    throw;
+  }
+  fclose(maps);
+  if (failed || parsed_maps.empty())
+    throw std::runtime_error("Failed to read tracee memory mappings");
+}
+
+// Oversize fallback: rewind with a checked seek and use the historical reader,
+// which consumes the whole stream and reports read errors before any lookup.
+static void parse_maps_file(FILE* maps, std::vector<maps_item>& parsed_maps)
+{
+  if (fseeko(maps, 0, SEEK_SET) != 0)
+    throw std::runtime_error("Failed to read tracee memory mappings");
+  get_maps_item(parsed_maps, maps);
+  if (ferror(maps) || parsed_maps.empty())
+    throw std::runtime_error("Failed to read tracee memory mappings");
+}
+
+static std::shared_ptr<const CaptureLayout> find_capture_layout(
+    std::string_view key, const CaptureLayoutContext& context,
+    CaptureLayoutKeyKind kind)
+{
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  ++cache.lookups;
+  for (auto it = cache.entries.begin(); it != cache.entries.end(); ++it) {
+    const std::string& candidate =
+        kind == CaptureLayoutKeyKind::canonical ? it->key : it->raw_alias;
+    if (kind == CaptureLayoutKeyKind::raw && candidate.empty()) continue;
+    if (candidate != key || !(it->context == context)) continue;
+    ++cache.hits;
+    auto layout = it->layout;
+    if (it != cache.entries.begin()) {
+      auto entry = std::move(*it);
+      cache.entries.erase(it);
+      cache.entries.insert(cache.entries.begin(), std::move(entry));
+    }
+    return layout;
+  }
+  ++cache.misses;
+  return {};
+}
+
+static void admit_capture_layout(std::string_view key, std::string_view raw_alias,
+                                 const std::shared_ptr<const CaptureLayout>& layout,
+                                 const CaptureLayoutContext& context)
+{
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  if (key.size() > CaptureLayoutCache::max_key_bytes ||
+      raw_alias.size() > CaptureLayoutCache::max_key_bytes ||
+      capture_layout_bytes(*layout) > CaptureLayoutCache::max_layout_bytes) {
+    ++cache.oversize;
+    return;
+  }
+  for (auto it = cache.entries.begin(); it != cache.entries.end(); ++it) {
+    if (it->key != key || !(it->context == context)) continue;
+    it->layout = layout;
+    // Oversize live text is admitted without an alias. Keep the previous raw
+    // alias in that case instead of dropping a reusable exact-text key.
+    if (!raw_alias.empty()) it->raw_alias = std::string(raw_alias);
+    if (it != cache.entries.begin()) {
+      auto entry = std::move(*it);
+      cache.entries.erase(it);
+      cache.entries.insert(cache.entries.begin(), std::move(entry));
+    }
+    return;
+  }
+  if (cache.entries.size() >= CaptureLayoutCache::max_entries) {
+    cache.entries.pop_back();
+    ++cache.evictions;
+  }
+  cache.entries.insert(cache.entries.begin(),
+                       {std::string(key), std::string(raw_alias), context, layout});
+  ++cache.admits;
+}
+
+static bool same_capture_layout(const CaptureLayout& left, const CaptureLayout& right)
+{
+  if (left.byte_count != right.byte_count || left.maps_text != right.maps_text ||
+      left.regions.size() != right.regions.size() ||
+      left.regions_to_capture.size() != right.regions_to_capture.size())
+    return false;
+  for (size_t i = 0; i < left.regions.size(); ++i) {
+    const auto& a = left.regions[i];
+    const auto& b = right.regions[i];
+    if (a.start != b.start || a.end != b.end || a.offset != b.offset ||
+        a.prot != b.prot || memcmp(a.flags, b.flags, sizeof a.flags))
+      return false;
+  }
+  for (size_t i = 0; i < left.regions_to_capture.size(); ++i) {
+    const auto& a = left.regions_to_capture[i];
+    const auto& b = right.regions_to_capture[i];
+    if (a.start != b.start || a.end != b.end || a.size != b.size) return false;
+  }
+  return true;
+}
+
+static void verify_capture_layout(const CaptureLayout& cached,
+                                  const CaptureLayout& rebuilt)
+{
+  const bool equal = same_capture_layout(cached, rebuilt);
+  auto& cache = capture_layout_cache();
+  {
+    std::lock_guard<std::mutex> lock(cache.mutex);
+    ++cache.verify_checks;
+    if (!equal) ++cache.verify_mismatches;
+  }
+  if (!equal) throw std::runtime_error("Capture layout cache verification mismatch");
+}
+
+// Test-facing diagnostics; the counters stay bounded and independent of the
+// cached layout contents.
+namespace detsim {
+CaptureLayoutCacheStats capture_layout_cache_stats()
+{
+  CaptureLayoutCacheStats stats;
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  stats.lookups = cache.lookups;
+  stats.hits = cache.hits;
+  stats.misses = cache.misses;
+  stats.builds = cache.builds;
+  stats.admits = cache.admits;
+  stats.evictions = cache.evictions;
+  stats.oversize = cache.oversize;
+  stats.verify_checks = cache.verify_checks;
+  stats.verify_mismatches = cache.verify_mismatches;
+  stats.entries = cache.entries.size();
+  return stats;
+}
+
+void clear_capture_layout_cache()
+{
+  auto& cache = capture_layout_cache();
+  std::lock_guard<std::mutex> lock(cache.mutex);
+  cache.entries.clear();
+  cache.lookups = cache.hits = cache.misses = cache.builds = 0;
+  cache.admits = cache.evictions = cache.oversize = 0;
+  cache.verify_checks = cache.verify_mismatches = 0;
+}
+}
+
+// Public low-level restore APIs may bypass the owned-carrier barrier. Their
+// caller must keep all tasks stopped; never write memory with native rseq active.
+// The checked public APIs below always perform this probe. Their shared private
+// bodies are also reached by recover_stopped(), which inherits the
+// verify_thread_pool() owned-carrier barrier instead of repeating it.
+static void require_no_process_rseq(pid_t pid)
+{
+  const auto threads = get_thread_list(pid);
+  if (threads.empty()) throw std::runtime_error("Cannot inspect restore process threads");
+  for (pid_t tid : threads) require_no_rseq(tid);
+}
+
+namespace {
+bool parse_mapping_line(std::string_view line, maps_item& item)
+{
+  // Saved text is length-delimited; match the old C parser's NUL boundary.
+  line = line.substr(0, line.find('\0'));
+  const char* cursor = line.data();
+  const char* end = cursor + line.size();
+  const auto space = [](char c) { return c == ' ' || (c >= '\t' && c <= '\r'); };
+  const auto skip_space = [&] { while (cursor != end && space(*cursor)) ++cursor; };
+  const auto number = [&](auto& value, int base) {
+    skip_space();
+    bool negative = false;
+    if (cursor != end && (*cursor == '+' || *cursor == '-')) negative = *cursor++ == '-';
+    if (base == 16 && end - cursor >= 2 && cursor[0] == '0' &&
+        (cursor[1] == 'x' || cursor[1] == 'X')) cursor += 2;
+    const auto parsed = std::from_chars(cursor, end, value, base);
+    if (parsed.ec != std::errc{}) return false;
+    cursor = parsed.ptr;
+    if (negative) value = 0 - value; // Preserve scanf's unsigned sign conversion.
+    return true;
+  };
+  if (!number(item.start, 16) || cursor == end || *cursor++ != '-' ||
+      !number(item.end, 16)) return false;
+  skip_space();
+  size_t flags = 0;
+  while (cursor != end && !space(*cursor) && flags < sizeof(item.flags) - 1)
+    item.flags[flags++] = *cursor++;
+  item.flags[flags] = '\0';
+  if (!flags || !number(item.offset, 16) || !number(item.a, 16) ||
+      cursor == end || *cursor++ != ':' || !number(item.b, 16) ||
+      !number(item.inode, 10) || item.end <= item.start) return false;
+  skip_space();
+  size_t name = 0;
+  while (cursor != end && !space(*cursor) && name < sizeof(item.name) - 1)
+    item.name[name++] = *cursor++;
+  item.name[name] = '\0'; // Keep the existing first-token, width-limited name contract.
+  return true;
+}
+void parse_mapping_text(std::string_view text, std::vector<maps_item>& items)
+{
+  while (!text.empty()) {
+    const auto newline = text.find('\n');
+    maps_item item{};
+    if (!parse_mapping_line(text.substr(0, newline), item))
+      throw std::runtime_error("Invalid saved memory mapping text");
+    items.push_back(item);
+    if (newline == std::string_view::npos) break;
+    text.remove_prefix(newline + 1);
+  }
+}
 }
 
 void tracee_state::restore_memory_mappings(
     hash_type ts_hash, int pid, std::vector<maps_item> &maps_out) const
 {
-  /* Load saved mappings from StateStore */
+  (void)discard_zero_guards();
+  require_no_process_rseq(pid);
+  restore_memory_mappings_unchecked(ts_hash, pid, maps_out);
+}
+
+void tracee_state::restore_memory_mappings_unchecked(
+    hash_type ts_hash, int pid, std::vector<maps_item> &maps_out) const
+{
+  const auto snapshot = SnapshotView::open(ts_hash);
   std::vector<maps_item> maps_saved;
-  {
-    std::shared_ptr<const std::vector<uint8_t>> data_shared_ptr =
-        StateStore::instance().load_shared(ts_hash);
-    if (data_shared_ptr == nullptr)
-    {
-      LOG_CRIT("Cannot load state for hash %016lx", ts_hash);
-      return;
-    }
-
-    const std::vector<uint8_t> &data = *data_shared_ptr;
-
-    if (data.size() >= sizeof(StateDataHeader))
-    {
-      StateDataHeader *header = (StateDataHeader *)data.data();
-      /* Try to read from integrated maps text (version 3+) */
-      if (header->magic == 0x4453544D && header->version >= 3 &&
-          header->maps_size > 0)
-      {
-        if (header->maps_offset + header->maps_size <= data.size())
-        {
-          const char *maps_text =
-              (const char *)data.data() + header->maps_offset;
-          std::istringstream iss(std::string(maps_text, header->maps_size));
-          std::string line;
-          while (std::getline(iss, line))
-          {
-            maps_item item = {};
-            uint32_t offset, a, b, inode;
-            if (sscanf(line.c_str(), "%lx-%lx %4s %x %d:%d %d %511s",
-                       &item.start, &item.end, item.flags, &offset, &a, &b,
-                       &inode, item.name) >= 7)
-            {
-              maps_saved.push_back(item);
-            }
-          }
-        }
-      }
-    }
-  }
+  parse_mapping_text(snapshot->maps_text(), maps_saved);
 
   if (maps_saved.empty())
-  {
-    /* Fallback: load from separate .maps file */
-    LOG_WARN("StateStore includes no mappings for tshash = %016lx", ts_hash);
-    std::string maps_path =
-        fileutils::format_hash_filename("mappings", ".maps", ts_hash);
-    auto maps_fp = fileutils::open_cfile(maps_path, "r");
-    if (maps_fp)
-    {
-      get_maps_item(maps_saved, maps_fp.get());
-    }
+    throw std::runtime_error("Snapshot contains no memory mappings");
+
+  const auto resident = detsim::resident::get(pid);
+  if (resident.snapshot && resident.brk == brk &&
+      resident.snapshot->maps_text() == snapshot->maps_text()) {
+    maps_out = std::move(maps_saved);
+    return;
   }
 
   /* Get current mappings */
   std::string maps_path = fmt::format("/proc/{}/maps", pid);
   auto maps_fp = fileutils::open_cfile(maps_path, "r");
   std::vector<maps_item> maps_old;
-  if (maps_fp)
-  {
-    get_maps_item(maps_old, maps_fp.get());
-  }
+  if (!maps_fp)
+    throw std::runtime_error("Cannot read current memory mappings for restore");
+  get_maps_item(maps_old, maps_fp.get());
+  if (ferror(maps_fp.get()) || maps_old.empty())
+    throw std::runtime_error("Incomplete current memory mappings for restore");
 
   LOG_DEBUG("new maps has %d and old maps has %d items", maps_saved.size(),
             maps_old.size());
 
-  /* Unmap regions that exist in current but not in saved */
-  for (auto &item_old : maps_old)
-  {
-    LOG_TRACE("old item: [%lx-%lx] %s", item_old.start, item_old.end,
-              item_old.name);
-    if (!mapping_exists(item_old, maps_saved))
-    {
-      tracee_do_munmap(pid, item_old.start, item_old.end);
+  // Restore ranges rather than matching VMA endpoints: mprotect may split or
+  // merge VMAs while leaving the same underlying private mapping intact.
+  for (const auto& saved : maps_saved) {
+    if (excluded_mapping(saved) || !strcmp(saved.name, "[heap]")) continue;
+    if (saved.flags[3] != 'p')
+      throw std::runtime_error("Shared mappings are outside snapshot restore support");
+    uint64_t cursor = saved.start;
+    for (const auto& live : maps_old) {
+      if (live.end <= cursor || live.start >= saved.end) continue;
+      if (live.start > cursor) break;
+      if (!same_backing(saved, live, cursor)) break;
+      cursor = std::min(saved.end, live.end);
+      if (cursor == saved.end) break;
+    }
+    if (cursor != saved.end) {
+      if (saved.inode || saved.name[0])
+        throw std::runtime_error("Cannot recreate missing or replaced file-backed/named snapshot mapping");
+      void* result = tracee_do_mmap(pid, saved.start, saved.end, mapping_protection(saved.flags));
+      if (reinterpret_cast<uint64_t>(result) != saved.start)
+        throw std::runtime_error("Cannot recreate anonymous snapshot mapping");
     }
   }
 
-  /* Map regions that exist in saved but not in current */
-  for (auto &item_new : maps_saved)
-  {
-    LOG_TRACE("new item: [%lx-%lx] %s", item_new.start, item_new.end,
-              item_new.name);
-    if (!mapping_exists(item_new, maps_old))
-    {
-      tracee_do_mmap(pid, item_new.start, item_new.end);
+  // Remove only portions absent from the saved map, preserving split/merged
+  // neighbors and the tracer's injection page. Heap extent is restored by brk.
+  for (const auto& live : maps_old) {
+    if (excluded_mapping(live) || !strcmp(live.name, "[heap]")) continue;
+    uint64_t cursor = live.start;
+    for (const auto& saved : maps_saved) {
+      if (saved.end <= cursor || saved.start >= live.end) continue;
+      if (saved.start > cursor &&
+          tracee_do_syscall(pid, SYS_munmap, cursor, saved.start - cursor, 0, 0, 0, 0) != 0)
+        throw std::runtime_error("Cannot remove extra snapshot mapping range");
+      cursor = std::min(live.end, saved.end);
+      if (cursor == live.end) break;
     }
+    if (cursor < live.end &&
+        tracee_do_syscall(pid, SYS_munmap, cursor, live.end - cursor, 0, 0, 0, 0) != 0)
+      throw std::runtime_error("Cannot remove extra snapshot mapping range");
   }
 
   /* Return saved mappings for further processing */
@@ -433,422 +1029,505 @@ void tracee_state::restore_memory_mappings(
 /*
  * Optimized memory recovery with:
  * 1. Aggregated IO: Use process_vm_writev with multiple iovecs
- * 6. madvise: Use MADV_SEQUENTIAL hint before bulk memory operations
  */
 void tracee_state::recover_mem_reg_snapshot(std::vector<maps_item> &maps,
                                             hash_type ts_hash, int pid) const
 {
-  // Load integrated data from StateStore
-  std::shared_ptr<const std::vector<uint8_t>> data_shared_ptr =
-      StateStore::instance().load_shared(ts_hash);
+  (void)discard_zero_guards();
+  require_no_process_rseq(pid);
+  recover_mem_reg_snapshot_unchecked(maps, ts_hash, pid);
+}
 
-  if (!data_shared_ptr)
-  {
-    LOG_CRIT("Cannot load state for hash %016lx", ts_hash);
-    return;
+void tracee_state::recover_mem_reg_snapshot_unchecked(
+    std::vector<maps_item> &maps, hash_type ts_hash, int pid) const
+{
+  const bool discard_guards = discard_zero_guards();
+  const auto snapshot = SnapshotView::open(ts_hash);
+  const auto& regions = snapshot->regions();
+  auto resident = detsim::resident::get(pid);
+  if (resident.snapshot && (resident.brk != brk ||
+      resident.snapshot->maps_text() != snapshot->maps_text())) resident = {};
+  const auto target_refs = snapshot->format_version() == PAGE_SNAPSHOT_VERSION ?
+      snapshot->page_references() : std::span<const PageRef>{};
+
+  constexpr size_t MAX_IOV_BATCH = 256;
+  iovec local_iov[MAX_IOV_BATCH], remote_iov[MAX_IOV_BATCH];
+  size_t iov_count = 0, queued_bytes = 0;
+  // Loading another page can evict a previous page from the store's cache.
+  // Own every queued buffer until the corresponding write completes.
+  std::vector<std::shared_ptr<const std::vector<uint8_t>>> owners;
+  owners.reserve(MAX_IOV_BATCH);
+  auto flush = [&] {
+    if (!iov_count) return;
+    checked_memory_io(true, pid, local_iov, remote_iov, iov_count);
+    detsim::page_restore::write_bytes.fetch_add(queued_bytes, std::memory_order_relaxed);
+    detsim::page_restore::pages_written.fetch_add(iov_count, std::memory_order_relaxed);
+    iov_count = queued_bytes = 0;
+    owners.clear();
+  };
+
+  std::vector<maps_item> current_maps;
+  if (resident.snapshot) current_maps = maps;
+  else {
+    auto current_maps_file = fileutils::open_cfile(fmt::format("/proc/{}/maps", pid), "r");
+    if (!current_maps_file) throw std::runtime_error("Cannot inspect restore memory permissions");
+    get_maps_item(current_maps, current_maps_file.get());
+    if (ferror(current_maps_file.get()) || current_maps.empty())
+      throw std::runtime_error("Incomplete current memory mappings for restore");
   }
+  std::vector<size_t> protected_regions;
+  std::vector<uint8_t> comparison;
 
-  const std::vector<uint8_t> &data = *data_shared_ptr;
-  // Parse header
-  if (data.size() < sizeof(StateDataHeader))
-  {
-    LOG_CRIT("Invalid state data for hash %016lx: too small", ts_hash);
-    return;
-  }
-
-  StateDataHeader *header = (StateDataHeader *)data.data();
-  if (header->magic != 0x4453544D)
-  {
-    LOG_CRIT("Invalid state data format for hash %016lx", ts_hash);
-    return;
-  }
-
-  RegionInfo *regions = (RegionInfo *)(data.data() + sizeof(StateDataHeader));
-
-  /* Read current rseq structure to preserve it */
-  void *rseq = malloc(rseq_len[pid]);
-  tracee_read_mem(pid, rseq_struct[pid], rseq, rseq_len[pid]);
-
-  // ========================================================================
-  // Optimization 6: madvise - Hint kernel about memory access pattern
-  // Use MADV_SEQUENTIAL to optimize for sequential access
-  // This helps the kernel prefetch pages and optimize page cache
-  // ========================================================================
-  for (uint32_t i = 0; i < header->num_regions; i++)
-  {
-    uint64_t start = regions[i].start;
-    uint64_t end = regions[i].end;
-    ssize_t size = end - start;
-
-    if (size <= 0)
-      continue;
-
-    // Validate region
+  for (size_t i = 0; i < regions.size(); ++i) {
+    const auto& region = regions[i];
+    const uint64_t start = region.start, end = region.end;
+    const size_t size = end - start;
     bool valid = false;
-    for (auto &item : maps)
-    {
-      if (item.start <= start && end <= item.end && item.flags[1] == 'w')
-      {
+    for (const auto& item : maps) {
+      if (item.start <= start && end <= item.end && item.flags[3] == 'p') {
         valid = true;
         break;
       }
     }
-    if (!valid)
-      continue;
+    if (!valid) throw std::runtime_error("Snapshot private region missing during restore");
 
-    // Hint kernel: we will access this region sequentially
-    // This triggers prefetching and optimizes page fault handling
-    madvise((void *)start, size, MADV_SEQUENTIAL);
-  }
-
-  // ========================================================================
-  // Optimization 1: Aggregated IO - Batch multiple regions in single syscall
-  // process_vm_writev supports up to IOV_MAX (1024) iovecs
-  // This reduces syscall overhead from N syscalls to ceil(N/IOV_MAX)
-  // ========================================================================
-
-  // Maximum iovecs per syscall (conservative to avoid stack overflow)
-  constexpr int MAX_IOV_BATCH = 256;
-
-  struct iovec local_iov[MAX_IOV_BATCH];
-  struct iovec remote_iov[MAX_IOV_BATCH];
-  int iov_count = 0;
-
-  for (uint32_t i = 0; i < header->num_regions; i++)
-  {
-    uint64_t start = regions[i].start;
-    uint64_t end = regions[i].end;
-    uint64_t offset = regions[i].offset;
-    ssize_t size = end - start;
-
-    if (size <= 0)
-      continue;
-
-    // Check if this region is still valid in current maps
-    bool valid = false;
-    for (auto &item : maps)
-    {
-      if (item.start <= start && end <= item.end && item.flags[1] == 'w')
-      {
-        valid = true;
-        break;
+    bool force_guard_write = false;
+    constexpr size_t page_size = 4096;
+    if (!resident.snapshot && discard_guards && region.prot == PROT_NONE &&
+        start % page_size == 0 && end % page_size == 0 &&
+        private_anonymous_coverage(maps, start, end) &&
+        private_anonymous_coverage(current_maps, start, end) &&
+        !has_virtual_file_origin(fs_state, start, end)) {
+      static constexpr uint8_t zero_page[page_size]{};
+      bool all_zero = true;
+      // Validate every saved page before discarding anything in this region.
+      // Neither a zero-page key nor unreadable live memory proves its contents.
+      for (size_t page_index = 0; page_index < snapshot->page_count(i); ++page_index) {
+        const auto page = snapshot->page(i, page_index);
+        if (page.length > sizeof zero_page || memcmp(page.data, zero_page, page.length))
+          all_zero = false;
       }
-    }
-    if (!valid)
-    {
-      LOG_WARN("Region %lx-%lx not found in current maps, skipping", start,
-               end);
-      continue;
-    }
-
-    // Check data bounds
-    if (offset + size > data.size())
-    {
-      LOG_WARN("Region %lx-%lx data out of bounds", start, end);
-      continue;
-    }
-
-    // Fill iovec for this region
-    local_iov[iov_count].iov_base = (bytes *)data.data() + offset;
-    local_iov[iov_count].iov_len = size;
-    remote_iov[iov_count].iov_base = (void *)start;
-    remote_iov[iov_count].iov_len = size;
-    iov_count++;
-
-    LOG_TRACE("Queue restore mem %p-%p (batch %d/%d)", (void *)start,
-              (void *)end, iov_count, MAX_IOV_BATCH);
-
-    // Flush batch when full
-    if (iov_count >= MAX_IOV_BATCH)
-    {
-      ssize_t n = syscall(SYS_process_vm_writev, pid, local_iov, iov_count,
-                          remote_iov, iov_count, 0);
-      if (n < 0)
-      {
-        LOG_ERROR("Batch process_vm_writev failed: %s", strerror(errno));
-        // Fallback: try individual writes
-        for (int j = 0; j < iov_count; j++)
-        {
-          tracee_write_mem(pid, remote_iov[j].iov_base, local_iov[j].iov_base,
-                           local_iov[j].iov_len);
+      if (all_zero) {
+        flush();
+        if (tracee_do_syscall(pid, SYS_madvise, start, size, MADV_DONTNEED, 0, 0, 0) == 0) {
+          restore_protection(pid, start, end, PROT_NONE);
+          detsim::page_restore::zero_guard_bytes.fetch_add(size, std::memory_order_relaxed);
+          detsim::page_restore::zero_guard_regions.fetch_add(1, std::memory_order_relaxed);
+          continue;
         }
+        // A failed call may already have discarded part of the range. Repair
+        // its entire saved image through the baseline path, without comparison.
+        force_guard_write = true;
+        detsim::page_restore::zero_guard_fallbacks.fetch_add(1, std::memory_order_relaxed);
       }
-      iov_count = 0;
+    }
+
+    uint64_t readable_end = start;
+    bool original_permissions = true;
+    for (const auto& live : current_maps) {
+      if (live.end <= readable_end || live.start >= end) continue;
+      if (live.start > readable_end || live.flags[0] != 'r') break;
+      original_permissions &= mapping_protection(live.flags) == int(region.prot);
+      readable_end = std::min(end, live.end);
+      if (readable_end == end) break;
+    }
+    const bool comparable = resident.snapshot || (readable_end == end && !force_guard_write);
+    if (comparable && !resident.snapshot) {
+      comparison.resize(size);
+      iovec local{comparison.data(), size}, remote{reinterpret_cast<void*>(start), size};
+      checked_memory_io(false, pid, &local, &remote, 1);
+      detsim::page_restore::read_bytes.fetch_add(size, std::memory_order_relaxed);
+    }
+
+    bool made_writable = false;
+    const size_t pages = snapshot->page_count(i);
+    for (size_t page_index = 0; page_index < pages; ++page_index) {
+      if (resident.snapshot && !target_refs.empty()) {
+        const auto& old = resident.page(i, page_index);
+        const auto& target = target_refs[region.offset + page_index];
+        // The resident owner already holds this validated immutable object.
+        // Avoid looking up the same object again through the store's LRU.
+        if (old.key && old.key == target.key && old.address == target.address && old.length == target.length)
+          continue;
+      }
+      const auto page = snapshot->page(i, page_index);
+      if (resident.snapshot) {
+        const auto& previous = resident.page(i, page_index);
+        if (previous.address != page.address || previous.length != page.length)
+          throw std::runtime_error("Resident restore page geometry differs");
+        if (previous.data == page.data || !memcmp(previous.data, page.data, page.length)) continue;
+      } else if (comparable && !memcmp(comparison.data() + (page.address - start), page.data, page.length))
+          continue;
+      if (!made_writable) {
+        // Applying the saved writable protection also repairs a split RO branch.
+        if (!original_permissions || !comparable || !(region.prot & PROT_WRITE)) {
+          restore_protection(pid, start, end, region.prot | PROT_WRITE);
+          protected_regions.push_back(i);
+        }
+        made_writable = true;
+      }
+      local_iov[iov_count] = {const_cast<uint8_t*>(page.data), page.length};
+      remote_iov[iov_count] = {reinterpret_cast<void*>(page.address), page.length};
+      owners.push_back(page.owner);
+      ++iov_count;
+      queued_bytes += page.length;
+      if (iov_count == MAX_IOV_BATCH) flush();
+    }
+    if (comparable)
+      detsim::page_restore::pages_compared.fetch_add(snapshot->page_count(i), std::memory_order_relaxed);
+    // Contents may be unchanged while the discarded branch changed mprotect.
+    if (!made_writable && !original_permissions)
+      restore_protection(pid, start, end, region.prot);
+  }
+  flush();
+
+  for (size_t i : protected_regions)
+    restore_protection(pid, regions[i].start, regions[i].end, regions[i].prot);
+
+  if (resident.snapshot && detsim::resident::verify()) {
+    detsim::GuardMemoryReader guard(pid);
+    std::vector<uint8_t> actual, expected;
+    for (const auto& region : regions) {
+      actual.resize(region.end - region.start); expected.resize(actual.size());
+      if (region.prot == PROT_NONE) guard.read(region.start, actual.data(), actual.size());
+      else {
+        iovec local{actual.data(), actual.size()}, remote{reinterpret_cast<void*>(region.start), actual.size()};
+        checked_memory_io(false, pid, &local, &remote, 1);
+      }
+      snapshot->read_into(region.start, expected.data(), expected.size());
+      if (actual != expected) throw std::runtime_error("Resident restore disagrees with live full-memory oracle");
     }
   }
 
-  // Flush remaining regions
-  if (iov_count > 0)
-  {
-    ssize_t n = syscall(SYS_process_vm_writev, pid, local_iov, iov_count,
-                        remote_iov, iov_count, 0);
-    if (n < 0)
-    {
-      LOG_ERROR("Final batch process_vm_writev failed: %s", strerror(errno));
-      // Fallback: try individual writes
-      for (int j = 0; j < iov_count; j++)
-      {
-        tracee_write_mem(pid, remote_iov[j].iov_base, local_iov[j].iov_base,
-                         local_iov[j].iov_len);
-      }
-    }
-  }
-
-  /* Restore the preserved rseq structure */
-  tracee_write_mem(pid, rseq_struct[pid], rseq, rseq_len[pid]);
-  free(rseq);
-
-  // Read registers from data
-  if (header->regs_offset + sizeof(struct user_regs_struct) <= data.size())
-  {
-    struct user_regs_struct regs;
-    memcpy(&regs, data.data() + header->regs_offset, sizeof(regs));
-    ptrace(PTRACE_SETREGS, pid, NULL, &regs);
-    LOG_TRACE("Restored registers for hash %016lx", ts_hash);
-  }
-  else
-  {
-    LOG_ERROR("Invalid register offset in state data for hash %016lx", ts_hash);
-  }
+  auto regs = snapshot->main_regs();
+  if (ptrace(PTRACE_SETREGS, pid, NULL, &regs) == -1)
+    throw std::runtime_error("Cannot restore main thread registers");
 }
 
 /* Main entry: recover running state for a process */
-/* Helper: Terminate threads that shouldn't exist during recovery */
-void tracee_state::terminate_extra_threads(pid_t main_pid,
-                                           int threads_to_terminate) const
-{
-  auto current_threads = get_thread_list(main_pid);
-
-  for (pid_t current_tid : current_threads)
-  {
-    if (threads_to_terminate <= 0)
-      break;
-
-    // Don't terminate the main thread
-    if (current_tid == main_pid)
-    {
-      continue;
-    }
-
-    // Check if this physical TID is in the saved state as a live thread
-    bool should_exist = false;
-    for (const auto &ts : threads)
-    {
-      if (ts.physical_tid == current_tid)
-      {
-        should_exist = true;
-        break;
-      }
-    }
-
-    if (should_exist)
-    {
-      continue; // This thread should exist, skip
-    }
-
-    LOG_INFO("Terminating thread %d", current_tid);
-
-    // Use tracee_do_syscall to make the thread call exit
-    int status;
-    pid_t result = waitpid(current_tid, &status, WNOHANG);
-    if (result == 0)
-    {
-      // Thread is running, we need to stop it first
-      LOG_WARN("Thread %d is running, cannot terminate cleanly", current_tid);
-    }
-    else if (result == current_tid)
-    {
-      // Thread has stopped or exited
-      if (WIFSTOPPED(status))
-      {
-        // Thread is stopped, we can make it exit
-        tracee_do_syscall(current_tid, SYS_exit, 0, 0, 0, 0, 0, 0);
-        LOG_INFO("Terminated thread %d via exit syscall", current_tid);
-        threads_to_terminate--;
-      }
-    }
-  }
-}
-
-/* Helper: Create threads that don't exist during recovery */
-void tracee_state::create_missing_threads(pid_t main_pid) const
-{
-  auto current_threads = get_thread_list(main_pid);
-  std::set<pid_t> current_tids(current_threads.begin(), current_threads.end());
-
-  for (const auto &target_ts : threads)
-  {
-    // Skip exited threads (physical_tid == 0)
-    if (target_ts.physical_tid == 0)
-    {
-      LOG_INFO("Skipping exited thread with virtual TID %d", target_ts.tid);
-      continue;
-    }
-
-    // Skip main thread (virtual TID 1)
-    if (target_ts.tid == 1)
-      continue;
-
-    // Check if this saved thread already exists in current threads
-    if (current_tids.count(target_ts.physical_tid) > 0)
-    {
-      LOG_DEBUG("Thread with virtual TID %d already exists (physical=%d)",
-                target_ts.tid, target_ts.physical_tid);
-      continue;
-    }
-
-    LOG_INFO("Creating thread with virtual TID %d (clone_flags=0x%lx)",
-             target_ts.tid, target_ts.clone_flags);
-
-    // Only create if we have clone flags
-    if (target_ts.clone_flags != 0)
-    {
-      // Prepare clone parameters
-      uint64_t flags = target_ts.clone_flags | SIGCHLD | CLONE_PTRACE;
-
-      // Execute clone in the main thread
-      pid_t new_tid = (pid_t)tracee_do_syscall(
-          (int)main_pid, SYS_clone, flags, target_ts.stack_addr,
-          (uint64_t)target_ts.ptid, 0, 0, 0);
-
-      if (new_tid > 0)
-      {
-        LOG_INFO("Created new thread %d (requested virtual TID %d)", new_tid,
-                 target_ts.tid);
-
-        // Wait for the new thread to stop
-        int wstatus;
-        pid_t waited = waitpid(new_tid, &wstatus, 0);
-        if (waited == new_tid && WIFSTOPPED(wstatus))
-        {
-          // Restore registers for the new thread
-          struct user_regs_struct new_regs = target_ts.regs;
-          // RAX contains return value from clone (0 for child)
-          new_regs.rax = 0;
-          ptrace(PTRACE_SETREGS, new_tid, NULL, &new_regs);
-          LOG_INFO("Restored registers for new thread %d", new_tid);
-        }
-      }
-      else
-      {
-        LOG_ERROR("Failed to create thread: %ld", (long)new_tid);
-      }
-    }
-    else
-    {
-      LOG_WARN("No clone flags for thread %d, cannot recreate", target_ts.tid);
-    }
-  }
-}
-
 /* Helper: Restore registers for all threads during recovery */
-void tracee_state::restore_thread_registers(pid_t main_pid) const
+void tracee_state::restore_thread_registers(pid_t /*main_pid*/) const
 {
-  auto current_threads = get_thread_list(main_pid);
+  // The enclosing restore has verified the entire physical set remains stopped.
+  for (const auto& thread : threads) {
+    if (!thread.alive) continue;
+    if (ptrace(PTRACE_SETREGS, thread.physical_tid, nullptr, &thread.regs) == -1)
+      throw std::runtime_error("Cannot restore thread registers");
+    restore_xstate(thread.physical_tid, thread.xstate);
+  }
+}
 
-  for (const auto &target_ts : threads)
-  {
-    // Skip exited threads
-    if (target_ts.physical_tid == 0)
-    {
-      continue;
-    }
+namespace {
+struct ThreadBindingSlot {
+  pid_t tid;
+  pid_t physical_tid;
+  bool alive;
+};
+using ThreadBindingLayout = std::vector<ThreadBindingSlot>;
+struct ProcessBindingOwner {
+  int fd;
+  pid_t pid;
+  std::vector<std::weak_ptr<const ThreadBindingLayout>> layouts;
+  ~ProcessBindingOwner() { close(fd); }
+};
+struct SnapshotThreadBinding {
+  std::shared_ptr<ProcessBindingOwner> owner;
+  std::shared_ptr<const ThreadBindingLayout> threads;
+};
+std::map<std::pair<int, hash_type>, SnapshotThreadBinding> snapshot_thread_bindings;
+std::map<pid_t, std::weak_ptr<ProcessBindingOwner>> process_owners;
 
-    // Find the current physical thread that corresponds to this saved thread
-    pid_t physical_tid = -1;
+bool same_layout(const ThreadBindingLayout& layout, const tracee_state& state)
+{
+  if (layout.size() != state.threads.size()) return false;
+  for (size_t i = 0; i < layout.size(); ++i)
+    if (layout[i].tid != state.threads[i].tid ||
+        layout[i].alive != state.threads[i].alive) return false;
+  return true;
+}
 
-    // First try to match by stored physical_tid
-    for (pid_t current_tid : current_threads)
-    {
-      if (current_tid == target_ts.physical_tid)
-      {
-        physical_tid = current_tid;
-        break;
-      }
-    }
+bool same_runtime_bindings(const tracee_state& left, const tracee_state& right)
+{
+  if (left.threads.size() != right.threads.size()) return false;
+  for (size_t i = 0; i < left.threads.size(); ++i) {
+    const auto& a = left.threads[i];
+    const auto& b = right.threads[i];
+    if (a.tid != b.tid || a.alive != b.alive ||
+        (a.alive && a.physical_tid != b.physical_tid)) return false;
+  }
+  return true;
+}
 
-    // If exact match not found, use position-based fallback
-    // This handles the case where threads were recreated
-    if (physical_tid == -1)
-    {
-      int virtual_idx = target_ts.tid - 1; // Convert to 0-based index
-      if (virtual_idx >= 0 && virtual_idx < (int)current_threads.size())
-      {
-        physical_tid = current_threads[virtual_idx];
-      }
-    }
-
-    if (physical_tid > 0)
-    {
-      // Restore registers for this thread
-      if (ptrace(PTRACE_SETREGS, physical_tid, NULL, (void *)&target_ts.regs) ==
-          0)
-      {
-        LOG_TRACE("Restored registers for virtual thread %d (physical %d)",
-                  target_ts.tid, physical_tid);
-      }
-      else
-      {
-        LOG_ERROR("Failed to restore registers for virtual thread %d (physical "
-                  "%d): %s",
-                  target_ts.tid, physical_tid, strerror(errno));
-      }
-    }
-    else
-    {
-      LOG_WARN("Could not find physical thread for virtual thread %d",
-               target_ts.tid);
+std::vector<pid_t> bound_threads(const tracee_state& state)
+{
+  std::vector<pid_t> tids;
+  for (size_t slot = 0; slot < state.threads.size(); ++slot) {
+    const auto& thread = state.threads[slot];
+    if (thread.tid != static_cast<pid_t>(slot + 1))
+      throw std::runtime_error("Invalid logical thread slot");
+    if (thread.alive) {
+      if (thread.physical_tid <= 0)
+        throw std::runtime_error("Logical thread has no owned physical binding");
+      tids.push_back(thread.physical_tid);
     }
   }
+  return tids;
+}
+
+void remember_thread_bindings(pid_t pid, hash_type hash, const tracee_state& state)
+{
+  int node = -1;
+  for (int i = 0; i < NP; ++i) if (ptmc_state.pids[i] == pid) node = i;
+  // Low-level capture may produce inspectable fixtures; only registered nodes
+  // receive authority to restore into the running model.
+  if (node < 0) return;
+  auto owner = process_owners[pid].lock();
+  if (!owner) {
+    int fd = syscall(SYS_pidfd_open, pid, 0);
+    if (fd == -1) throw std::runtime_error("Cannot retain snapshot process incarnation");
+    owner = std::make_shared<ProcessBindingOwner>();
+    owner->fd = fd;
+    owner->pid = pid;
+    process_owners[pid] = owner;
+  }
+  /* poll() reports EINTR when a signal arrives, and SA_RESTART never restarts
+   * it. A signal - including the interactive SIGINT stop - says nothing about
+   * the process incarnation, so only readiness (POLLIN: exited) or a broken
+   * descriptor decides. */
+  pollfd descriptor{owner->fd, POLLIN, 0};
+  int ready;
+  do { ready = poll(&descriptor, 1, 0); } while (ready < 0 && errno == EINTR);
+  if (ready < 0)
+    throw std::runtime_error(std::string("Cannot probe the snapshot capture process: ") +
+                             std::strerror(errno));
+  if (ready != 0)
+    throw std::runtime_error("Snapshot capture owner has exited; reset process bindings first");
+  const auto key = std::make_pair(node, hash);
+  const auto existing = snapshot_thread_bindings.find(key);
+  if (existing != snapshot_thread_bindings.end()) {
+    if (existing->second.owner != owner)
+      throw std::runtime_error("Snapshot identity belongs to another process incarnation");
+    if (!same_layout(*existing->second.threads, state))
+      throw std::runtime_error("Snapshot identity has conflicting thread bindings");
+    return;
+  }
+  std::shared_ptr<const ThreadBindingLayout> layout;
+  for (auto it = owner->layouts.begin(); it != owner->layouts.end();) {
+    auto candidate = it->lock();
+    if (!candidate) { it = owner->layouts.erase(it); continue; }
+    if (same_layout(*candidate, state)) { layout = std::move(candidate); break; }
+    ++it;
+  }
+  if (!layout) {
+    auto created = std::make_shared<ThreadBindingLayout>();
+    created->reserve(state.threads.size());
+    for (const auto& thread : state.threads)
+      created->push_back({thread.tid, thread.physical_tid, thread.alive});
+    layout = std::move(created);
+    owner->layouts.push_back(layout);
+  }
+  snapshot_thread_bindings.emplace(key, SnapshotThreadBinding{owner, std::move(layout)});
+}
+}
+
+void clear_snapshot_thread_bindings()
+{
+  snapshot_thread_bindings.clear();
+  process_owners.clear();
+  clear_thread_pools();
+}
+
+void adopt_snapshot_bindings(int index, hash_type hash, const tracee_state& target)
+{
+  if (index < 0 || index >= NP || !hash)
+    throw std::runtime_error("Snapshot adoption requires a valid node and identity");
+  if (ptmc_state.pids[index] <= 0)
+    throw std::runtime_error("Snapshot adoption requires a live owned process");
+  const auto& current = ptmc_state.running_state.child[index];
+  if (current.threads.size() != target.threads.size() || current.threads.empty())
+    throw std::runtime_error("Snapshot adoption requires an identical thread layout");
+  for (size_t i = 0; i < current.threads.size(); ++i) {
+    if (current.threads[i].tid != target.threads[i].tid ||
+        current.threads[i].alive != target.threads[i].alive ||
+        current.threads[i].is_main != target.threads[i].is_main)
+      throw std::runtime_error("Snapshot adoption requires an identical logical thread layout");
+  }
+
+  const auto key = std::make_pair(index, hash);
+  if (const auto existing = snapshot_thread_bindings.find(key);
+      existing != snapshot_thread_bindings.end()) {
+    if (existing->second.owner->pid != ptmc_state.pids[index])
+      throw std::runtime_error("Snapshot identity belongs to another process incarnation");
+    return;
+  }
+
+  const pid_t pid = ptmc_state.pids[index];
+  auto owner = process_owners[pid].lock();
+  if (!owner) {
+    const int fd = syscall(SYS_pidfd_open, pid, 0);
+    if (fd == -1)
+      throw std::runtime_error("Cannot retain the adopting process incarnation");
+    owner = std::make_shared<ProcessBindingOwner>();
+    owner->fd = fd;
+    owner->pid = pid;
+    process_owners[pid] = owner;
+  }
+  pollfd descriptor{owner->fd, POLLIN, 0};
+  if (poll(&descriptor, 1, 0) != 0)
+    throw std::runtime_error("Snapshot adoption process incarnation is dead");
+
+  auto layout = std::make_shared<ThreadBindingLayout>();
+  layout->reserve(current.threads.size());
+  for (const auto& thread : current.threads)
+    layout->push_back({thread.tid, thread.physical_tid, thread.alive});
+  snapshot_thread_bindings.emplace(key, SnapshotThreadBinding{owner, std::move(layout)});
+}
+
+void adopt_snapshot_threads(int index, hash_type hash, const tracee_state& target)
+{
+  if (index < 0 || index >= NP || !hash)
+    throw std::runtime_error("Snapshot adoption requires a valid node and identity");
+  if (ptmc_state.pids[index] <= 0)
+    throw std::runtime_error("Snapshot adoption requires a live owned process");
+  if (target.threads.empty() || target.threads.size() > MAX_THREADS_PER_PROCESS ||
+      target.main_tid != 1 || !target.threads[0].is_main || target.threads[0].tid != 1)
+    throw std::runtime_error("Snapshot has an invalid main-thread layout");
+  // The physical leader remains an owned anchor even when its logical slot has
+  // exited. Non-main live slots each need a distinct non-anchor carrier.
+  size_t carriers = 1;
+  for (size_t i = 0; i < target.threads.size(); ++i) {
+    const auto& thread = target.threads[i];
+    if (thread.tid != static_cast<pid_t>(i + 1) || thread.is_main != (i == 0))
+      throw std::runtime_error("Snapshot has an invalid logical thread layout");
+    if (thread.alive && !thread.is_main) ++carriers;
+  }
+  verify_thread_pool(index);
+
+  const auto key = std::make_pair(index, hash);
+  if (const auto existing = snapshot_thread_bindings.find(key);
+      existing != snapshot_thread_bindings.end()) {
+    if (existing->second.owner->pid != ptmc_state.pids[index])
+      throw std::runtime_error("Snapshot identity belongs to another process incarnation");
+    return;
+  }
+
+  ensure_thread_carriers(index, carriers);
+  const pid_t pid = ptmc_state.pids[index];
+  auto owner = process_owners[pid].lock();
+  if (!owner) {
+    const int fd = syscall(SYS_pidfd_open, pid, 0);
+    if (fd == -1)
+      throw std::runtime_error("Cannot retain the adopting process incarnation");
+    owner = std::make_shared<ProcessBindingOwner>();
+    owner->fd = fd;
+    owner->pid = pid;
+    process_owners[pid] = owner;
+  }
+  pollfd descriptor{owner->fd, POLLIN, 0};
+  if (poll(&descriptor, 1, 0) != 0)
+    throw std::runtime_error("Snapshot adoption process incarnation is dead");
+
+  auto layout = std::make_shared<ThreadBindingLayout>();
+  layout->reserve(target.threads.size());
+  for (const auto& thread : target.threads)
+    layout->push_back({thread.tid, 0, thread.alive});
+  snapshot_thread_bindings.emplace(key, SnapshotThreadBinding{owner, std::move(layout)});
+}
+
+tracee_state tracee_state::resolve_thread_bindings(int index, hash_type hash) const
+{
+  tracee_state resolved = *this;
+  resolved.bind_threads_for_restore(index, hash);
+  return resolved;
+}
+
+void tracee_state::bind_threads_for_restore(int index, hash_type hash)
+{
+  const auto found = snapshot_thread_bindings.find({index, hash});
+  if (index < 0 || index >= NP || found == snapshot_thread_bindings.end())
+    throw std::runtime_error("Snapshot has no local thread binding provenance");
+  const auto& binding = found->second;
+  /* Same signal caveat as the capture probe: retry an interrupted poll before
+   * deciding that the recorded incarnation is gone. */
+  pollfd descriptor{binding.owner->fd, POLLIN, 0};
+  int ready;
+  do { ready = poll(&descriptor, 1, 0); } while (ready < 0 && errno == EINTR);
+  if (ready < 0)
+    throw std::runtime_error(std::string("Cannot probe the snapshot process incarnation: ") +
+                             std::strerror(errno));
+  if (binding.owner->pid != ptmc_state.pids[index] || ready != 0)
+    throw std::runtime_error("Snapshot belongs to a different or dead process incarnation");
+  const auto& layout = *binding.threads;
+  if (threads.size() != layout.size())
+    throw std::runtime_error("Unsupported snapshot restore across thread creation or exit");
+  for (size_t i = 0; i < threads.size(); ++i) {
+    if (threads[i].tid != layout[i].tid || threads[i].alive != layout[i].alive)
+      throw std::runtime_error("Snapshot logical thread lifecycle differs from its capture");
+
+  }
+  for (auto& record : thread_create_records) record.physical_tid = 0;
+  verify_thread_pool(index);
+  bind_thread_carriers(index, *this);
+  validate_io_state();
 }
 
 void tracee_state::recover_running_state(int index, hash_type ts_hash) const
 {
-  pid_t main_pid = ptmc_state.pids[index];
+  (void)discard_zero_guards();
+  const auto resolved = resolve_thread_bindings(index, ts_hash);
+  ptmc_state.tracee_image_dirty[index] = true;
+  restore_thread_signal_masks(index, resolved);
+  normalize_thread_pool_for_restore(index);
+  resolved.recover_stopped(index, ts_hash);
+  resolved.restore_runtime_state(index);
+}
+
+void tracee_state::recover_stopped(int index, hash_type ts_hash) const
+{
+  (void)discard_zero_guards();
+  const pid_t main_pid = ptmc_state.pids[index];
+  /* Restore the kernel heap extent before reconciling VMAs. The independent
+     heap proof is the only cached authority; an image does not imply it. A
+     present proof is audited even when it does not match the target, so a
+     stale claim can never be silently repaired by the setter. */
+  const auto proof = checked_known_brk(main_pid);
+  const bool brk_proven = proof && *proof == brk;
+  if (!brk_proven && tracee_do_syscall(main_pid, SYS_brk, brk, 0, 0, 0, 0, 0) != brk)
+    throw std::runtime_error("Cannot restore snapshot brk");
+  // Both callers already ran verify_thread_pool() on the affected owned
+  // carriers: one node from tracee_state::recover_running_state, every node
+  // from sys_state's all-node preflight. All tasks remain stopped here, so
+  // reuse that barrier instead of re-enumerating the process twice. Only the
+  // checked public APIs are reachable without it.
   std::vector<maps_item> maps;
-  restore_memory_mappings(ts_hash, main_pid, maps);
+  restore_memory_mappings_unchecked(ts_hash, main_pid, maps);
+  recover_mem_reg_snapshot_unchecked(maps, ts_hash, main_pid);
 
-  /* Restore brk (heap) - must be done before restoring memory content */
-  tracee_do_syscall(main_pid, SYS_brk, brk, 0, 0, 0, 0, 0);
-  LOG_DEBUG("restored brk = 0x%x", brk);
-
-  recover_mem_reg_snapshot(maps, ts_hash, main_pid);
-
-  /* ======================================================================
-   * Multi-threading support: restore thread state
-   * ====================================================================== */
-
-  // Count non-exited threads in saved state
-  size_t saved_live_thread_count = 0;
-  for (const auto &ts : threads)
-  {
-    if (ts.physical_tid != 0)
-    {
-      saved_live_thread_count++;
-    }
-  }
-
-  // Get current thread list
-  auto current_threads = get_thread_list(main_pid);
-
-  LOG_INFO("Recovering threads for process %d: current=%zu, saved_live=%zu, "
-           "saved_total=%zu",
-           index, current_threads.size(), saved_live_thread_count,
-           threads.size());
-
-  // Step 1: Terminate threads that shouldn't exist
-  if (current_threads.size() > saved_live_thread_count)
-  {
-    int threads_to_terminate = current_threads.size() - saved_live_thread_count;
-    LOG_INFO("Need to terminate %d threads", threads_to_terminate);
-    terminate_extra_threads(main_pid, threads_to_terminate);
-  }
-
-  // Step 2: Create threads that don't exist
-  create_missing_threads(main_pid);
-
-  // Step 3: Restore registers for all threads
   restore_thread_registers(main_pid);
+}
+
+void tracee_state::restore_runtime_state(int index) const
+{
+  validate_io_state();
+  auto& runtime = ptmc_state.running_state.child[index];
+  runtime.threads = threads;
+  runtime.thread_create_records = thread_create_records;
+  runtime.main_tid = main_tid;
+  runtime.current_thread_idx = current_thread_idx;
+  memmove(runtime.si, si, sizeof(si));
+  runtime.futex_state = futex_state;
+  restore_resources(index);
+}
+
+void tracee_state::restore_resources(int index) const
+{
+  for (int t = 0; t < MAX_THREADS_PER_PROCESS; ++t) {
+    ptmc_state.thread_blocked[index][t] =
+        t < static_cast<int>(threads.size()) && threads[t].alive &&
+        threads[t].pending_syscall && threads[t].pending_syscall->phase == PendingPhase::Waiting;
+    ptmc_state.thread_exited[index][t] =
+        t < static_cast<int>(threads.size()) && !threads[t].alive;
+  }
 
   // Restore current thread index
   ptmc_state.current_thread_idx[index] = current_thread_idx;
@@ -856,9 +1535,7 @@ void tracee_state::recover_running_state(int index, hash_type ts_hash) const
   /* Restore subsystems */
   ptmc_state.sock_states[index] = sock_state;
   ptmc_state.fs_states[index] = fs_state;
-
-  /* Restore user-defined plugin state (e.g. Raft shadow state) */
-  detsim::user_state::restore(index, user_state);
+  ptmc_state.process_states[index] = process_state;
 
   /* Restore FdManager state */
   *ptmc_state.fd_managers[index] = fd_manager_state;
@@ -877,7 +1554,7 @@ void tracee_state::recover_running_state(int index, hash_type ts_hash) const
 
 void state_queue_append(sys_state &s)
 {
-  StateStore::instance().queue_push_back(s.ss_hash);
+  StateStore::instance().queue_push_back(s.ss_hash, s.ts_hash);
 }
 
 std::optional<sys_state> state_queue_extract()
@@ -899,7 +1576,8 @@ void state_tree_add(const sys_state &s, sys_state &t, int which, int choose)
 {
   if (state_tree.count(t.ss_hash) == 0)
     state_tree[t.ss_hash] =
-        std::tuple<hash_type, int, int>(s.ss_hash, which, choose);
+        std::tuple<hash_type, int, int, int>(s.ss_hash, which, choose,
+                                           t.child[which].current_thread_idx);
 }
 
 /* ======================================================================
@@ -922,231 +1600,164 @@ void sys_state::clear()
  * Section 7: Memory Capture
  * ====================================================================== */
 
+
 /*
  * Capture memory, registers, and tracee_state, store via StateStore
  * Optimized with batched process_vm_readv
  */
-hash_type tracee_state::save_full_state_to_state_store(int pid)
+hash_type tracee_state::save_full_state_to_state_store(int pid, hash_type comparison_hash)
 {
-  std::string maps_path = fmt::format("/proc/{}/maps", pid);
+  prepare_capture(pid);
+  return capture_stopped(pid, comparison_hash);
+}
 
-  auto maps_fp = fileutils::open_cfile(maps_path, "r");
-  if (!maps_fp)
-  {
-    LOG_CRIT("Failed to open /proc/{}/maps", pid);
-    exit(1);
-  }
+hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
+{
+  validate_io_state();
+  const auto layout_cache_mode = capture_layout_cache_mode();
+  const CaptureLayoutContext layout_context{scratch_page, PAGE_SIZE};
+  std::vector<maps_item> parsed_maps;
+  const auto resident = detsim::resident::get(pid);
+  std::shared_ptr<const CaptureLayout> layout;
 
-  // ========================================================================
-  // First pass: collect all writable regions
-  // ========================================================================
-  struct RegionToCapture
-  {
-    uint64_t start;
-    uint64_t end;
-    size_t size;
-    char flags[5];
-    char name[64];
-    int prot;
-  };
-  std::vector<RegionToCapture> regions_to_capture;
+  if (resident.snapshot) {
+    // Keep the historical resident path in control flow: the saved canonical
+    // text is the authority and no live /proc read is performed. The cache is
+    // consulted only when enabled; a resident miss admits no live raw alias.
+    const std::string_view resident_maps = resident.snapshot->maps_text();
+    const bool cache_enabled = layout_cache_mode != CaptureLayoutCacheMode::off;
+    const bool key_fits =
+        resident_maps.size() <= CaptureLayoutCache::max_key_bytes;
+    if (cache_enabled && key_fits) {
+      layout = find_capture_layout(resident_maps, layout_context,
+                                   CaptureLayoutKeyKind::canonical);
+    } else if (cache_enabled) {
+      note_capture_layout_oversize();
+    }
 
-  char line[1024];
-  while (fgets(line, sizeof(line), maps_fp.get()))
-  {
-    uint64_t start, end;
-    char flags[5];
-    uint32_t offset;
-    int a, b, inode;
-    char name[64] = {};
-    sscanf(line, "%lx-%lx %4s %x %d:%d %d %63s", &start, &end, flags, &offset,
-           &a, &b, &inode, name);
-
-    /* Only save writable regions */
-    if (flags[1] != 'w')
-      continue;
-    if (start == scratch_page)
-      continue;
-
-    RegionToCapture region;
-    region.start = start;
-    region.end = end;
-    region.size = end - start;
-    memcpy(region.flags, flags, 5);
-    strncpy(region.name, name, 63);
-    region.prot = 0;
-    if (flags[0] == 'r')
-      region.prot |= PROT_READ;
-    if (flags[1] == 'w')
-      region.prot |= PROT_WRITE;
-    if (flags[2] == 'x')
-      region.prot |= PROT_EXEC;
-    regions_to_capture.push_back(region);
-  }
-
-  // ========================================================================
-  // Optimization 6: madvise - Hint kernel about sequential read
-  // ========================================================================
-  for (auto &region : regions_to_capture)
-  {
-    madvise((void *)region.start, region.size, MADV_SEQUENTIAL);
-  }
-
-  // ========================================================================
-  std::vector<RegionInfo> regions;
-  regions.reserve(regions_to_capture.size());
-
-  size_t regions_data_size = 0;
-  for (auto &src : regions_to_capture)
-  {
-    RegionInfo info;
-    info.start = src.start;
-    info.end = src.end;
-    info.prot = src.prot;
-    memcpy(info.flags, src.flags, 5);
-    info.offset = regions_data_size;
-    regions.push_back(info);
-    regions_data_size += src.size;
-
-    LOG_TRACE("dump %lx-%lx (prot=%x), %s", src.start, src.end, src.prot,
-              src.name);
-  }
-
-  // Read mappings data from /proc/PID/maps
-  // Note: procfs files don't support fseek/ftell, must read until EOF
-  std::vector<uint8_t> maps_data;
-  {
-    std::string maps_path = fmt::format("/proc/{}/maps", pid);
-    LOG_TRACE("Reading maps from %s", maps_path.c_str());
-    FILE *maps_fp = fopen(maps_path.c_str(), "r");
-    if (maps_fp)
-    {
-      char buffer[4096];
-      size_t total_read = 0;
-      while (!feof(maps_fp))
-      {
-        size_t n = fread(buffer, 1, sizeof(buffer), maps_fp);
-        if (n > 0)
-        {
-          maps_data.insert(maps_data.end(), buffer, buffer + n);
-          total_read += n;
-        }
-        if (ferror(maps_fp) && !feof(maps_fp))
-        {
-          LOG_ERROR("Error reading maps file");
-          break;
-        }
+    if (layout) {
+      if (layout_cache_mode == CaptureLayoutCacheMode::verify) {
+        parse_mapping_text(resident_maps, parsed_maps);
+        const auto rebuilt = build_capture_layout_counted(
+            parsed_maps, layout_context, layout_cache_mode);
+        verify_capture_layout(*layout, *rebuilt);
       }
-      fclose(maps_fp);
-      LOG_TRACE("Maps data read: %zu bytes, data size: %zu", total_read,
-                maps_data.size());
-    }
-    else
-    {
-      LOG_ERROR("Failed to open %s", maps_path.c_str());
-    }
-  }
-
-  // ========================================================================
-  // Multi-threading support: save all thread registers
-  // Use virtual TIDs (thread indices + 1) for consistency across save/restore
-  // ========================================================================
-  threads.clear();
-  auto thread_list = get_thread_list(pid);
-
-  int virtual_tid = 1;
-  for (pid_t physical_tid : thread_list)
-  {
-    struct user_regs_struct thread_regs;
-    if (ptrace(PTRACE_GETREGS, physical_tid, NULL, &thread_regs) == 0)
-    {
-      thread_state ts;
-      ts.tid = virtual_tid; // Use virtual TID (index + 1)
-      ts.regs = thread_regs;
-
-      // Store physical TID for stable mapping
-      ts.physical_tid = physical_tid;
-
-      // Find clone flags from creation records by virtual TID
-      ts.clone_flags = 0;
-      for (const auto &record : thread_create_records)
-      {
-        if ((int)record.virtual_tid == ts.tid)
-        {
-          ts.clone_flags = record.clone_flags;
-          ts.stack_addr = record.stack_addr;
-          ts.ptid = record.ptid;
-          break;
-        }
-      }
-
-      ts.is_main = (physical_tid == pid);
-      threads.push_back(ts);
-
-      LOG_TRACE("Saved thread physical=%d virtual=%d (main=%d) registers",
-                physical_tid, ts.tid, ts.is_main);
-    }
-    else
-    {
-      LOG_WARN("Failed to get registers for thread %d", physical_tid);
-    }
-    virtual_tid++;
-  }
-
-  if (!threads.empty())
-  {
-    main_tid = 1; // Main thread is always virtual TID 1
-    // Use the currently selected thread index from ptmc_state
-    int tracee_idx = -1;
-    for (int i = 0; i < NP; i++)
-    {
-      if (ptmc_state.pids[i] == pid)
-      {
-        tracee_idx = i;
-        break;
+    } else {
+      parse_mapping_text(resident_maps, parsed_maps);
+      layout = build_capture_layout_counted(parsed_maps, layout_context,
+                                            layout_cache_mode);
+      if (cache_enabled && key_fits) {
+        // Empty alias preserves any existing raw alias for this canonical key.
+        admit_capture_layout(layout->maps_text, std::string_view{}, layout,
+                             layout_context);
       }
     }
-    if (tracee_idx >= 0)
-    {
-      current_thread_idx = ptmc_state.current_thread_idx[tracee_idx];
-    }
-    else
-    {
-      current_thread_idx = 0;
+  } else if (layout_cache_mode == CaptureLayoutCacheMode::off) {
+    // Historical live reader, unchanged.
+    auto maps_fp = fileutils::open_cfile(fmt::format("/proc/{}/maps", pid), "r");
+    if (!maps_fp) throw std::runtime_error("Cannot open tracee memory mappings for capture");
+    get_maps_item(parsed_maps, maps_fp.get());
+    if (ferror(maps_fp.get()) || parsed_maps.empty())
+      throw std::runtime_error("Failed to read tracee memory mappings");
+    layout = build_capture_layout_counted(parsed_maps, layout_context,
+                                          layout_cache_mode);
+  } else {
+    auto maps_fp = fileutils::open_cfile(fmt::format("/proc/{}/maps", pid), "r");
+    if (!maps_fp) throw std::runtime_error("Cannot open tracee memory mappings for capture");
+
+    // Without resident authority, observe the live text to EOF before any
+    // lookup. A read error rejects even when a valid prefix was observed.
+    const std::string observed = read_capture_maps(maps_fp.get());
+    if (observed.size() > CaptureLayoutCache::max_key_bytes) {
+      // The bounded reader stopped one byte past the cap. Consume the stream
+      // with the checked seek/old reader, and admit no raw alias.
+      note_capture_layout_oversize();
+      parse_maps_file(maps_fp.get(), parsed_maps);
+      layout = build_capture_layout_counted(parsed_maps, layout_context,
+                                            layout_cache_mode);
+      admit_capture_layout(layout->maps_text, std::string_view{}, layout,
+                           layout_context);
+    } else {
+      // This branch never consults resident canonical authority. The raw key
+      // is the exact observed text, so a hit cannot hide malformed text.
+      layout = find_capture_layout(observed, layout_context,
+                                   CaptureLayoutKeyKind::raw);
+      if (layout) {
+        if (layout_cache_mode == CaptureLayoutCacheMode::verify) {
+          parse_observed_maps(observed, parsed_maps);
+          const auto rebuilt = build_capture_layout_counted(
+              parsed_maps, layout_context, layout_cache_mode);
+          verify_capture_layout(*layout, *rebuilt);
+        }
+      } else {
+        parse_observed_maps(observed, parsed_maps);
+        layout = build_capture_layout_counted(parsed_maps, layout_context,
+                                              layout_cache_mode);
+        admit_capture_layout(layout->maps_text, observed, layout, layout_context);
+      }
     }
   }
+
+  const auto& regions = layout->regions;
+  const auto& regions_to_capture = layout->regions_to_capture;
+  const auto& maps_text = layout->maps_text;
+  const size_t regions_data_size = layout->byte_count;
+
+  // prepare_capture preserved and verified the complete logical slot layout.
+  for (auto& thread : threads) {
+    if (!thread.alive) continue;
+    if (ptrace(PTRACE_GETREGS, thread.physical_tid, nullptr, &thread.regs) == -1)
+      throw std::runtime_error("Cannot capture thread registers");
+    thread.xstate = capture_xstate(thread.physical_tid);
+  }
+  if (current_thread_idx < 0 || current_thread_idx >= static_cast<int>(threads.size()))
+    throw std::runtime_error("Invalid selected thread in snapshot");
 
   LOG_INFO("Saved state for %zu threads in process %d", threads.size(), pid);
 
   // Get main thread registers (for backward compatibility)
-  struct user_regs_struct regs;
-  ptrace(PTRACE_GETREGS, pid, NULL, &regs);
+  const auto main = std::find_if(threads.begin(), threads.end(),
+      [](const thread_state& thread) { return thread.is_main; });
+  if (main == threads.end()) throw std::runtime_error("Snapshot has no logical main thread");
+  const auto regs = main->regs;
 
   // Serialize tracee_state AFTER threads have been populated
-  std::vector<uint8_t> tstate_data;
+  std::string tstate_data;
   {
     std::ostringstream oss;
     {
+      FileContentSnapshotScope file_content_scope;
       cereal::BinaryOutputArchive ar(oss);
       ar(*this);
     }
-    std::string str = oss.str();
-    tstate_data.assign(str.begin(), str.end());
+    tstate_data = std::move(oss).str();
+  }
+
+  if (page_capture_enabled())
+  {
+    const std::span<const uint8_t> metadata(
+        reinterpret_cast<const uint8_t*>(tstate_data.data()), tstate_data.size());
+    const auto hash = save_paged_snapshot(pid, regions, metadata, maps_text, regs,
+                              comparison_hash);
+    remember_thread_bindings(pid, hash, *this);
+    detsim::resident::publish(pid, hash, brk);
+    return hash;
   }
 
   // Allocate final buffer
   size_t header_size = sizeof(StateDataHeader);
   size_t regions_size = regions.size() * sizeof(RegionInfo);
   size_t tstate_size = tstate_data.size();
-  size_t maps_size = maps_data.size();
+  size_t maps_size = maps_text.size();
 
   size_t total_size = header_size + regions_size + tstate_size + maps_size +
                       regions_data_size + sizeof(regs);
-  uint8_t *all_data = new uint8_t[total_size];
+  std::vector<uint8_t> buffer(total_size);
+  uint8_t *all_data = buffer.data();
 
   StateDataHeader *header = (StateDataHeader *)all_data;
   header->magic = 0x4453544D;
-  header->version = 3;
+  header->version = FLAT_SNAPSHOT_VERSION;
   header->num_regions = regions.size();
   header->tstate_offset = header_size + regions_size;
   header->tstate_size = tstate_size;
@@ -1160,6 +1771,25 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
   size_t region_data_offset =
       header_size + regions_size + tstate_size + maps_size;
 
+  auto* soft_dirty = detsim::experiment::configured_capture();
+  if (soft_dirty) {
+    for (const auto& region : regions)
+      if (region.prot == PROT_NONE)
+        throw std::runtime_error("Soft-dirty capture does not support PROT_NONE mappings");
+    std::vector<detsim::experiment::Region> raw_regions;
+    raw_regions.reserve(regions.size());
+    for (size_t i = 0; i < regions.size(); ++i) {
+      region_infos[i] = regions[i];
+      region_infos[i].offset = region_data_offset + regions[i].offset;
+      raw_regions.push_back({uintptr_t(regions_to_capture[i].start),
+                             regions_to_capture[i].size,
+                             all_data + region_infos[i].offset});
+    }
+    // The helper keeps raw bytes and deliberately tracks restore writes.
+    soft_dirty->capture(pid, raw_regions, maps_text);
+  }
+
+  detsim::GuardMemoryReader guard_memory(pid);
   constexpr int MAX_IOV_BATCH = 256;
   for (size_t batch_start = 0; batch_start < regions.size();
        batch_start += MAX_IOV_BATCH)
@@ -1169,77 +1799,55 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
 
     struct iovec local_iov[MAX_IOV_BATCH];
     struct iovec remote_iov[MAX_IOV_BATCH];
+    size_t readable_count = 0;
 
     for (size_t i = 0; i < batch_count; i++)
     {
       size_t idx = batch_start + i;
       auto &src = regions_to_capture[idx];
-      region_infos[idx].start = src.start;
-      region_infos[idx].end = src.end;
+      // Include protection and flags too: every byte enters the state hash.
+      region_infos[idx] = regions[idx];
       region_infos[idx].offset = region_data_offset + regions[idx].offset;
 
       uint8_t *dest = all_data + region_infos[idx].offset;
-      local_iov[i].iov_base = dest;
-      local_iov[i].iov_len = src.size;
-      remote_iov[i].iov_base = (void *)src.start;
-      remote_iov[i].iov_len = src.size;
-    }
-
-    ssize_t n = syscall(SYS_process_vm_readv, pid, local_iov, batch_count,
-                        remote_iov, batch_count, 0);
-    if (n < 0)
-    {
-      LOG_ERROR("Batch process_vm_readv failed: %s", strerror(errno));
-      for (size_t i = 0; i < batch_count; i++)
-      {
-        size_t idx = batch_start + i;
-        auto &src = regions_to_capture[idx];
-        uint8_t *dest = all_data + region_infos[idx].offset;
-        struct iovec local = {dest, src.size};
-        struct iovec remote = {(void *)src.start, src.size};
-        ssize_t nr =
-            syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0);
-        if ((size_t)nr != src.size)
-        {
-          LOG_ERROR("Fallback read failed for %p-%p", (void *)src.start,
-                    (void *)(src.start + src.size));
-          memset(dest, 0, src.size);
-        }
+      if (regions[idx].prot == PROT_NONE) {
+        if (!soft_dirty) guard_memory.read(src.start, dest, src.size);
+      } else {
+        local_iov[readable_count] = {dest, src.size};
+        remote_iov[readable_count] = {reinterpret_cast<void*>(src.start), src.size};
+        ++readable_count;
       }
     }
 
-    for (size_t i = 0; i < batch_count; i++)
-    {
-      size_t idx = batch_start + i;
-      auto &src = regions_to_capture[idx];
-      if ((uintptr_t)rseq_struct[pid] >= src.start &&
-          (uintptr_t)rseq_struct[pid] < src.end)
-      {
-        uintptr_t rseq_offset = (uintptr_t)rseq_struct[pid] - src.start;
-        uint8_t *dest = all_data + region_infos[idx].offset;
-        memset(dest + rseq_offset, 0x55, rseq_len[pid]);
-      }
-    }
+    if (!soft_dirty)
+      checked_memory_io(false, pid, local_iov, remote_iov, readable_count);
   }
 
   memcpy(all_data + header->tstate_offset, tstate_data.data(), tstate_size);
 
   if (maps_size > 0)
   {
-    memcpy(all_data + header->maps_offset, maps_data.data(), maps_size);
+    memcpy(all_data + header->maps_offset, maps_text.data(), maps_size);
     LOG_TRACE("Copied maps data: offset=%lu, size=%zu", header->maps_offset,
               maps_size);
   }
 
   memcpy(all_data + header->regs_offset, &regs, sizeof(regs));
 
-  hash_type ts_hash = StateStore::instance().save(all_data, total_size);
+  // The store may avoid hashing only after equality of all captured bytes.
+  // It preserves write validation and never loads a cold comparison candidate.
+  hash_type ts_hash = StateStore::instance().save(all_data, total_size, comparison_hash);
+  const char *mode = getenv("DETSIM_CAPTURE_MODE");
+  if (comparison_hash && mode && !strcmp(mode, "verify") &&
+      StateStore::instance().save(all_data, total_size) != ts_hash)
+    throw std::runtime_error("Capture deduplication disagrees with full save");
 
-  delete[] all_data;
 
   LOG_DEBUG("StateStore saved hash %016lx, size=%zu, regions=%zu, tstate=%zu, "
             "maps=%zu",
             ts_hash, total_size, regions.size(), tstate_size, maps_size);
+  remember_thread_bindings(pid, ts_hash, *this);
+  detsim::resident::publish(pid, ts_hash, brk);
   return ts_hash;
 }
 
@@ -1249,18 +1857,22 @@ hash_type tracee_state::save_full_state_to_state_store(int pid)
 
 /* Create tracee_state from running process (capture) */
 tracee_state::tracee_state(int which, const struct syscall_info info[])
-    : threads(), thread_create_records(), main_tid(0), current_thread_idx(0),
-      futex_state(nullptr)
+  : threads(), thread_create_records(), main_tid(0), current_thread_idx(0), futex_state()
 {
+  const auto& runtime = ptmc_state.running_state.child[which];
+  threads = runtime.threads;
+  thread_create_records = runtime.thread_create_records;
+  main_tid = runtime.main_tid;
+  current_thread_idx = ptmc_state.current_thread_idx[which];
+  futex_state = runtime.futex_state;
+
   /* Save syscall info */
   memcpy(si, info, sizeof(syscall_info) * MAX_THREADS_PER_PROCESS);
 
   /* Save subsystems */
   sock_state = ptmc_state.sock_states[which];
   fs_state = ptmc_state.fs_states[which];
-
-  /* Capture user-defined plugin state (e.g. Raft shadow state) */
-  detsim::user_state::capture(which, user_state);
+  process_state = ptmc_state.process_states[which];
 
   /* Save FdManager state */
   if (ptmc_state.fd_managers[which])
@@ -1276,14 +1888,43 @@ tracee_state::tracee_state(int which, const struct syscall_info info[])
 }
 
 /* Full save: capture memory, mappings, and serialize */
-hash_type tracee_state::save(int pid)
+void tracee_state::prepare_capture(pid_t pid)
 {
-  /* Record brk */
-  brk = tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
+  if (threads.empty()) {
+    for (pid_t tid : get_thread_list(pid)) {
+      add_thread(tid, 0, 0, 0, tid == pid);
+      threads.back().signal_mask = read_thread_signal_mask(tid);
+      threads.back().comm = capture_native_thread_comm(tid);
+    }
+  }
+  if (threads.size() > MAX_THREADS_PER_PROCESS)
+    throw std::runtime_error("Snapshot exceeds supported thread count");
+  int node = -1;
+  for (int i = 0; i < NP; ++i) if (ptmc_state.pids[i] == pid) node = i;
+  if (node >= 0) prepare_thread_pool(node, *this);
+  else {
+    const auto expected = bound_threads(*this);
+    verify_stopped_thread_set(pid, expected);
+    for (pid_t tid : expected) require_thread_capture_boundary(tid);
+  }
+}
+
+hash_type tracee_state::save(int pid, hash_type comparison_hash)
+{
+  prepare_capture(pid);
+  return save_stopped(pid, comparison_hash);
+}
+
+hash_type tracee_state::save_stopped(pid_t pid, hash_type comparison_hash)
+{
+  /* Record brk. The independent heap proof is the only cached authority;
+     verify mode audits every used claim against the real kernel endpoint. */
+  const auto proof = checked_known_brk(pid);
+  brk = proof ? *proof : tracee_do_syscall(pid, SYS_brk, 0, 0, 0, 0, 0, 0);
   LOG_DEBUG("recorded brk = 0x%x", brk);
 
   /* Capture memory state (includes tstate) */
-  return save_full_state_to_state_store(pid);
+  return capture_stopped(pid, comparison_hash);
 }
 
 /* Equality comparison for incremental save optimization
@@ -1311,18 +1952,24 @@ bool tracee_state::metadata_equal(const tracee_state &other) const
  * Section 8.5: Thread Management Methods
  * ====================================================================== */
 
-void tracee_state::add_thread(pid_t physical_tid, uint64_t clone_flags,
-                              uint64_t stack, pid_t ptid, bool is_main)
+void tracee_state::add_thread(pid_t physical_tid, uint64_t clone_flags, uint64_t stack, pid_t ptid, bool is_main)
 {
   // Assign virtual TID (thread index + 1) for consistency across save/restore
   int virtual_tid = threads.size() + 1;
 
   thread_state ts;
-  ts.tid = virtual_tid;           // Use virtual TID
-  ts.physical_tid = physical_tid; // Store physical TID
+  ts.tid = virtual_tid;  // Use virtual TID
+  ts.physical_tid = physical_tid;  // Transient runtime binding
+  ts.alive = true;
   ts.clone_flags = clone_flags;
   ts.stack_addr = stack;
-  ts.ptid = ptid;
+  const auto parent = std::find_if(threads.begin(), threads.end(),
+      [ptid](const thread_state& thread) { return thread.physical_tid == ptid; });
+  if (ptid && parent == threads.end())
+    throw std::runtime_error("Thread creation parent has no owned logical binding");
+  const pid_t logical_parent = !ptid || parent == threads.end() ? 0 : parent->tid;
+  if(ptid && parent!=threads.end()) ts.comm=parent->comm;
+  ts.ptid = logical_parent;
   ts.is_main = is_main;
 
   // Record creation info with both virtual and physical TID
@@ -1331,13 +1978,12 @@ void tracee_state::add_thread(pid_t physical_tid, uint64_t clone_flags,
   record.physical_tid = physical_tid;
   record.clone_flags = clone_flags;
   record.stack_addr = stack;
-  record.ptid = ptid;
+  record.ptid = logical_parent;
   thread_create_records.push_back(record);
 
   threads.push_back(ts);
 
-  if (is_main)
-  {
+  if (is_main) {
     main_tid = virtual_tid;
   }
 
@@ -1347,38 +1993,33 @@ void tracee_state::add_thread(pid_t physical_tid, uint64_t clone_flags,
 
 void tracee_state::remove_thread(pid_t tid)
 {
-  // Find and mark thread as exited by setting physical_tid to 0
+  // Retain the logical slot and record its lifecycle independently of binding.
   // We keep the entry in the vector to maintain stable virtual TID mapping
-  for (auto &ts : threads)
-  {
-    if (ts.tid == tid)
-    {
-      LOG_INFO("Marked thread %d (physical=%d) as exited", tid,
-               ts.physical_tid);
-      ts.physical_tid = 0; // Mark as exited
+  for (auto& ts : threads) {
+    if (ts.tid == tid) {
+      LOG_INFO("Marked thread %d (physical=%d) as exited", tid, ts.physical_tid);
+      ts.alive = false;
+      ts.pending_syscall.reset();
+      ts.physical_tid = 0;
       return;
     }
   }
 }
 
-thread_state *tracee_state::find_thread(pid_t tid)
+thread_state* tracee_state::find_thread(pid_t tid)
 {
-  for (auto &ts : threads)
-  {
-    if (ts.tid == tid && ts.physical_tid != 0)
-    {
+  for (auto& ts : threads) {
+    if (ts.tid == tid && ts.alive) {
       return &ts;
     }
   }
   return nullptr;
 }
 
-const thread_state *tracee_state::find_thread(pid_t tid) const
+const thread_state* tracee_state::find_thread(pid_t tid) const
 {
-  for (const auto &ts : threads)
-  {
-    if (ts.tid == tid && ts.physical_tid != 0)
-    {
+  for (const auto& ts : threads) {
+    if (ts.tid == tid && ts.alive) {
       return &ts;
     }
   }
@@ -1387,10 +2028,8 @@ const thread_state *tracee_state::find_thread(pid_t tid) const
 
 int tracee_state::find_thread_index(pid_t tid) const
 {
-  for (size_t i = 0; i < threads.size(); i++)
-  {
-    if (threads[i].tid == tid && threads[i].physical_tid != 0)
-    {
+  for (size_t i = 0; i < threads.size(); i++) {
+    if (threads[i].tid == tid && threads[i].alive) {
       return i;
     }
   }
@@ -1402,70 +2041,16 @@ int tracee_state::find_thread_index(pid_t tid) const
  * ====================================================================== */
 
 /* Read memory from snapshot by hash using StateStore */
-void *read_mem(int pid, hash_type ts_hash, uint64_t addr, long size)
+void *read_mem(int /*pid*/, hash_type ts_hash, uint64_t addr, long size)
 {
-  bytes *ret = (bytes *)malloc(size + 1);
-  ret[size] = 0;
-
-  // Load state data from StateStore
-  auto data_shared_ptr = StateStore::instance().load_shared(ts_hash);
-
-  if (!data_shared_ptr)
-  {
-    LOG_CRIT("Cannot load state for hash %016lx in read_mem", ts_hash);
-    // Fallback: try reading from live process
-    tracee_read_mem(pid, (void *)addr, ret, size);
-    return ret;
-  }
-
-  const std::vector<uint8_t> &data = *data_shared_ptr;
-
-  // Parse header
-  if (data.size() < sizeof(StateDataHeader))
-  {
-    LOG_CRIT("Invalid state data for hash %016lx", ts_hash);
-    tracee_read_mem(pid, (void *)addr, ret, size);
-    return ret;
-  }
-
-  StateDataHeader *header = (StateDataHeader *)data.data();
-  if (header->magic != 0x4453544D)
-  {
-    LOG_CRIT("Invalid state data format for hash %016lx", ts_hash);
-    tracee_read_mem(pid, (void *)addr, ret, size);
-    return ret;
-  }
-
-  RegionInfo *regions = (RegionInfo *)(data.data() + sizeof(StateDataHeader));
-
-  // Find region containing addr
-  for (uint32_t i = 0; i < header->num_regions; i++)
-  {
-    if (regions[i].start <= addr && addr < regions[i].end)
-    {
-      uint64_t offset_in_region = addr - regions[i].start;
-      uint64_t data_offset = regions[i].offset + offset_in_region;
-      size_t bytes_available = regions[i].end - addr;
-      size_t bytes_to_copy = std::min((size_t)size, bytes_available);
-
-      if (data_offset + bytes_to_copy <= data.size())
-      {
-        memcpy(ret, data.data() + data_offset, bytes_to_copy);
-        LOG_TRACE("read addr %p from state data (region %u)", (void *)addr, i);
-      }
-      else
-      {
-        LOG_ERROR("Data offset out of bounds for addr %p", (void *)addr);
-      }
-      return ret;
-    }
-  }
-
-  // Region not found in saved state, try live process
-  LOG_TRACE("addr %p not in saved state, reading from live process",
-            (void *)addr);
-  tracee_read_mem(pid, (void *)addr, ret, size);
-  return ret;
+  if (size < 0 || uint64_t(size) > UINT64_MAX - addr)
+    throw std::runtime_error("Invalid snapshot memory read range");
+  auto result = std::unique_ptr<bytes, decltype(&free)>(
+      static_cast<bytes*>(malloc(size_t(size) + 1)), &free);
+  if (!result) throw std::bad_alloc();
+  SnapshotView::open(ts_hash)->read_into(addr, result.get(), size_t(size));
+  result.get()[size] = 0;
+  return result.release();
 }
 
 /* ======================================================================
@@ -1474,17 +2059,16 @@ void *read_mem(int pid, hash_type ts_hash, uint64_t addr, long size)
 
 void get_maps_item(std::vector<maps_item> &items, FILE *maps)
 {
-  maps_item item;
   char line[1024];
   while (fgets(line, sizeof(line), maps) != NULL)
   {
-    /* Use width-limited format specifiers to prevent buffer overflow */
-    if (sscanf(line, "%lx-%lx %4s %x %d:%d %d %511s", &item.start, &item.end,
-               item.flags, &item.offset, &item.a, &item.b, &item.inode,
-               item.name) >= 7)
+    maps_item item{};
+    if (parse_mapping_line(line, item))
     {
       items.emplace_back(item);
     }
+    else
+      throw std::runtime_error("Invalid memory mapping text");
   }
 }
 
@@ -1522,43 +2106,43 @@ void show_state_stats()
  * Section 11: sys_state Recovery
  * ====================================================================== */
 
-void sys_state::recover_running_state() const
+void sys_state::recover_running_state() const try
 {
-  ptmc_state.error_bound = error_bound;
-  for (int i = 0; i < NP; i++)
-  {
-    if (ts_hash[i] == ptmc_state.running_state.ts_hash[i])
-    {
-      LOG_DEBUG("tracee %d already in running state, skipping recovery", i);
-      continue;
-    }
-
-    // Update ptmc_state.status from saved state
-    // This ensures loaded states have correct process status
-    ptmc_state.status[i] = status[i];
-
-    // Also reset thread_exited array based on saved thread state
-    // This is important for multi-threading: when loading a state,
-    // we need to restore which threads were marked as exited
-    const auto &saved_threads = child[i].threads;
-    for (int t = 0; t < 64; t++)
-    {
-      if (t < (int)saved_threads.size())
-      {
-        ptmc_state.thread_exited[i][t] = (saved_threads[t].physical_tid == 0);
-      }
-      else
-      {
-        ptmc_state.thread_exited[i][t] = false;
-      }
-    }
-
-    if (DISALIVE(status[i]))
-    {
-      child[i].recover_running_state(i, ts_hash[i]);
-    }
+  (void)discard_zero_guards();
+  if (!ptmc_state.model_identity.empty() && model_identity != ptmc_state.model_identity)
+    throw std::runtime_error("Snapshot execution model differs from the configured model");
+  // Resolve and verify every node before changing any live or modeled state.
+  sys_state resolved = *this;
+  for (int i = 0; i < NP; ++i)
+    resolved.child[i].bind_threads_for_restore(i, ts_hash[i]);
+  bool restore_image[NP];
+  for (int i = 0; i < NP; ++i) {
+    const auto known = detsim::resident::get(ptmc_state.pids[i]);
+    restore_image[i] = ptmc_state.tracee_image_dirty[i] || ts_hash[i] != ptmc_state.running_state.ts_hash[i] ||
+        (detsim::resident::enabled() && (!known.snapshot || known.root != ts_hash[i] || known.brk != child[i].brk));
+    // A failed restore must not leave its partial writes labelled as the old
+    // running snapshot. Retain dirty flags until the whole operation commits.
+    ptmc_state.tracee_image_dirty[i] = true;
   }
+  for (int i = 0; i < NP; ++i) {
+    restore_thread_signal_masks(i, resolved.child[i]);
+    if (restore_image[i]) normalize_thread_pool_for_restore(i);
+  }
+  /* The model budget is a per-run statistic, not restored state. */
+  for (int i = 0; i < NP; ++i) {
+    ptmc_state.status[i] = status[i];
+    if (restore_image[i])
+      resolved.child[i].recover_stopped(i, ts_hash[i]);
+    else if (!same_runtime_bindings(resolved.child[i], ptmc_state.running_state.child[i]))
+      resolved.child[i].restore_thread_registers(ptmc_state.pids[i]);
+    resolved.child[i].restore_resources(i);
+  }
+  ptmc_state.running_state = std::move(resolved);
+  for (int i = 0; i < NP; ++i)
+    detsim::resident::publish(ptmc_state.pids[i], ts_hash[i], child[i].brk);
+  for (int i = 0; i < NP; ++i) ptmc_state.tracee_image_dirty[i] = false;
 }
+catch (...) { detsim::resident::invalidate_all(); throw; }
 
 /* ======================================================================
  * Section 13: Global Cleanup
@@ -1566,6 +2150,9 @@ void sys_state::recover_running_state() const
 
 void cleanup_all()
 {
+  detsim::resident::invalidate_all();
+  clear_snapshot_thread_bindings();
+  for (int i = 0; i < NP; ++i) ptmc_state.tracee_image_dirty[i] = false;
   detsim::ui::ui_printf("[DEBUG] Starting global cleanup...\n");
 
   /* 0. Cleanup DWARF resources */
@@ -1586,6 +2173,7 @@ void cleanup_all()
   {
     ptmc_state.sock_states[i] = SockState();
     ptmc_state.fs_states[i] = FileSystemState();
+    ptmc_state.process_states[i] = ProcessKernelState();
     ptmc_state.fd_managers[i].reset();
   }
 
@@ -1593,16 +2181,6 @@ void cleanup_all()
   detsim::ui::ui_printf("[DEBUG] Clearing global containers...\n");
   state_tree.clear();
   state_set.clear();
-
-  /* 5. Free rseq structures */
-  /*
-  detsim::ui::ui_printf("[DEBUG] Freeing rseq structures...\n");
-  for (auto& pair : rseq_struct) {
-    free(pair.second);
-  }
-  rseq_struct.clear();
-  rseq_len.clear();
-  */
 
   /* 6. Cleanup readline resources */
   detsim::ui::ui_printf("[DEBUG] Cleaning up readline...\n");

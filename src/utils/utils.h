@@ -1,13 +1,14 @@
 #ifndef __UTILS_H
 #define __UTILS_H
 
-#include <cstddef>
 #include <cstdint>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <optional>
 #include <string>
 #include <vector>
+#include <dirent.h>
 
 #include <xxhash.h>
 
@@ -31,6 +32,8 @@ int is_go_program(const char *filename);
 
 /* Multi-threading support functions */
 std::vector<pid_t> get_thread_list(pid_t pid);
+// Rewind and freshly enumerate a caller-owned task directory; never close it.
+std::vector<pid_t> get_thread_list(pid_t pid, DIR* directory);
 int get_thread_count(pid_t pid);
 
 namespace fileutils

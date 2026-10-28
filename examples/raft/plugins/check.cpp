@@ -14,7 +14,6 @@
 
 #include "common.h"
 #include "debug.h"
-#include "user_state.h"
 #include "utils/expr_eval.hpp"
 #include <algorithm>
 #include <cstring>
@@ -26,7 +25,7 @@
 /* Shadow state remembered by the checker between transitions.
  *
  * DetSim serializes this together with each tracee's state through the
- * UserState plugin hooks below (see core/user_state.h), so it survives
+ * UserState plugin hooks below (exported symbols only), so it survives
  * checkpoint/restore and is available again from check() after a state is
  * reloaded. */
 struct raft_shadow_state

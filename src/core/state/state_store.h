@@ -1,108 +1,23 @@
-/*
- * state_store.h - Transparent state storage with tiered cache and prefetch
- *
- * Design:
- * - L1 Hot Cache (raw): Fast access, limited by hot_cache_size
- * - L2 Warm Cache (compressed): Higher capacity, warm_cache_size
- * - Disk: Persistent storage
- * - Prefetch: Background loading of upcoming states from queue
- */
-
+// Immutable snapshot buffers, bounded LRU caches, and asynchronous persistence.
 #ifndef __STATE_STORE_H
 #define __STATE_STORE_H
-
 #include "types.h"
-
+#include <array>
 #include <atomic>
-#include <chrono>
 #include <condition_variable>
-#include <cstddef>
-#include <cstdint>
 #include <deque>
-#include <functional>
+#include <exception>
 #include <list>
 #include <memory>
 #include <mutex>
-#include <queue>
 #include <shared_mutex>
+#include <string>
 #include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
-// Platform-specific includes for memory trimming
-#ifdef __linux__
-#include <malloc.h>
-#endif
-
-// Forward declare ZSTD types
-struct ZSTD_CCtx_s;
-struct ZSTD_DCtx_s;
-typedef struct ZSTD_CCtx_s ZSTD_CCtx;
-typedef struct ZSTD_DCtx_s ZSTD_DCtx;
-
-// hash_type is now defined in types.h as uint64_t
-
-/* ==============================================================================
- * Cache Entry (unified for L1/L2)
- * ==============================================================================
- */
-
-struct StateEntry
-{
-  hash_type hash{0};
-
-  std::vector<uint8_t> raw_data;
-  std::shared_ptr<std::vector<uint8_t>> raw_data_ptr;
-
-  void init_shared_ptr()
-  {
-    raw_data_ptr = std::shared_ptr<std::vector<uint8_t>>(
-        std::shared_ptr<std::vector<uint8_t>>(), &raw_data);
-  }
-
-  std::vector<uint8_t> compressed_data;
-
-  enum class State
-  {
-    RAW,        // Has uncompressed data (in L1)
-    COMPRESSED, // Has compressed data only (in L2)
-    PERSISTING, // Being written to disk
-    PERSISTED,  // On disk only
-    LOADING     // Being loaded from disk
-  };
-  std::atomic<State> state{State::RAW};
-
-  // For LRU tracking
-  std::atomic<uint64_t> last_access{0};
-
-  // For async notification
-  std::condition_variable cv;
-  std::mutex mutex;
-
-  StateEntry() = default;
-  explicit StateEntry(hash_type h) : hash(h), state(State::RAW), last_access(0)
-  {
-  }
-};
-
-using StateEntryPtr = std::shared_ptr<StateEntry>;
-
-/* ==============================================================================
- * Prefetch Task
- * ==============================================================================
- */
-
-struct PrefetchTask
-{
-  hash_type hash;
-  std::chrono::steady_clock::time_point submit_time;
-};
-
-/* ==============================================================================
- * State Store
- * ==============================================================================
- */
+namespace detsim::snapshot { class SharedObjectPool; }
 
 class StateStore
 {
@@ -124,29 +39,42 @@ class StateStore
     size_t prefetch_threads = 1;        // Prefetch worker threads
     size_t max_inflight_prefetch = 200; // Max concurrent prefetch tasks
 
-    // Memory management
-    bool enable_malloc_trim =
-        false; // Call malloc_trim on L2 eviction (Linux only)
-    size_t malloc_trim_threshold =
-        64ULL * 1024 * 1024; // Trigger trim every 64MB evicted
+    // Bound accepted, unfinished write data; one oversized snapshot is allowed.
+    size_t max_pending_bytes = 64ULL * 1024 * 1024;
 
-    // Malloc tuning (Linux glibc only)
-    int malloc_arena_max = 4; // Limit malloc arenas (default: 8*cores)
+    // Deprecated allocation knobs, ignored; retained for source compatibility.
+    bool enable_malloc_trim =
+        false;
+    size_t malloc_trim_threshold =
+        64ULL * 1024 * 1024;
+
+    int malloc_arena_max = 4;
     size_t malloc_mmap_threshold =
-        1024ULL * 1024 * 1024; // Only mmap for >1GB allocations
+        1024ULL * 1024 * 1024;
 
     // Storage path for packed storage
     std::string packed_storage_path = "memory";
+    bool read_only = false;
   };
 
   StateStore();
+  StateStore(const StateStore &) = delete;
+  StateStore &operator=(const StateStore &) = delete;
   ~StateStore();
 
   void init(const Config &config);
   void init();
 
-  // Save data: returns hash immediately, background write to disk
+  // Switch only after draining local writes. Fallback reads remain enabled when
+  // publish_writes=false; ordinary packed writes keep their existing backend.
+  void attach_shared_pool(const std::string& path, bool publish_writes);
+  std::shared_ptr<detsim::snapshot::SharedObjectPool> shared_pool() const;
+  std::string storage_path() const;
+
+  // Save accepts immutable bytes with bounded backpressure; wait confirms durability.
   hash_type save(const void *data, size_t len);
+  // Optional byte-equality hint; only resident immutable buffers are consulted.
+  hash_type save(const void *data, size_t len, hash_type reference_hash);
 
   // Load data: check L1 -> L2 -> disk
   ssize_t load(hash_type hash, std::vector<uint8_t> &out_data);
@@ -158,7 +86,7 @@ class StateStore
   // Check existence
   bool exists(hash_type hash);
 
-  // Wait for all pending IO operations to complete
+  // Wait for accepted writes, then sync data and index. Throws on failure.
   void wait_for_completion();
 
   // Queue management for transparent prefetch
@@ -169,13 +97,23 @@ class StateStore
   void shutdown();
 
   static StateStore &instance();
+  // Identifies the store lifetime; external parsed views must not cross reopen.
+  uint64_t generation() const { return generation_.load(); }
+  // Validates readiness before admitting a parsed snapshot cache hit.
+  uint64_t snapshot_generation();
 
   // ==================================================================
   // Queue Management (with transparent prefetch)
   // ==================================================================
 
-  // Queue operations - prefetch happens automatically on pop
+  // Queue operations - prefetch happens automatically on pop.
+  // The component-hash overload lets enqueue carry the already-known ts_hash
+  // values so prefetch does not have to reload and deserialize sys_state
+  // metadata for every candidate on every pop. The hash-only overload is for
+  // callers that do not have them (tests/external users) and keeps the old
+  // metadata-lookup fallback.
   void queue_push_back(hash_type hash);
+  void queue_push_back(hash_type hash, const hash_type (&ts_hash)[NP]);
   void queue_pop_front();
   hash_type queue_try_pop_front();
   size_t queue_size() const;
@@ -200,6 +138,7 @@ class StateStore
     uint64_t prefetch_hits = 0;   // Prefetch hits (loaded before needed)
 
     // Save path statistics
+    uint64_t save_reference_hits = 0; // Equal resident hint avoided content hashing
     uint64_t save_calls = 0;      // Total save() calls
     uint64_t save_dedup_hot = 0;  // Deduplicated at hot cache
     uint64_t save_dedup_warm = 0; // Deduplicated at warm cache
@@ -207,7 +146,7 @@ class StateStore
     uint64_t save_new = 0;        // New states (actually saved)
 
     // Eviction statistics
-    uint64_t evict_calls = 0;   // Total evict_l1_async calls
+    uint64_t evict_calls = 0;   // Total cache entries evicted
     uint64_t evict_bytes = 0;   // Total bytes evicted
     uint64_t evict_time_us = 0; // Total time spent in eviction (microseconds)
 
@@ -238,8 +177,8 @@ class StateStore
   // Cache usage info
   size_t get_l1_usage() const { return hot_memory_usage_.load(); }
   size_t get_l2_usage() const { return warm_memory_usage_.load(); }
-  size_t get_l1_capacity() const { return config_.hot_cache_size; }
-  size_t get_l2_capacity() const { return config_.warm_cache_size; }
+  size_t get_l1_capacity() const;
+  size_t get_l2_capacity() const;
   size_t get_l1_entry_count() const;
   size_t get_l2_entry_count() const;
 
@@ -249,135 +188,61 @@ class StateStore
   size_t get_io_queue_capacity() const { return max_io_queue_size_; }
 
   private:
+  using Buffer = std::shared_ptr<const std::vector<uint8_t>>;
+  struct CacheEntry {
+    Buffer bytes;
+    size_t original_size;
+    std::list<hash_type>::iterator position;
+  };
+  using Cache = std::unordered_map<hash_type, CacheEntry>;
   Config config_;
-  std::atomic<bool> initialized_{false};
-  std::atomic<bool> shutdown_{false};
-
-  // ==================================================================
-  // Memory Caches (physically separated)
-  // ==================================================================
-
-  // L1 Hot Cache: hash -> entry with raw_data
-  mutable std::recursive_mutex hot_mutex_;
-  std::unordered_map<hash_type, StateEntryPtr> hot_cache_;
-  std::list<hash_type> hot_lru_;
-  std::unordered_map<hash_type, std::list<hash_type>::iterator> hot_lru_index_;
-  std::atomic<size_t> hot_memory_usage_{0};
-
-  // L2 Warm Cache: hash -> entry with compressed_data
-  mutable std::recursive_mutex warm_mutex_;
-  std::unordered_map<hash_type, StateEntryPtr> warm_cache_;
-  std::list<hash_type> warm_lru_;
-  std::unordered_map<hash_type, std::list<hash_type>::iterator> warm_lru_index_;
-  std::atomic<size_t> warm_memory_usage_{0};
-
-  // Unified access counter for both caches
-  std::atomic<uint64_t> access_counter_{0};
-
-  // Statistics
-  mutable std::mutex stats_mutex_;
+  std::atomic<uint64_t> generation_{0};
+  // API calls may overlap; init/shutdown exclude all calls and join workers.
+  mutable std::shared_mutex lifecycle_mutex_;
+  mutable std::mutex mutex_;
+  std::condition_variable work_cv_, completion_cv_, space_cv_, prefetch_cv_;
+  std::atomic<bool> ever_initialized_{false};
+  bool initialized_ = false, stopping_ = false;
+  std::exception_ptr failure_;
+  Cache hot_cache_, warm_cache_;
+  std::list<hash_type> hot_lru_, warm_lru_;
+  std::atomic<size_t> hot_memory_usage_{0}, warm_memory_usage_{0};
   Stats stats_;
-
-  // ==================================================================
-  // State Queue (managed by StateStore for transparent prefetch)
-  // ==================================================================
-
-  mutable std::mutex queue_mutex_;
-  std::deque<hash_type> state_queue_;
-
-  // ==================================================================
-  // Prefetch System
-  // ==================================================================
-
-  // Inflight tracking (prevent duplicate prefetch)
-  mutable std::mutex inflight_mutex_;
+  std::unordered_map<hash_type, Buffer> pending_;
+  std::deque<hash_type> io_queue_;
+  size_t pending_bytes_ = 0;
+  static constexpr size_t max_io_queue_size_ = 50;
+  std::vector<std::thread> io_threads_, prefetch_threads_;
+  struct QueueEntry
+  {
+    hash_type ss_hash = 0;
+    std::array<hash_type, NP> ts_hash{};
+    // False for hash-only enqueues, which still resolve component hashes from
+    // SysStateStore metadata in submit_prefetch_tasks().
+    bool ts_known = false;
+  };
+  std::deque<QueueEntry> state_queue_;
+  std::deque<hash_type> prefetch_queue_;
   std::unordered_set<hash_type> prefetch_inflight_;
-  std::condition_variable inflight_cv_;
+  std::shared_ptr<detsim::snapshot::SharedObjectPool> shared_pool_;
+  bool shared_writes_ = false;
 
-  // Prefetch queue
-  std::queue<PrefetchTask> prefetch_queue_;
-  std::mutex prefetch_mutex_;
-  std::condition_variable prefetch_cv_;
-  std::vector<std::thread> prefetch_threads_;
-
+  void ensure_initialized();
+  void check_ready() const; // mutex_ held
+  void record_failure(std::exception_ptr failure); // mutex_ held
+  void io_worker();
   void prefetch_worker();
   void submit_prefetch_tasks();
-
-  // ==================================================================
-  // Background I/O (for persistence)
-  // ==================================================================
-
-  std::queue<StateEntryPtr> io_queue_;
-  std::mutex io_mutex_;
-  std::condition_variable io_cv_; // Notify workers new entry available
-  std::condition_variable
-      io_queue_not_full_cv_;      // Notify producers queue not full
-  size_t max_io_queue_size_ = 50; // Limit queue to prevent OOM
-  std::vector<std::thread> io_threads_;
-
-  void io_worker();
-
-  // ==================================================================
-  // Async Eviction (L1 -> L2)
-  // ==================================================================
-
-  std::queue<StateEntryPtr> eviction_queue_;
-  std::mutex eviction_mutex_;
-  std::condition_variable eviction_cv_;
-  std::atomic<size_t> pending_eviction_bytes_{0};
-  std::thread eviction_thread_;
-
-  void eviction_worker();
-  void mark_for_eviction(StateEntryPtr entry);
-  void evict_l1_async(size_t required_bytes);
-
-  // ==================================================================
-  // Internal Helpers
-  // ==================================================================
-
-  // Entry management
-  StateEntryPtr find_or_create_entry(hash_type hash);
-
-  // Cache operations
-  void insert_to_l1(hash_type hash, std::vector<uint8_t> &&raw_data);
-  void insert_to_l2(hash_type hash, std::vector<uint8_t> &&compressed_data);
-  bool move_l2_to_l1(hash_type hash);
-  void evict_l2_if_needed(size_t required_bytes);
-  void update_hot_lru(hash_type hash);
-  void update_warm_lru(hash_type hash);
-
-  // Compression - delegated to StateStorePacked
-  std::vector<uint8_t> compress(const std::vector<uint8_t> &data);
-  std::vector<uint8_t> decompress(const std::vector<uint8_t> &data,
-                                  size_t original_size);
-
-  // Disk operations
-  bool write_to_disk(hash_type hash,
-                     const std::vector<uint8_t> &compressed_data,
-                     size_t original_size);
-  bool read_from_disk(hash_type hash, std::vector<uint8_t> &data);
-  bool read_compressed_from_disk(hash_type hash,
-                                 std::vector<uint8_t> &compressed_data);
-  bool exists_on_disk(hash_type hash);
+  void insert_cache(Cache &, std::list<hash_type> &, std::atomic<size_t> &,
+                    size_t capacity, hash_type, Buffer, size_t original_size);
+  Buffer find_cache(Cache &, std::list<hash_type> &, hash_type);
+  Buffer load_buffer(hash_type); // caller holds lifecycle shared lock
 };
 
-/* ==============================================================================
- * C-style Interface
- * ==============================================================================
- */
-
-#ifdef __cplusplus
-extern "C"
-{
-#endif
-
+extern "C" {
   void state_store_init(void);
-  uint32_t state_store_save(const void *data, size_t len);
+  uint64_t state_store_save(const void *data, size_t len);
   ssize_t state_store_load(uint64_t hash, void *data, size_t max_len);
   int state_store_exists(uint64_t hash);
-
-#ifdef __cplusplus
 }
 #endif
-
-#endif /* __STATE_STORE_H */

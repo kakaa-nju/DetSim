@@ -16,7 +16,6 @@
 #include "fsstate.h"
 #include "guest.h"
 #include "proc_status.h"
-#include "raft_msg_parser.h"
 #include "scheduler.h"
 #include "sockstate.h"
 #include "state/state.h"
@@ -57,45 +56,6 @@ void dwarf_print_local_vars(int pid);
 
 /* Defined in state.cpp */
 extern int choose_many[450];
-
-/* Forward declarations for command handlers */
-
-static int execute_command(char *cmd_line);
-
-static struct
-{
-  const char *name;
-  const char *description;
-  int (*handler)(char *);
-} cmd_table[] = {
-    {"help", "Display informations about all supported commands", cmd_help},
-    {"bfs", "Perform breadth-first search from current state", cmd_bfs},
-    {"dfs", "Perform depth-first search from current state", cmd_dfs},
-    {"rand", "Perform random search from current state", cmd_rand},
-    {"q", "Exit ptraceMC", cmd_q},
-    {"si", "Step from current state, on focused process", cmd_si},
-    {"sw", "Switch control focus on the n-th process", cmd_sw},
-    {"thread", "Switch to thread N in current process (thread to list)",
-     cmd_thread},
-    {"load", "Load state of given StateHash", cmd_load},
-    {"info", "Display current state history", cmd_info},
-    {"batch", "Read command list from file", cmd_batch},
-    {"p", "Calculate expression", cmd_p},
-    {"x",
-     "Examine memory: x/[count][format][size] <addr> (formats: x,d,u,o,t,c,s; "
-     "sizes: b,h,w,g)",
-     cmd_x},
-    {"bt", "Print backtrace with arguments", cmd_bt},
-    {"frame", "Select stack frame", cmd_frame},
-    {"locals", "Show local variables in current frame", cmd_locals},
-    {"ls", "List files in current node's filesystem", cmd_ls},
-    {"stat", "Show stat of files matching pattern", cmd_stat},
-    {"hexdump", "Hexdump of a file (c: continue, q: quit)", cmd_hexdump},
-    {"diff", "Compare two system states by hash prefix", cmd_diff},
-    {"ckpt", "Set CKPT policy: ckpt <syscall> yes|no; ckpt all yes; ckpt restore", cmd_ckpt},
-};
-
-#define NR_CMD (sizeof(cmd_table) / sizeof(cmd_table[0]))
 
 static inline void welcome()
 {
@@ -142,7 +102,7 @@ char *rl_gets()
     line_read = NULL;
   }
 
-  line_read = readline("(detsim) ");
+  line_read = readline("(ptmc) ");
 
   if (line_read && *line_read)
   {
@@ -155,36 +115,67 @@ char *rl_gets()
 /* External declaration for NCursesUI */
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui();
 
-static int execute_command(char *cmd_line)
+void refresh_thread_panel()
 {
-  char lastbuf[256] = {0};
-  strncpy(lastbuf, cmd_line, sizeof(lastbuf) - 1);
-  lastbuf[sizeof(lastbuf) - 1] = '\0';
+  detsim::ui::NCursesUI *ui = get_ncurses_ui();
+  if (!ui)
+    return;
 
-  char *str_end = cmd_line + strlen(cmd_line);
-  /* extract the first token as the command */
-  char *cmd = strtok(cmd_line, " ");
-  if (cmd == NULL)
+  int process = ptmc_state.cursor;
+  if (process < 0 || process >= NP)
   {
-    return 0; // Empty command
+    process = -1;
+    for (int i = 0; i < NP; ++i)
+      if (!DISDEAD(ptmc_state.status[i])) { process = i; break; }
+  }
+  if (process < 0)
+  {
+    ui->set_status_line(7, "Threads: no live process");
+    ui->set_status_line(8, "");
+    return;
   }
 
-  /* treat the remaining string as the arguments */
-  char *args = cmd + strlen(cmd) + 1;
-  if (args >= str_end)
-    args = NULL;
+  const auto &child = ptmc_state.running_state.child[process];
+  char line[512];
+  snprintf(line, sizeof(line), "Process %d/%d pid=%d current=%d %s",
+           process, NP, ptmc_state.pids[process],
+           ptmc_state.current_thread_idx[process],
+           is_auto_mode() ? "auto" : "manual");
+  ui->set_status_line(7, line);
 
-  int i;
-  for (i = 0; i < NR_CMD; i++)
+  std::string summary;
+  if (child.threads.empty())
   {
-    if (strcmp(cmd, cmd_table[i].name) == 0)
+    summary = "main runnable (single thread)";
+  }
+  else
+  {
+    int shown = 0;
+    for (size_t i = 0; i < child.threads.size(); ++i)
     {
-      return cmd_table[i].handler(args);
+      const auto &thread = child.threads[i];
+      const char *state = !thread.alive ? "dead" :
+          !thread.pending_syscall ? "run" :
+          thread.pending_syscall->phase == PendingPhase::Waiting ? "wait" :
+          thread.pending_syscall->phase == PendingPhase::Ready ? "ready" : "retry";
+      if (shown++) summary += " | ";
+      summary += "T" + std::to_string(i) + ":" + state;
+      if (thread.alive && thread.pending_syscall)
+      {
+        const auto &pending = *thread.pending_syscall;
+        summary += pending.reason == PendingReason::Futex ? ":futex" :
+                   pending.reason == PendingReason::Io ? ":io" : ":timer";
+        if (pending.deadline)
+          summary += "@" + std::to_string(pending.deadline->sec);
+      }
+      if (shown == 4 && child.threads.size() > 4)
+      {
+        summary += " | ...";
+        break;
+      }
     }
   }
-
-  detsim::ui::ui_printf("Unknown command '%s'\n", cmd);
-  return 0;
+  ui->set_status_line(8, summary);
 }
 
 /* External batch file from config */
@@ -217,6 +208,11 @@ void ui_mainloop()
     return;
   }
 
+  /* Manual UI: start with process 0 selected so thread/si work immediately. */
+  if (ptmc_state.cursor < 0 && NP > 0)
+    ptmc_state.cursor = 0;
+  refresh_thread_panel();
+
   /* If UI is available, use it */
   if (ui)
   {
@@ -226,13 +222,9 @@ void ui_mainloop()
         {
           // Create modifiable copy for strtok
           char *cmd_copy = strdup(cmd_line.c_str());
-          int result = execute_command(cmd_copy);
-          free(cmd_copy);
-          if (result < 0)
-          {
-            // Command wants to exit
-            // Note: In NCursesUI mode, we need a way to signal exit
-            // For now, just handle 'q' command specially
+          if (cmd_copy) {
+            execute_command_line(cmd_copy);
+            free(cmd_copy);
           }
         });
 
@@ -245,53 +237,27 @@ void ui_mainloop()
   }
 
   /* Fallback to readline mode */
-  char lastbuf[256] = {0};
   char lastcmd[256] = {0};
 
   for (char *str; (str = rl_gets()) != NULL;)
   {
+    char line[256];
     if (str[0] != 0)
-      strncpy(lastbuf, str, sizeof(lastbuf) - 1);
-    lastbuf[sizeof(lastbuf) - 1] = '\0';
-
-    char *str_end = str + strlen(str);
-    /* extract the first token as the command */
-    char *cmd = strtok(str, " ");
-    if (cmd == NULL)
     {
-      // Copy lastcmd to str buffer safely for strtok
-      if (strlen(lastcmd) < 256)
-      {
-        strcpy(str, lastcmd);
-        cmd = strtok(str, " ");
-      }
-      if (cmd == NULL)
-      {
-        lastbuf[0] = lastcmd[0] = '\0';
-        continue;
-      }
+      strncpy(line, str, sizeof(line) - 1);
+      line[sizeof(line) - 1] = '\0';
+      strncpy(lastcmd, line, sizeof(lastcmd) - 1);
+      lastcmd[sizeof(lastcmd) - 1] = '\0';
     }
-
-    /* treat the remaining string as the arguments */
-    char *args = cmd + strlen(cmd) + 1;
-    if (args >= str_end)
-      args = NULL;
-
-    int i;
-    for (i = 0; i < NR_CMD; i++)
+    else
     {
-      if (strcmp(cmd, cmd_table[i].name) == 0)
-      {
-        if (cmd_table[i].handler(args) < 0)
-          return;
-        break;
-      }
+      strncpy(line, lastcmd, sizeof(line) - 1);
+      line[sizeof(line) - 1] = '\0';
     }
-
-    if (i == NR_CMD)
-      detsim::ui::ui_printf("Unknown command '%s'\n", cmd);
-    strncpy(lastcmd, lastbuf, sizeof(lastcmd) - 1);
-    lastcmd[sizeof(lastcmd) - 1] = '\0';
+    if (line[0] == '\0')
+      continue;
+    if (execute_command_line(line) < 0)
+      return;
   }
 }
 
@@ -301,48 +267,36 @@ void ui_mainloop()
 
 pid_t PTMC_STATE::get_current_tid(int tracee_idx) const
 {
-  if (tracee_idx < 0 || tracee_idx >= NP)
-    return -1;
+  if (tracee_idx < 0 || tracee_idx >= NP) return -1;
 
-  const auto &threads = running_state.child[tracee_idx].threads;
+  const auto& threads = running_state.child[tracee_idx].threads;
   int tidx = current_thread_idx[tracee_idx];
 
-  if (tidx >= 0 && tidx < (int)threads.size())
-  {
+  if (tidx >= 0 && tidx < (int)threads.size()) {
     // Use the stored physical_tid from thread_state
     pid_t physical_tid = threads[tidx].physical_tid;
-    if (physical_tid > 0)
-    {
+    if (threads[tidx].alive && physical_tid > 0) {
       return physical_tid;
     }
   }
 
-  // Fallback to main pid if no threads recorded or index out of range
-  return pids[tracee_idx];
+  // Bootstrap has no logical slots yet; loaded/unbound slots must never fall back.
+  return threads.empty() ? pids[tracee_idx] : -1;
 }
 
 pid_t PTMC_STATE::get_thread_tid(int tracee_idx, int thread_idx) const
 {
-  if (tracee_idx < 0 || tracee_idx >= NP)
-    return -1;
+  if (tracee_idx < 0 || tracee_idx >= NP) return -1;
 
-  const auto &threads = running_state.child[tracee_idx].threads;
-  if (thread_idx < 0 || thread_idx >= (int)threads.size())
-  {
+  const auto& threads = running_state.child[tracee_idx].threads;
+  if (thread_idx < 0 || thread_idx >= (int)threads.size()) {
     return -1;
   }
 
   // Use the stored physical_tid from thread_state
   pid_t physical_tid = threads[thread_idx].physical_tid;
-  if (physical_tid > 0)
-  {
+  if (threads[thread_idx].alive && physical_tid > 0) {
     return physical_tid;
-  }
-
-  // Fallback: if thread index is 0, return main pid
-  if (thread_idx == 0)
-  {
-    return pids[tracee_idx];
   }
 
   return -1;
@@ -350,12 +304,10 @@ pid_t PTMC_STATE::get_thread_tid(int tracee_idx, int thread_idx) const
 
 void PTMC_STATE::set_current_thread(int tracee_idx, int thread_idx)
 {
-  if (tracee_idx < 0 || tracee_idx >= NP)
-    return;
+  if (tracee_idx < 0 || tracee_idx >= NP) return;
 
-  const auto &threads = running_state.child[tracee_idx].threads;
-  if (thread_idx >= 0 && thread_idx < (int)threads.size())
-  {
+  const auto& threads = running_state.child[tracee_idx].threads;
+  if (thread_idx >= 0 && thread_idx < (int)threads.size()) {
     current_thread_idx[tracee_idx] = thread_idx;
   }
 }

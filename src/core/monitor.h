@@ -12,6 +12,7 @@
 #include <memory>
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 enum
 {
@@ -46,16 +47,16 @@ struct PTMC_STATE
   SockState sock_states[NP];
   std::shared_ptr<FdManager> fd_managers[NP]; /* Per-process fd allocation */
   FileSystemState fs_states[NP];
+  ProcessKernelState process_states[NP];
 
   int pids[NP] = {};
+  // Runtime image validity; never enters snapshot identity.
+  bool tracee_image_dirty[NP] = {};
 
   /* Multi-threading support */
-  int current_thread_idx[NP] =
-      {}; /* Currently selected thread index per tracee */
-  bool thread_blocked[NP][64] = {}; /* Thread blocked status (waiting on futex)
-                                       per tracee, max 64 threads */
-  bool thread_exited[NP][64] =
-      {}; /* Thread exit status per tracee, max 64 threads */
+  int current_thread_idx[NP] = {};  /* Currently selected thread index per tracee */
+  bool thread_blocked[NP][64] = {}; /* Thread blocked status (waiting on futex) per tracee, max 64 threads */
+  bool thread_exited[NP][64] = {};  /* Thread exit status per tracee, max 64 threads */
 
   /* Get current thread TID for a tracee */
   pid_t get_current_tid(int tracee_idx) const;
@@ -68,22 +69,26 @@ struct PTMC_STATE
   {
     char *executable = nullptr;
     int argc = 0;
-    char *argv[5] = {};
+    std::vector<char *> argv;
   } tracee[NP];
 
   struct timeval time[NP] = {};
   std::string addrs[NP];
 
   std::unordered_set<std::string> assertions;
-  std::vector<int (*)()> user_checks;
+  std::string model_identity; // Configured execution/inspection model.
 
-  int error_bound = 5;
+  /* Model-budget counter: how many "approximate" actions (postponed datagrams,
+   * enumerated time choices) this run may still take. It is a diagnostic
+   * statistic and never a stop condition; see reset_model_budget(). */
+  int error_bound = kInitialModelBudget;
 
   // Constructor to ensure proper initialization
   PTMC_STATE() = default;
 };
 
 int is_auto_mode();
+void refresh_thread_panel();
 void cleanup_readline();
 
 extern PTMC_STATE ptmc_state;

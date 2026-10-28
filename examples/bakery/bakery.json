@@ -2,6 +2,5 @@
   "Loglevel": 2,
   "Nodes": 1,
   "Tracee": [["./bakery", "0"]],
-  "Checkpoint": ["read", "write"],
   "Addr": ["192.168.0.1"]
 }

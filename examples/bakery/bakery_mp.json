@@ -7,7 +7,6 @@
   ],
   "Addr": ["192.168.0.1", "192.168.0.2"],
   "SharedFiles": ["lock"],
-  "Checkpoint": ["read", "write"],
   "Assertions": [
     "tracee0:critical == 0 || tracee0:critical == 1",
     "tracee1:critical == 0 || tracee1:critical == 1",

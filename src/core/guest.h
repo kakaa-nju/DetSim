@@ -26,9 +26,12 @@ uint8_t tracee_read_byte(int pid, void *addr);
 int tracee_write_word(int pid, void *addr, long data);
 void tracee_write_mem(int pid, void *addr, const void *data, int len);
 void tracee_read_mem(int pid, const void *addr, void *data, int len);
+// Exact transfers: no zero-fill and no manufactured success. A failed copyout
+// may have written a prefix, but callers must not consume queued/offset state.
+bool guest_read_exact(pid_t pid, const void* guest, void* host, size_t size);
+bool guest_write_exact(pid_t pid, void* guest, const void* host, size_t size);
 void remove_vdso(int pid);
 int patch_at_random(pid_t pid);
-void patch_cpu_features_elf(pid_t pid);
 
 void show_regs(struct user_regs_struct *regs);
 void tracee_switch_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
@@ -39,9 +42,14 @@ uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
                            uint64_t rdx, uint64_t r10, uint64_t r8,
                            uint64_t r9);
 
+#include "state/resident_memory.h"
 __attribute__((unused)) static inline long
 Ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data)
 {
+  if (op == PTRACE_SYSCALL || op == PTRACE_CONT || op == PTRACE_SINGLESTEP)
+    detsim::resident::resuming(pid);
+  if (op == PTRACE_POKEDATA || op == PTRACE_POKETEXT)
+    detsim::resident::writing(pid, reinterpret_cast<uintptr_t>(addr), sizeof(long));
   /* ptrace(2): On success, the PTRACE_PEEK* operations return the requested *
    * data ... and other operations return zero. On error, all operations     *
    * return -1, and errno is set to indicate the error. Since the value      *
@@ -54,13 +62,10 @@ Ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data)
   return result;
 }
 
-#define ptrace_right(a, b, c, d)                                               \
-  Ptrace_right((enum __ptrace_request)a, (pid_t)b, (void *)(c), (void *)(d))
+#define ptrace_right(a, b, c, d) Ptrace_right((enum __ptrace_request)a, (pid_t)b, (void *)(c), (void *)(d))
 void tracee_do_munmap(int pid, uint64_t start, uint64_t end);
-void *tracee_do_mmap(int pid, uint64_t start, uint64_t end,
-                     int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
-void *tracee_do_mmap_in_place(int pid, uint64_t start, uint64_t end,
-                              int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
+void *tracee_do_mmap(int pid, uint64_t start, uint64_t end, int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
+void *tracee_do_mmap_in_place(int pid, uint64_t start, uint64_t end, int prot = PROT_READ | PROT_WRITE | PROT_EXEC);
 int tracee_do_open(int pid, const char *filename, uint64_t flags);
 
 void tracee_backtrace(int pid);

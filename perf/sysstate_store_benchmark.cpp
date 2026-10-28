@@ -12,7 +12,13 @@
 #include "sysstate_store.h"
 #include "utils.h"
 #include "debug.h"
+#include <cstring>
 #include "monitor.h"
+
+/* Benchmarks link the tracer objects without main.cpp. */
+namespace detsim { namespace ui { class NCursesUI; } }
+extern "C" detsim::ui::NCursesUI *get_ncurses_ui() { return nullptr; }
+
 #include <iostream>
 #include <vector>
 #include <thread>
@@ -283,13 +289,14 @@ int main() {
             // Use template index to create actual deduplication
             // Same template index -> Same hash -> Deduplication
             size_t idx = template_idx_dist(rng);
-            data = generator.generate_state(generator.templates[idx], perturbation_percent);
-            // Deterministic hash based on template index
-            hash = (hash_type)(idx * 1234567ULL + 1);
+            // A shared template must produce identical bytes: the store rejects
+            // duplicate hashes whose payloads differ, so dedup is byte-exact.
+            data = generator.generate_state(generator.templates[idx], 0);
+            hash = XXHash64::hash(data.data(), data.size());
         } else {
             // Random state with content-based hash
             data = generator.generate_random_state();
-            hash = XXHash64::hash(data.data(), data.size(), 0);
+            hash = XXHash64::hash(data.data(), data.size());
         }
         
         // Check if this would be a new save or dedup

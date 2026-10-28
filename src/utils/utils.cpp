@@ -1,11 +1,13 @@
 #include "utils.h"
 #include "common.h"
 #include "log_wrapper.h"
-#include <algorithm>
 #include <cstdio>
+#include <cerrno>
+#include <stdexcept>
 #include <dirent.h>
 #include <fcntl.h>
 #include <filesystem>
+#include <fmt/printf.h>
 #include <fmt/printf.h>
 #include <fstream>
 #include <gelf.h>
@@ -19,6 +21,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+#include <algorithm>
 
 namespace fs = std::filesystem;
 
@@ -192,35 +195,34 @@ std::unique_ptr<FILE, file_closer> open_state_file(hash_type hash,
 void ensure_directory_for_file(const std::string &path)
 {
   size_t last_slash = path.find_last_of('/');
-  if (last_slash != std::string::npos)
-  {
+  if (last_slash != std::string::npos) {
     std::string dir = path.substr(0, last_slash);
-    if (!fs::exists(dir))
-    {
+    if (!fs::exists(dir)) {
       fs::create_directories(dir);
     }
   }
 }
+
+
+
 
 } // namespace fileutils
 
 // Detect if binary is a Go program by checking for Go-specific ELF sections
 int is_go_program(const char *filename)
 {
-  // Force output to stderr for debugging
   LOG_INFO("is_go_program: checking %s", filename);
-  elf_version(EV_CURRENT);
+  if (elf_version(EV_CURRENT) == EV_NONE)
+    return 0;
   int fd = open(filename, O_RDONLY);
-  if (fd < 0)
-  {
+  if (fd < 0) {
     LOG_INFO("is_go_program: open failed: %s", strerror(errno));
     return 0;
   }
   LOG_INFO("is_go_program: opened fd=%d", fd);
 
   Elf *e = elf_begin(fd, ELF_C_READ, NULL);
-  if (!e)
-  {
+  if (!e) {
     LOG_INFO("is_go_program: elf_begin failed");
     close(fd);
     return 0;
@@ -229,18 +231,19 @@ int is_go_program(const char *filename)
   // Check for Go-specific sections
   Elf_Scn *scn = NULL;
   size_t shstrndx;
+  if (elf_getshdrstrndx(e, &shstrndx) != 0) {
+    elf_end(e);
+    close(fd);
+    return 0;
+  }
   int is_go = 0;
-  while ((scn = elf_nextscn(e, scn)) != NULL)
-  {
+  while ((scn = elf_nextscn(e, scn)) != NULL) {
     GElf_Shdr shdr;
-    if (gelf_getshdr(scn, &shdr) != NULL)
-    {
-      const char *name =
-          elf_strptr(e, elf_getshdrstrndx(e, &shstrndx), shdr.sh_name);
-      if (name &&
-          (strcmp(name, ".go.buildinfo") == 0 ||
-           strcmp(name, ".gopclntab") == 0 || strncmp(name, ".go.", 4) == 0))
-      {
+    if (gelf_getshdr(scn, &shdr) != NULL) {
+      const char *name = elf_strptr(e, shstrndx, shdr.sh_name);
+      if (name && (strcmp(name, ".go.buildinfo") == 0 ||
+                     strcmp(name, ".gopclntab") == 0 ||
+                     strncmp(name, ".go.", 4) == 0)) {
         is_go = 1;
         break;
       }
@@ -256,38 +259,56 @@ int is_go_program(const char *filename)
  * Multi-threading support functions
  * ====================================================================== */
 
-#include <algorithm>
 #include <dirent.h>
+#include <algorithm>
 
-// Get list of all thread TIDs in a process
-std::vector<pid_t> get_thread_list(pid_t pid)
+namespace {
+std::vector<pid_t> scan_thread_list(pid_t pid, DIR* directory)
 {
   std::vector<pid_t> threads;
-  std::string task_dir = fmt::format("/proc/{}/task", pid);
-
-  DIR *dir = opendir(task_dir.c_str());
-  if (!dir)
-  {
-    LOG_ERROR("Failed to open %s: %s", task_dir.c_str(), strerror(errno));
-    return threads;
-  }
-
-  struct dirent *entry;
-  while ((entry = readdir(dir)) != NULL)
-  {
+  for (;;) {
+    errno = 0;
+    const auto* entry = readdir(directory);
+    if (!entry) {
+      const int error = errno;
+      if (error)
+        throw std::runtime_error("Cannot enumerate process threads in /proc/" + std::to_string(pid) + "/task" +
+                                 ": " + strerror(error));
+      break;
+    }
     if (entry->d_name[0] == '.')
       continue;
 
     pid_t tid = atoi(entry->d_name);
-    if (tid > 0)
-    {
+    if (tid > 0) {
       threads.push_back(tid);
     }
   }
 
-  closedir(dir);
   std::sort(threads.begin(), threads.end());
   return threads;
+}
+}
+
+std::vector<pid_t> get_thread_list(pid_t pid)
+{
+  const auto task_dir = fmt::format("/proc/{}/task", pid);
+  const auto close_dir = [](DIR* value) { closedir(value); };
+  std::unique_ptr<DIR, decltype(close_dir)> dir(opendir(task_dir.c_str()), close_dir);
+  if (!dir) {
+    LOG_ERROR("Failed to open %s: %s", task_dir.c_str(), strerror(errno));
+    return {};
+  }
+  return scan_thread_list(pid, dir.get());
+}
+
+std::vector<pid_t> get_thread_list(pid_t pid, DIR* directory)
+{
+  if (!directory) throw std::runtime_error("Missing retained task directory");
+  errno = 0;
+  rewinddir(directory);
+  if (errno) throw std::runtime_error("Cannot rewind retained task directory");
+  return scan_thread_list(pid, directory);
 }
 
 // Get thread count for a process

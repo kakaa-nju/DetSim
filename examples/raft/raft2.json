@@ -1,4 +1,7 @@
 {
+  "RuntimeProfile": {
+    "startup_syscall": 10
+  },
   "Loglevel": 1,
   "Nodes": 2,
   "Tracee": [
@@ -6,9 +9,6 @@
     ["./raft/raft", "1"]
   ],
   "Addr": ["192.168.0.1", "192.168.0.2"],
-  "Checkpoint": [
-    "recvfrom", "gettimeofday"
-  ],
   "SharedFiles": [],
   "UserCheck": "./plugins/check.so",
   "UserState": "./plugins/check.so"

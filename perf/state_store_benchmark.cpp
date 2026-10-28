@@ -8,6 +8,7 @@
 #include "state_store.h"
 #include "utils.h"
 #include "debug.h"
+#include <cstring>
 #include <sys/types.h>
 #include <unistd.h>
 #include <iostream>
@@ -17,6 +18,11 @@
 #include <random>
 #include <numeric>
 #include <algorithm>
+
+
+/* Benchmarks link the tracer objects without main.cpp. */
+namespace detsim { namespace ui { class NCursesUI; } }
+extern "C" detsim::ui::NCursesUI *get_ncurses_ui() { return nullptr; }
 
 extern int loglevel;
 

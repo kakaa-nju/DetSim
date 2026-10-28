@@ -30,7 +30,7 @@ extern "C"
     struct raft_server raft;
     tracee_read_mem(pid, (void *)praft, &raft, sizeof(raft));
 
-    struct timeval tv = in.now;
+    struct timeval tv = in.gettimeofday_now;
     struct timeval *tv_out = (struct timeval *)malloc(sizeof(*tv_out));
 
     // RAFT_STATE_LEADER = 4 in redisraft (was 3 in old willemt/raft)
@@ -48,7 +48,6 @@ extern "C"
       else
       {
         *tv_out = tv_addmsec(tv, raft.election_timeout_rand + 1);
-        ptmc_state.error_bound--;
       }
     }
 

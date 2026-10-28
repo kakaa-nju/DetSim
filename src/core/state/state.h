@@ -5,29 +5,52 @@
 #ifndef __STATE_H
 #define __STATE_H
 
-#include "../engine/thread_manager.h" // For MAX_THREADS_PER_PROCESS
+#include "../engine/pending_syscall.h"
+#include "../engine/thread_manager.h"  // For MAX_THREADS_PER_PROCESS
 #include "../fs/fsstate.h"
 #include "../net/sockstate.h"
-#include <cstdint>
-#include <optional>
 #include <sys/user.h>
 #include <unistd.h>
+#include <array>
 #include <unordered_map>
 #include <unordered_set>
-#include <vector>
+#include <optional>
+#include "futexstate.h"
 
-// Forward declaration for FutexState
-class FutexState;
+/* Explicit manual timeout transition; ordinary transitions retain -1/choices. */
+enum { DETSIM_CHOICE_TIMEOUT = -2 };
+
+/* The model budget counts approximation actions. Spending beyond the initial
+ * budget saturates at zero: it is reported, never enforced, and never causes a
+ * transition, a restore or a search to fail. */
+inline constexpr int kInitialModelBudget = 5;
+void reset_model_budget(void);
+void consume_model_budget(int cost);
+#include "process/process_state.h"
+
+
+// Runtime provenance is deliberately separate from persistent state identity.
+void clear_snapshot_thread_bindings();
+/* Explicit opt-in for copying a saved snapshot into a fresh, same-layout process
+ * incarnation (parallel seed workers). Normal restore still requires provenance
+ * recorded by capture in the same process. */
+void adopt_snapshot_bindings(int index, hash_type hash, const tracee_state& target);
+/* Same explicit adoption, but creates parked carriers for a saved multi-thread
+ * layout from a fresh single-main process. Requires prepare_thread_pool first. */
+void adopt_snapshot_threads(int index, hash_type hash, const tracee_state& target);
 
 /* ======================================================================
  * State Data Format (shared with StateStore)
  * ====================================================================== */
 
+inline constexpr uint32_t FLAT_SNAPSHOT_VERSION = 37;
+inline constexpr uint32_t PAGE_SNAPSHOT_VERSION = 38;
+
 /* Packed to avoid alignment padding */
 struct __attribute__((packed)) StateDataHeader
 {
   uint32_t magic;         // 'DSTM' = 0x4453544D
-  uint32_t version;       // 3 (updated for integrated mappings)
+  uint32_t version;       // 37: flat; 38: pages (stable VFS inode lifecycle)
   uint32_t num_regions;   // number of memory regions
   uint64_t tstate_offset; // offset to serialized tracee_state
   uint64_t tstate_size;   // size of serialized tracee_state
@@ -35,15 +58,14 @@ struct __attribute__((packed)) StateDataHeader
   uint64_t maps_size;     // size of mappings data
   uint64_t regs_offset;   // offset to register data
 };
-static_assert(sizeof(StateDataHeader) == 52,
-              "StateDataHeader size must be 52 bytes");
+static_assert(sizeof(StateDataHeader) == 52, "StateDataHeader size must be 52 bytes");
 
 /* Packed to avoid alignment padding */
 struct __attribute__((packed)) RegionInfo
 {
   uint64_t start;
   uint64_t end;
-  uint64_t offset; // offset in data buffer
+  uint64_t offset; // flat: byte offset in blob; pages: first PageRef index
   uint32_t prot;   // protection flags (PROT_READ/WRITE/EXEC)
   char flags[5];   // original flags string from /proc/pid/maps (e.g., "rwxp")
 };
@@ -76,22 +98,32 @@ struct syscall_info
  * saves/loads. The physical_tid is the actual kernel thread ID which may
  * change when states are restored.
  *
- * A thread is considered "exited" when physical_tid == 0. This allows us
- * to maintain stable TID mappings even after threads exit.
+ * alive is semantic lifecycle; physical_tid is a transient runtime binding.
+ * Loading an archive never grants permission to control a host task.
  */
 struct thread_state
 {
-  pid_t tid;                    // Virtual TID (stable thread index + 1)
-  pid_t physical_tid;           // Physical TID (actual kernel thread ID)
-  struct user_regs_struct regs; // Register context
-  uint64_t clone_flags;         // Clone flags used to create this thread
-  uint64_t stack_addr;          // Stack address (for clone)
-  pid_t ptid;                   // Parent thread TID
-  bool is_main;                 // Whether this is the main thread
+  pid_t tid;                      // Virtual TID (stable thread index + 1)
+  pid_t physical_tid;             // Runtime only; omitted from archives
+  bool alive;                    // Logical lifecycle, independent of binding
+  std::array<char,16> comm{};      // Canonical logical task name, frozen on exit
+  int exit_code = 0;             // Frozen virtual exit status
+  struct user_regs_struct regs{}; // General-purpose register context
+  std::vector<uint8_t> xstate;     // Complete Linux NT_X86_XSTATE register set
+  uint64_t clone_flags;           // Clone flags used to create this thread
+  uint64_t stack_addr;            // Stack address (for clone)
+  pid_t ptid;                     // Parent thread TID
+  bool is_main;                   // Whether this is the main thread
+  std::optional<PendingSyscall> pending_syscall; // Logical unfinished call
+  uint64_t robust_list_head = 0;   // Logical native robust-list registration
+  uint64_t altstack_sp = 0, altstack_size = 0; // Virtual native alternate stack
+  uint32_t altstack_flags = 2;     // SS_DISABLE; SS_AUTODISARM retained
+  uint64_t signal_mask = 0;        // Linux native 64-signal blocked mask
+  uint64_t clear_child_tid = 0;    // Logical set_tid_address / CLONE_CHILD_CLEARTID
+  uint64_t pending_child_settid = 0;
+  bool child_settid_pending = false; // Attempt at first child schedule, even for NULL
 
-  thread_state()
-      : tid(0), physical_tid(0), clone_flags(0), stack_addr(0), ptid(0),
-        is_main(false)
+  thread_state() : tid(0), physical_tid(0), alive(false), clone_flags(0), stack_addr(0), ptid(0), is_main(false)
   {
     // regs will be zero-initialized by the default member initializer
   }
@@ -99,19 +131,36 @@ struct thread_state
   template <class Archive>
   void serialize(Archive &ar)
   {
-    ar(tid, physical_tid, regs.r15, regs.r14, regs.r13, regs.r12, regs.rbp,
-       regs.rbx, regs.r11, regs.r10, regs.r9, regs.r8, regs.rax, regs.rcx,
-       regs.rdx, regs.rsi, regs.rdi, regs.orig_rax, regs.rip, regs.cs,
-       regs.eflags, regs.rsp, regs.ss, regs.fs_base, regs.gs_base, regs.ds,
-       regs.es, regs.fs, regs.gs, clone_flags, stack_addr, ptid, is_main);
+    ar(tid, alive, exit_code, regs.r15, regs.r14, regs.r13, regs.r12, regs.rbp, regs.rbx,
+       regs.r11, regs.r10, regs.r9, regs.r8, regs.rax, regs.rcx, regs.rdx,
+       regs.rsi, regs.rdi, regs.orig_rax, regs.rip, regs.cs, regs.eflags,
+       regs.rsp, regs.ss, regs.fs_base, regs.gs_base, regs.ds, regs.es,
+       regs.fs, regs.gs, clone_flags, stack_addr, ptid, is_main, xstate,
+       clear_child_tid, pending_child_settid, child_settid_pending, signal_mask, robust_list_head,
+       altstack_sp, altstack_size, altstack_flags);
+    bool terminated=false;
+    for(char& byte:comm) {
+      ar(byte);
+      if(terminated && byte) throw std::runtime_error("Noncanonical logical thread name");
+      if(!byte) terminated=true;
+    }
+    if(!terminated) throw std::runtime_error("Unterminated logical thread name");
+    bool pending = pending_syscall.has_value();
+    ar(pending);
+    if constexpr (Archive::is_loading::value) {
+      if (pending) pending_syscall.emplace();
+      else pending_syscall.reset();
+      physical_tid = 0;
+    }
+    if (pending) ar(*pending_syscall);
   }
 };
 
 /* Thread creation record for tracking clone parameters */
 struct thread_create_info
 {
-  pid_t virtual_tid;  // Virtual TID (stable thread index + 1)
-  pid_t physical_tid; // Physical TID (actual kernel thread ID)
+  pid_t virtual_tid;     // Virtual TID (stable thread index + 1)
+  pid_t physical_tid;    // Physical TID (actual kernel thread ID)
   uint64_t clone_flags;
   uint64_t stack_addr;
   pid_t ptid;
@@ -119,7 +168,8 @@ struct thread_create_info
   template <class Archive>
   void serialize(Archive &ar)
   {
-    ar(virtual_tid, physical_tid, clone_flags, stack_addr, ptid);
+    ar(virtual_tid, clone_flags, stack_addr, ptid);
+    if constexpr (Archive::is_loading::value) physical_tid = 0;
   }
 };
 
@@ -143,45 +193,39 @@ struct thread_create_info
 typedef struct tracee_state
 {
   /* Last completed syscall information */
-  syscall_info si[MAX_THREADS_PER_PROCESS]; // Per-thread syscall info
+  syscall_info si[MAX_THREADS_PER_PROCESS];  // Per-thread syscall info
 
   uintptr_t brk;
   struct timeval tv;
   FileSystemState fs_state;
   SockState sock_state;
-
-  /* User-defined plugin state (opaque blob), saved/restored together with the
-   * rest of the tracee state. See core/user_state.h for the plugin contract. */
-  std::vector<uint8_t> user_state;
+  ProcessKernelState process_state;
 
   /* FdManager state - saved to preserve fd allocation state */
   FdManager fd_manager_state;
 
   /* Multi-threading support */
-  std::vector<thread_state> threads; // All thread states
-  std::vector<thread_create_info>
-      thread_create_records; // Thread creation history
-  pid_t main_tid;            // Main thread TID
-  int current_thread_idx;    // Currently selected thread index
+  std::vector<thread_state> threads;        // All thread states
+  std::vector<thread_create_info> thread_create_records;  // Thread creation history
+  pid_t main_tid;                           // Main thread TID
+  int current_thread_idx;                   // Currently selected thread index
 
   /* Futex state for thread synchronization */
-  struct FutexState
-      *futex_state; // Futex emulation state (pointer for lazy init)
+  std::optional<FutexState> futex_state;   // Branch-owned queues, keyed by virtual TID
 
   /* ---------------------------------------------------------
    * Thread Management Methods
    * --------------------------------------------------------- */
 
   // Add a new thread to this tracee's state
-  void add_thread(pid_t tid, uint64_t clone_flags, uint64_t stack, pid_t ptid,
-                  bool is_main = false);
+  void add_thread(pid_t tid, uint64_t clone_flags, uint64_t stack, pid_t ptid, bool is_main = false);
 
   // Remove a thread from this tracee's state
   void remove_thread(pid_t tid);
 
   // Find a thread by TID
-  thread_state *find_thread(pid_t tid);
-  const thread_state *find_thread(pid_t tid) const;
+  thread_state* find_thread(pid_t tid);
+  const thread_state* find_thread(pid_t tid) const;
 
   // Get the number of threads
   size_t thread_count() const { return threads.size(); }
@@ -194,17 +238,16 @@ typedef struct tracee_state
    * --------------------------------------------------------- */
 
   /* From running process */
-  tracee_state(int which,
-               const struct syscall_info info[]); // Per-thread syscall info
+  tracee_state(int which, const struct syscall_info info[]);  // Per-thread syscall info
 
   /* From saved state (hash) */
   tracee_state(hash_type hash);
 
   // Default constructor - value-initialize all members
   tracee_state()
-      : si{}, brk(0), tv{0, 0}, fs_state(), sock_state(), user_state(),
-        threads(), thread_create_records(), main_tid(0), current_thread_idx(0),
-        futex_state(nullptr)
+      : si{}, brk(0), tv{0, 0}, fs_state(), sock_state(),
+        threads(), thread_create_records(),
+        main_tid(0), current_thread_idx(0), futex_state()
   {
   }
 
@@ -221,6 +264,9 @@ typedef struct tracee_state
   // Explicit memory cleanup - call after copying to ptmc_state to free source
   void clear();
 
+  // Reject inconsistent captured descriptor/resource graphs before use.
+  void validate_io_state() const;
+
   // Equality comparison (for incremental save optimization)
   // Compares all metadata fields to detect state changes
   bool metadata_equal(const tracee_state &other) const;
@@ -230,35 +276,56 @@ typedef struct tracee_state
    * --------------------------------------------------------- */
 
   /* Full state save: memory, mappings, serialization */
-  hash_type save(int pid);
+  hash_type save(int pid, hash_type comparison_hash = 0);
 
   /* Capture memory and registers */
-  hash_type save_full_state_to_state_store(int pid);
+  hash_type save_full_state_to_state_store(int pid, hash_type comparison_hash = 0);
 
   /* ---------------------------------------------------------
    * State Recovery (disk -> struct -> running)
    * --------------------------------------------------------- */
 
   /* Main recovery entry */
+  tracee_state resolve_thread_bindings(int index, hash_type ts_hash) const;
   void recover_running_state(int index, hash_type ts_hash) const;
+  void restore_runtime_state(int index) const;
 
   /* Restore memory mappings for brk */
-  void restore_memory_mappings(hash_type ts_hash, int pid,
-                               std::vector<maps_item> &maps_out) const;
+  void restore_memory_mappings(hash_type ts_hash, int pid, std::vector<maps_item> &maps_out) const;
 
   /* Recover memory and registers */
-  void recover_mem_reg_snapshot(std::vector<maps_item> &maps, hash_type ts_hash,
-                                int pid) const;
+  void recover_mem_reg_snapshot(std::vector<maps_item> &maps, hash_type ts_hash, int pid) const;
 
   /* ---------------------------------------------------------
    * Thread Recovery Helpers
    * --------------------------------------------------------- */
-  private:
-  void terminate_extra_threads(pid_t main_pid, int threads_to_terminate) const;
-  void create_missing_threads(pid_t main_pid) const;
+private:
+  friend struct sys_state;
+  // Only the product operation may reuse a successful all-node stop barrier.
+  void prepare_capture(pid_t pid);
+  hash_type save_stopped(pid_t pid, hash_type comparison_hash);
+  hash_type capture_stopped(pid_t pid, hash_type comparison_hash);
+  void bind_threads_for_restore(int index, hash_type hash);
+  void recover_stopped(int index, hash_type hash) const;
+  // Restore bodies shared by the checked public APIs and recover_stopped().
+  // Only recover_stopped() reaches them without a per-process rseq probe: its
+  // callers already ran verify_thread_pool() on the affected owned carriers
+  // (one node from tracee_state::recover_running_state, every node from the
+  // sys_state all-node preflight) and keep all tasks stopped. Until restore
+  // completes, no guest code, thread creation/replacement, or rseq registration
+  // may run; only the existing fixed restore syscall injection and pending-EXIT
+  // syscall suppression are allowed. Parsing, validation, and every other check
+  // are identical to the public path; only the duplicate rseq enumeration is
+  // omitted. The public low-level APIs below always keep their own
+  // require_no_process_rseq() guard.
+  void restore_memory_mappings_unchecked(hash_type ts_hash, int pid,
+                                         std::vector<maps_item> &maps_out) const;
+  void recover_mem_reg_snapshot_unchecked(std::vector<maps_item> &maps,
+                                          hash_type ts_hash, int pid) const;
+  void restore_resources(int index) const;
   void restore_thread_registers(pid_t main_pid) const;
 
-  public:
+public:
   /* ---------------------------------------------------------
    * Serialization
    * --------------------------------------------------------- */
@@ -285,14 +352,19 @@ typedef struct tracee_state
  */
 typedef struct sys_state
 {
-  hash_type ss_hash;      // Global state hash (XOR of all ts_hash)
-  hash_type ts_hash[NP];  // Per-process state hashes
-  tracee_state child[NP]; // Per-process detailed state
-  int status[NP];         // Per-process status (running/exited/etc)
-  int error_bound = 5;    // Allowed deviation for approximate states
+  hash_type ss_hash;        // Ordered global semantic metadata identity
+  hash_type ts_hash[NP];    // Per-process state hashes
+  tracee_state child[NP];   // Per-process detailed state
+  int status[NP];           // Per-process status (running/exited/etc)
+  int error_bound = kInitialModelBudget;  // Runtime statistic; not identity.
+  bool property_failed = false; // Absorbing property-monitor failure state.
+  /* Opaque per-tracee shadow state supplied by the user's UserState plugin.
+   * Captured and restored with the checkpoint; part of state identity. */
+  std::array<std::vector<uint8_t>, NP> user_state{};
+  std::string model_identity; // Plugin/config/environment compatibility identity.
 
   // Default constructor - value-initialize all members
-  sys_state() : ss_hash(0), ts_hash{}, child{}, status{}, error_bound(4) {}
+  sys_state() : ss_hash(0), ts_hash{}, child{}, status{}, error_bound(kInitialModelBudget) {}
 
   // Copy control
   sys_state(const sys_state &other) = default;
@@ -303,8 +375,8 @@ typedef struct sys_state
   sys_state &operator=(sys_state &&other) noexcept = default;
 
   /* From running processes - save */
-  sys_state(const struct syscall_info
-                info[][MAX_THREADS_PER_PROCESS]); // Per-thread syscall info
+  sys_state(const struct syscall_info info[][MAX_THREADS_PER_PROCESS],
+            const sys_state *restored_source = nullptr, bool persist = true);  // Per-thread syscall info
 
   /* From saved state (hash) */
   sys_state(hash_type hash);
@@ -314,11 +386,14 @@ typedef struct sys_state
   // Explicit memory cleanup - call after copying to ptmc_state to free source
   void clear();
 
+
   /* ---------------------------------------------------------
    * Persistence
    * --------------------------------------------------------- */
 
   int save_metadata() const;
+  void commit_metadata();
+  hash_type identity_hash() const;
 
   /* ---------------------------------------------------------
    * Recovery
@@ -338,8 +413,9 @@ typedef struct sys_state
  * State Collections
  * ====================================================================== */
 
-/* State tree: child -> (parent, which, choose) */
-typedef std::unordered_map<hash_type, std::tuple<hash_type, int, int>> TSS;
+/* Runtime observation/search bookkeeping: child -> (parent, process, choice, actor slot). */
+typedef std::unordered_map<hash_type, std::tuple<hash_type, int, int, int>> TSS;
+extern TSS state_tree;
 
 /* State queue (BFS exploration) */
 typedef std::deque<hash_type> LSS;
@@ -364,6 +440,8 @@ void state_tree_add(const sys_state &s, sys_state &t, int which, int choose);
  * History Display
  * ====================================================================== */
 
+extern bool syscall_history_enabled;
+void show_syscall_current();
 void show_syscall_history();
 void show_syscall(int pid, hash_type ts_hash);
 
@@ -384,6 +462,29 @@ bool mapping_exists(maps_item &a, std::vector<maps_item> &array);
 /* ======================================================================
  * Statistics
  * ====================================================================== */
+
+namespace detsim {
+
+/* Opt-in capture-layout memoization counters. Layouts contain only text-derived
+ * metadata; no kernel state or captured bytes are cached. */
+struct CaptureLayoutCacheStats
+{
+  uint64_t lookups = 0;
+  uint64_t hits = 0;
+  uint64_t misses = 0;
+  uint64_t builds = 0;
+  uint64_t admits = 0;
+  uint64_t evictions = 0;
+  uint64_t oversize = 0;
+  uint64_t verify_checks = 0;
+  uint64_t verify_mismatches = 0;
+  size_t entries = 0;
+};
+
+CaptureLayoutCacheStats capture_layout_cache_stats();
+void clear_capture_layout_cache();
+
+} // namespace detsim
 
 /* ======================================================================
  * Global Cleanup

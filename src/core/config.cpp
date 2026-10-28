@@ -4,24 +4,35 @@
  */
 
 #include "config.h"
+#include <charconv>
+#include <sched.h>
 #include "common.h"
 #include "debug.h"
+#include "net/emu.h"
 #include "fs/fsstate.h"
 #include "guest.h"
 #include "monitor.h"
-#include "net/emu.h"
 #include "state/state_store.h"
-#include "syscall/ckpt_policy.h"
-#include "user_state.h"
-#include <dlfcn.h>
+#include "user_plugin.h"
+#include "runtime_profile.h"
 #include <filesystem>
+#include <limits>
+#include <new>
 #include <fstream>
+#include <array>
+#include <algorithm>
+#include <memory>
+#include <xxhash.h>
 #include <getopt.h>
 #include <iostream>
 #include <libgen.h>
 #include <limits.h>
 #include <nlohmann/json.hpp>
-#include <wait.h>
+#include <sys/syscall.h>
+#include <stdexcept>
+#include <cerrno>
+#include <cstdlib>
+#include <fcntl.h>
 
 namespace fs = std::filesystem;
 using json = nlohmann::json;
@@ -33,6 +44,12 @@ FILE *log_fp = NULL;
 int auto_mode = 0;
 int use_ui = 1; // Default to using UI
 char *batch_file = NULL;
+int worker_control_fd = -1;
+int worker_blob_fd = -1;
+std::string tracee_native_cwd;
+int worker_io_timeout_ms = 30000;
+int worker_host_cpu = -1;
+std::string worker_shared_pool_path;
 
 bool should_log(int level) { return level >= loglevel; }
 
@@ -94,8 +111,11 @@ static void parse_tracees(const json &cfg, const fs::path &cfg_dir)
   for (int i = 0; i < nodes; i++)
   {
     auto argv_json = tracees[i];
-    Assert(argv_json.is_array() && argv_json.size() <= 5,
-           "Tracee %d: invalid arguments (max 5 supported)", i);
+    if (!argv_json.is_array() || argv_json.empty() ||
+        argv_json.size() > static_cast<size_t>(std::numeric_limits<int>::max()))
+      throw std::runtime_error("Tracee " + std::to_string(i) + ": invalid arguments");
+
+    ptmc_state.tracee[i].argv.assign(argv_json.size() + 1, nullptr);
 
     ptmc_state.tracee[i].argc = static_cast<int>(argv_json.size());
 
@@ -111,6 +131,7 @@ static void parse_tracees(const json &cfg, const fs::path &cfg_dir)
 
       // Store the string persistently
       char *stored = static_cast<char *>(malloc(arg_str.length() + 1));
+      if (!stored) throw std::bad_alloc();
       strcpy(stored, arg_str.c_str());
       ptmc_state.tracee[i].argv[j] = stored;
     }
@@ -162,28 +183,7 @@ static void parse_fsmap(const json &cfg, const fs::path &cfg_dir)
       ptmc_state.fs_states[i].init_from_mappings(mappings);
     }
     ptmc_state.fs_states[i].set_cwd(workdir);
-  }
-}
-
-/* Parse device configuration */
-static void parse_devices(const json &cfg)
-{
-  auto devices = cfg.value("Device", json::array());
-  LOG_DEBUG("Loading %zu devices", devices.size());
-
-  for (const auto &device : devices)
-  {
-    Assert(device.contains("Path") && device.contains("Type"),
-           "Device entries must contain Path and Type");
-
-    std::string path = device["Path"].get<std::string>();
-    std::string type = device["Type"].get<std::string>();
-    LOG_DEBUG("  Device: path=%s type=%s", path.c_str(), type.c_str());
-
-    for (int i = 0; i < NP; i++)
-    {
-      ptmc_state.fs_states[i].register_device(path, type);
-    }
+    ptmc_state.fs_states[i].capture_executable(ptmc_state.tracee[i].executable);
   }
 }
 
@@ -201,102 +201,26 @@ static void parse_assertions(const json &cfg)
   }
 }
 
-/* Compile .cpp to .so if needed, return path to .so */
-static std::string compile_plugin_if_needed(const std::string &src_path,
-                                            const std::string &default_name)
+/* User plugins keep the historical source/hook contract: UserCheck and
+ * UserState name a C/C++ file (or .so) exporting check() and optional
+ * user_state_* hooks, ChooseFunc names a file exporting choose_<syscall>. */
+static void parse_user_plugins(const json &cfg, const fs::path &cfg_dir)
 {
-  // If already a .so file, use it directly
-  if (src_path.size() > 3 && src_path.substr(src_path.size() - 3) == ".so")
-  {
-    LOG_INFO("Loading plugin %s", src_path.c_str());
-    return src_path;
-  }
-
-  // Compile .cpp to .so
-  fs::path src(src_path);
-  std::string obj_name = "./" + src.stem().string() + ".so";
-
-  LOG_INFO("Compiling %s -> %s", src_path.c_str(), obj_name.c_str());
-
-  if (access(obj_name.c_str(), R_OK | X_OK) != 0)
-  {
-    int pid = vfork();
-    if (pid == 0)
-    {
-      char arg_d[16];
-      snprintf(arg_d, sizeof(arg_d), "-DNP=%d", NP);
-      execlp("g++", "g++", "-O2", arg_d, "-fpic", "-shared", "-I.", "-Isrc",
-             "-Isrc/core", "-Isrc/utils", "-Isrc/subsys", src_path.c_str(),
-             "-o", obj_name.c_str(), nullptr);
-      perror("exec");
-      _exit(1);
-    }
-    else
-    {
-      waitpid(pid, nullptr, 0);
-    }
-  }
-
-  return obj_name;
-}
-
-/* Parse and load user check plugin */
-static void parse_user_check(const json &cfg, const fs::path &cfg_dir)
-{
-  if (!cfg.contains("UserCheck"))
-    return;
-
-  std::string src = cfg["UserCheck"].get<std::string>();
-  std::string src_path = resolve_path(src, cfg_dir);
-  std::string obj_path = compile_plugin_if_needed(src_path, "check");
-
-  void *handle = dlopen(obj_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
-  if (!handle)
-  {
-    panic("%s", dlerror());
-  }
-
-  auto *func = reinterpret_cast<int (*)()>(dlsym(handle, "check"));
-  ptmc_state.user_checks.push_back(func);
-  LOG_INFO("User check plugin loaded");
-}
-
-/* Parse and load user-defined state plugin.
- *
- * Unlike UserCheck, this plugin owns extra state that DetSim snapshots and
- * restores together with each tracee's state.  The plugin exports the
- * optional hooks declared in core/user_state.h.
- */
-static void parse_user_state(const json &cfg, const fs::path &cfg_dir)
-{
-  if (!cfg.contains("UserState"))
-    return;
-
-  std::string src = cfg["UserState"].get<std::string>();
-  std::string src_path = resolve_path(src, cfg_dir);
-  std::string obj_path = compile_plugin_if_needed(src_path, "user_state");
-
-  void *handle = dlopen(obj_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
-  if (!handle)
-  {
-    panic("%s", dlerror());
-  }
-
-  auto *size_fn =
-      reinterpret_cast<int (*)(int)>(dlsym(handle, "user_state_size"));
-  auto *save_fn =
-      reinterpret_cast<void (*)(int, void *)>(dlsym(handle, "user_state_save"));
-  auto *load_fn = reinterpret_cast<void (*)(int, const void *, int)>(
-      dlsym(handle, "user_state_load"));
-
-  if (!size_fn || !save_fn)
-  {
-    LOG_ERROR("UserState plugin %s does not export user_state_size/save",
-              obj_path.c_str());
-  }
-
-  detsim::user_state::install(size_fn, save_fn, load_fn);
-  LOG_INFO("User state plugin loaded");
+  auto optional = [&](const char *key) {
+    if (!cfg.contains(key)) return std::string{};
+    if (!cfg[key].is_string()) throw std::runtime_error(std::string(key) + " must be a path string");
+    return cfg[key].get<std::string>();
+  };
+  const std::string check = optional("UserCheck");
+  const std::string state = optional("UserState");
+  const std::string choose = optional("ChooseFunc");
+  const std::string directory = cfg_dir.string();
+  detsim::user_plugin::configure(check.empty() ? nullptr : check.c_str(),
+      state.empty() ? nullptr : state.c_str(),
+      choose.empty() ? nullptr : choose.c_str(), directory.c_str());
+  const std::string legacy = cfg.value("Plugins", json::array()).empty() ? "" : "Plugins";
+  if (!legacy.empty())
+    LOG_WARN("Plugins entries use the internal plugin ABI and are not loaded by this build");
 }
 
 /* Parse choose points */
@@ -335,82 +259,12 @@ static void parse_choose_points(const json &cfg)
 
     if (nr >= 0 && cp.contains("choose"))
     {
-      choose_many[nr] = cp["choose"].get<int>();
+      int count = cp["choose"].get<int>();
+      if (nr != SYS_gettimeofday || count < 0 || count > 1024)
+        throw std::runtime_error("ChoosePoint supports only gettimeofday with 0..1024 choices");
+      choose_many[nr] = count;
     }
   }
-}
-
-/* Parse checkpoint policy configuration.
- *
- * Format (list of syscall names or numbers to set CKPT_YES):
- *   "Checkpoint": ["read", "write", "sendto", "recvfrom"]
- */
-static void parse_ckpt(const json &cfg)
-{
-  auto ckpt_list = cfg.value("Checkpoint", json::array());
-  LOG_DEBUG("Loading %zu checkpoint syscalls", ckpt_list.size());
-
-  for (const auto &entry : ckpt_list)
-  {
-    int nr = -1;
-
-    if (entry.is_number())
-    {
-      nr = entry.get<int>();
-    }
-    else if (entry.is_string())
-    {
-      std::string syscall_name = entry.get<std::string>();
-      nr = g_ckpt_policy.resolve_syscall(syscall_name.c_str());
-      if (nr < 0)
-      {
-        LOG_ERROR("Unknown syscall name in Checkpoint: %s",
-                  syscall_name.c_str());
-        continue;
-      }
-    }
-    else
-    {
-      LOG_ERROR("Invalid Checkpoint entry (must be syscall number or name)");
-      continue;
-    }
-
-    if (nr >= 0 && nr < CKPT_MAX_SYSCALLS)
-    {
-      g_ckpt_policy.config_set_yes(nr);
-      LOG_DEBUG("  Checkpoint: syscall %d set to CKPT_YES", nr);
-    }
-  }
-}
-
-/* Parse and load choose function plugin */
-static void parse_choose_function(const json &cfg, const fs::path &cfg_dir)
-{
-  if (!cfg.contains("ChooseFunc"))
-    return;
-
-  std::string src = cfg["ChooseFunc"].get<std::string>();
-  std::string src_path = resolve_path(src, cfg_dir);
-  std::string obj_path = compile_plugin_if_needed(src_path, "choose");
-
-  void *handle = dlopen(obj_path.c_str(), RTLD_LAZY | RTLD_LOCAL);
-  if (!handle)
-  {
-    panic("%s", dlerror());
-  }
-
-  for (int nr = 0; nr < 450; nr++)
-  {
-    if (syscalls[nr] == nullptr)
-      continue;
-
-    char funcname[64];
-    snprintf(funcname, sizeof(funcname), "choose_%s", syscalls[nr]);
-    auto *func = reinterpret_cast<choose_func>(dlsym(handle, funcname));
-    choose_syswhat[nr] = func;
-  }
-
-  LOG_INFO("Choose function plugin loaded");
 }
 
 /* Parse StateStore configuration */
@@ -442,15 +296,10 @@ static void parse_statestore_config(const json &cfg)
   {
     ss_config.compression_level = ss["compression_level"].get<int>();
   }
-  if (ss.contains("enable_malloc_trim"))
-  {
-    ss_config.enable_malloc_trim = ss["enable_malloc_trim"].get<bool>();
-  }
-  if (ss.contains("malloc_trim_threshold_mb"))
-  {
-    ss_config.malloc_trim_threshold =
-        ss["malloc_trim_threshold_mb"].get<size_t>() * 1024 * 1024;
-  }
+  if (ss.contains("enable_malloc_trim") || ss.contains("malloc_trim_threshold_mb"))
+    LOG_WARN("StateStore malloc-trim options are obsolete and ignored");
+  if (ss.contains("max_pending_bytes"))
+    ss_config.max_pending_bytes = ss["max_pending_bytes"].get<size_t>();
   if (ss.contains("packed_storage_path"))
   {
     ss_config.packed_storage_path =
@@ -459,10 +308,10 @@ static void parse_statestore_config(const json &cfg)
 
   StateStore::instance().init(ss_config);
   LOG_INFO(
-      "StateStore configured: hot=%zuMB, warm=%zuMB, prefetch=%zu, trim=%s",
+      "StateStore configured: hot=%zuMB, warm=%zuMB, prefetch=%zu, pending_limit=%zu bytes",
       ss_config.hot_cache_size / (1024 * 1024),
       ss_config.warm_cache_size / (1024 * 1024), ss_config.prefetch_window,
-      ss_config.enable_malloc_trim ? "on" : "off");
+      ss_config.max_pending_bytes);
 }
 
 void read_config(const char *cfg_file)
@@ -481,19 +330,71 @@ void read_config(const char *cfg_file)
   // Parse all sections
   parse_tracees(cfg, cfg_dir);
   parse_addrs(cfg);
-  parse_devices(cfg);
   parse_fsmap(cfg, cfg_dir);
   parse_assertions(cfg);
-  parse_user_check(cfg, cfg_dir);
-  parse_user_state(cfg, cfg_dir);
+  detsim::configure_runtime_profile(cfg.value("RuntimeProfile", json::object()));
+  parse_user_plugins(cfg, cfg_dir);
   parse_choose_points(cfg);
-  parse_choose_function(cfg, cfg_dir);
-  parse_ckpt(cfg);
+
+  // Search compatibility includes semantic configuration, not cache sizes or UI.
+  // Resolve paths and fingerprint each executable once, outside exploration.
+  json model = {{"Nodes", NP}, {"WorkingDir", cfg.value("WorkingDir", "/")}};
+  std::map<std::string, uint64_t> binaries;
+  model["Tracee"] = json::array();
+  for (int node = 0; node < NP; ++node)
+  {
+    json arguments = json::array();
+    for (int arg = 0; arg < ptmc_state.tracee[node].argc; ++arg)
+      arguments.push_back(arg ? std::string(ptmc_state.tracee[node].argv[arg]) :
+        fs::absolute(ptmc_state.tracee[node].argv[arg]).lexically_normal().string());
+    std::string executable = arguments.at(0).get<std::string>();
+    if (!binaries.count(executable))
+    {
+      std::ifstream binary(executable, std::ios::binary);
+      if (!binary) throw std::runtime_error("Cannot fingerprint executable: " + executable);
+      auto raw = XXH64_createState();
+      if (!raw) throw std::bad_alloc();
+      std::unique_ptr<XXH64_state_t, decltype(&XXH64_freeState)> hash(raw, XXH64_freeState);
+      XXH64_reset(hash.get(), 0);
+      std::array<char, 65536> buffer;
+      while (binary)
+      {
+        binary.read(buffer.data(), buffer.size());
+        XXH64_update(hash.get(), buffer.data(), static_cast<size_t>(binary.gcount()));
+      }
+      if (!binary.eof()) throw std::runtime_error("Cannot fingerprint executable: " + executable);
+      binaries.emplace(executable, XXH64_digest(hash.get()));
+    }
+    model["Tracee"].push_back({{"argv", arguments}, {"binary", binaries.at(executable)}});
+  }
+  model["Addr"] = json::array();
+  for (int node = 0; node < NP; ++node) model["Addr"].push_back(ptmc_state.addrs[node]);
+  model["FSMap"] = cfg.value("FSMap", json::array());
+  for (auto &mapping : model["FSMap"])
+    if (mapping.contains("Host")) mapping["Host"] = fs::absolute(resolve_path(mapping.at("Host").get<std::string>(), cfg_dir)).lexically_normal().string();
+  model["Choices"] = json::object();
+  for (int nr = 0; nr < 450; ++nr)
+    if (choose_many[nr]) model["Choices"][std::to_string(nr)] = choose_many[nr];
+  std::vector<std::string> assertions(ptmc_state.assertions.begin(), ptmc_state.assertions.end());
+  std::sort(assertions.begin(), assertions.end());
+  model["Assertions"] = assertions;
+  /* The user plugin set is part of the execution model: its hooks change the
+   * enumerated choices and the properties observed on each state. */
+  model["user_plugins"] = cfg.value("UserCheck", std::string{}) + "|" +
+      cfg.value("UserState", std::string{}) + "|" + cfg.value("ChooseFunc", std::string{});
+  model["runtime"] = detsim::runtime_profile_identity();
+  const auto canonical = model.dump();
+  char identity[40];
+  snprintf(identity, sizeof(identity), "detsim-model-v1:%016llx",
+    static_cast<unsigned long long>(XXH64(canonical.data(), canonical.size(), 0)));
+  ptmc_state.model_identity = identity;
   parse_statestore_config(cfg);
 }
 
 void parse_args(int argc, char *argv[])
 {
+  /* The numeric entries are the coordinator's internal worker options; they are
+   * not advertised in the usage text. */
   const struct option table[] = {
       {"auto", no_argument, nullptr, 'a'},
       {"no-ui", no_argument, nullptr, 'n'},
@@ -501,6 +402,12 @@ void parse_args(int argc, char *argv[])
       {"log", required_argument, nullptr, 'l'},
       {"help", no_argument, nullptr, 'h'},
       {"cfg", required_argument, nullptr, 'c'},
+      {"worker-fd", required_argument, nullptr, 1000},
+      {"worker-blob-fd", required_argument, nullptr, 1003},
+      {"target-cwd", required_argument, nullptr, 1001},
+      {"worker-io-timeout-ms", required_argument, nullptr, 1002},
+      {"worker-shared-pool", required_argument, nullptr, 1004},
+      {"worker-host-cpu", required_argument, nullptr, 1005},
       {0, 0, nullptr, 0},
   };
 
@@ -524,6 +431,48 @@ void parse_args(int argc, char *argv[])
       case 'c':
         cfg_file = optarg;
         break;
+      case 1005: {
+        int cpu = -1;
+        const std::string text(optarg);
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), cpu);
+        if (worker_host_cpu >= 0 || text.empty() || parsed.ec != std::errc{} ||
+            parsed.ptr != text.data() + text.size() || cpu < 0 || cpu >= CPU_SETSIZE)
+          throw std::runtime_error("Invalid internal worker host CPU");
+        worker_host_cpu = cpu;
+        break;
+      }
+      case 1004:
+        if (!worker_shared_pool_path.empty() || !fs::path(optarg).is_absolute())
+          throw std::runtime_error("Worker shared pool must be an absolute path");
+        worker_shared_pool_path = optarg;
+        break;
+      case 1001:
+        if (!tracee_native_cwd.empty() || !fs::path(optarg).is_absolute())
+          throw std::runtime_error("Native target cwd must be an absolute path");
+        tracee_native_cwd = optarg;
+        break;
+      case 1002: {
+        char* end = nullptr; errno = 0;
+        const long timeout = std::strtol(optarg, &end, 10);
+        if (errno || !end || *end || end == optarg || timeout <= 0 || timeout > INT_MAX)
+          throw std::runtime_error("Invalid internal worker frame timeout");
+        worker_io_timeout_ms = static_cast<int>(timeout);
+        break;
+      }
+      case 1003:
+      case 1000: {
+        int& selected_fd = o == 1000 ? worker_control_fd : worker_blob_fd;
+        char* end = nullptr;
+        errno = 0;
+        const long descriptor = std::strtol(optarg, &end, 10);
+        if (errno || !end || *end || end == optarg || descriptor < 3 || descriptor > INT_MAX || selected_fd >= 0)
+          throw std::runtime_error("Invalid internal worker descriptor");
+        const int flags = fcntl(static_cast<int>(descriptor), F_GETFD);
+        if (flags < 0 || fcntl(static_cast<int>(descriptor), F_SETFD, flags | FD_CLOEXEC) < 0)
+          throw std::runtime_error("Cannot protect worker control descriptor from tracee exec");
+        selected_fd = static_cast<int>(descriptor);
+        break;
+      }
       default:
         printf("Usage: %s [OPTION...]\n\n", argv[0]);
         printf("\t-a,--auto               run with auto mode\n");
@@ -535,12 +484,24 @@ void parse_args(int argc, char *argv[])
         exit(0);
     }
   }
+  if (worker_blob_fd >= 0 && (worker_control_fd < 0 || worker_control_fd == worker_blob_fd))
+    throw std::runtime_error("Internal object descriptor requires a distinct worker control descriptor");
+  if (worker_host_cpu >= 0 && worker_control_fd < 0)
+    throw std::runtime_error("Internal host CPU requires worker mode");
+  if (!worker_shared_pool_path.empty() && worker_control_fd < 0)
+    throw std::runtime_error("Internal shared pool requires worker mode");
+  if (worker_control_fd >= 0) {
+    if (auto_mode || batch_file)
+      throw std::runtime_error("Internal worker mode cannot run auto/batch commands");
+    use_ui = 0;
+  }
 }
 
 int is_auto_mode() { return auto_mode; }
 
 void cleanup_config()
 {
+  detsim::user_plugin::reset();
   for (int i = 0; i < NP; i++)
   {
     for (int j = 0; j < ptmc_state.tracee[i].argc; j++)
@@ -551,6 +512,7 @@ void cleanup_config()
         ptmc_state.tracee[i].argv[j] = nullptr;
       }
     }
+    ptmc_state.tracee[i].argv.clear();
     ptmc_state.tracee[i].argc = 0;
     ptmc_state.tracee[i].executable = nullptr;
   }

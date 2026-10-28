@@ -1,4 +1,7 @@
 {
+  "RuntimeProfile": {
+    "startup_syscall": 10
+  },
   "Loglevel": 2,
   "Nodes": 3,
   "Tracee": [
@@ -11,9 +14,6 @@
   "SharedFiles": [],
   "ChoosePoint": [
     {"syscall":"gettimeofday", "choose": 2}
-  ],
-  "Checkpoint": [
-    "recvfrom", "gettimeofday"
   ],
   "ChooseFunc": "plugins/choose.so"
 }

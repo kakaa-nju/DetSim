@@ -6,10 +6,30 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <variant>
 
 struct type_info;
+
+namespace detsim {
+// Lookup borrowed expressions without allocating; cache entries still own strings.
+struct ExpressionStringHash {
+  using is_transparent = void;
+  size_t operator()(std::string_view value) const noexcept {
+    return std::hash<std::string_view>{}(value);
+  }
+};
+// Explicit logical process context for immutable observations.
+struct ExpressionObservation {
+  virtual ~ExpressionObservation() = default;
+  virtual size_t process_count() const = 0;
+  virtual void require_symbols(size_t node) const = 0;
+  virtual void require_symbol_address(size_t node, uint64_t address) const = 0;
+  virtual void read(size_t node, uint64_t address, void* output, size_t length) const = 0;
+};
+int64_t evaluate_observation(const ExpressionObservation&, size_t node, std::string_view);
+}
 
 /* Evaluation result: can be a value or an address */
 struct EvalResult
@@ -48,6 +68,7 @@ class ExprNode
   virtual EvalResult eval(int pid, bool &success) const = 0;
   virtual EvalResult eval_address(int pid, bool &success) const;
   virtual std::string to_string() const = 0;
+  virtual bool is_read_only() const { return true; }
 
   /* Get target process ID for process-qualified expressions (traceeN())
    * Returns -1 if not a process-qualified expression
@@ -121,6 +142,7 @@ class BinaryOpNode : public ExprNode
   ExprPtr left_, right_;
 
   public:
+  bool is_read_only() const override { return left_->is_read_only() && right_->is_read_only(); }
   BinaryOpNode(BinaryOp op, ExprNode *l, ExprNode *r)
       : op_(op), left_(l), right_(r)
   {
@@ -143,6 +165,7 @@ class UnaryOpNode : public ExprNode
   ExprPtr operand_;
 
   public:
+  bool is_read_only() const override { return operand_->is_read_only(); }
   UnaryOpNode(UnaryOp op, ExprNode *opnd) : op_(op), operand_(opnd) {}
   EvalResult eval(int pid, bool &success) const override;
   std::string to_string() const override;
@@ -161,6 +184,7 @@ class PrefixOpNode : public ExprNode
   ExprPtr operand_;
 
   public:
+  bool is_read_only() const override { return false; }
   PrefixOpNode(PrefixOp op, ExprNode *opnd) : op_(op), operand_(opnd) {}
   EvalResult eval(int pid, bool &success) const override;
   std::string to_string() const override;
@@ -179,6 +203,7 @@ class PostfixOpNode : public ExprNode
   ExprPtr operand_;
 
   public:
+  bool is_read_only() const override { return false; }
   PostfixOpNode(PostfixOp op, ExprNode *opnd) : op_(op), operand_(opnd) {}
   EvalResult eval(int pid, bool &success) const override;
   std::string to_string() const override;
@@ -200,11 +225,13 @@ class MemberAccessNode : public ExprNode
   mutable std::string cached_base_type_;
   mutable std::string cached_member_type_;
   mutable bool offset_computed_;
+  mutable uint64_t cached_symbol_generation_ = 0;
 
   public:
+  bool is_read_only() const override { return object_->is_read_only(); }
   MemberAccessNode(MemberOp op, ExprNode *obj, const std::string &mem)
       : op_(op), object_(obj), member_(mem), cached_offset_(-1),
-        offset_computed_(false), cached_base_type_(), cached_member_type_()
+        cached_base_type_(), cached_member_type_(), offset_computed_(false)
   {
   }
   EvalResult eval(int pid, bool &success) const override;
@@ -219,6 +246,7 @@ class ArrayIndexNode : public ExprNode
   ExprPtr index_;
 
   public:
+  bool is_read_only() const override { return array_->is_read_only() && index_->is_read_only(); }
   ArrayIndexNode(ExprNode *arr, ExprNode *idx) : array_(arr), index_(idx) {}
   EvalResult eval(int pid, bool &success) const override;
   EvalResult eval_address(int pid, bool &success) const override;
@@ -231,6 +259,7 @@ class AddressOfNode : public ExprNode
   ExprPtr operand_;
 
   public:
+  bool is_read_only() const override { return operand_->is_read_only(); }
   explicit AddressOfNode(ExprNode *opnd) : operand_(opnd) {}
   EvalResult eval(int pid, bool &success) const override;
   std::string to_string() const override;
@@ -242,6 +271,7 @@ class DereferenceNode : public ExprNode
   ExprPtr operand_;
 
   public:
+  bool is_read_only() const override { return operand_->is_read_only(); }
   explicit DereferenceNode(ExprNode *opnd) : operand_(opnd) {}
   EvalResult eval(int pid, bool &success) const override;
   EvalResult eval_address(int pid, bool &success) const override;
@@ -254,6 +284,7 @@ class ConditionalNode : public ExprNode
   ExprPtr cond_, then_, else_;
 
   public:
+  bool is_read_only() const override { return cond_->is_read_only() && then_->is_read_only() && else_->is_read_only(); }
   ConditionalNode(ExprNode *c, ExprNode *t, ExprNode *e)
       : cond_(c), then_(t), else_(e)
   {
@@ -268,6 +299,7 @@ class AssignNode : public ExprNode
   ExprPtr left_, right_;
 
   public:
+  bool is_read_only() const override { return false; }
   AssignNode(ExprNode *l, ExprNode *r) : left_(l), right_(r) {}
   EvalResult eval(int pid, bool &success) const override;
   std::string to_string() const override;
@@ -279,6 +311,7 @@ class CastNode : public ExprNode
   ExprPtr type_, operand_;
 
   public:
+  bool is_read_only() const override { return type_->is_read_only() && operand_->is_read_only(); }
   CastNode(ExprNode *t, ExprNode *op) : type_(t), operand_(op) {}
   EvalResult eval(int pid, bool &success) const override;
   std::string to_string() const override;
@@ -290,6 +323,7 @@ class SizeofExprNode : public ExprNode
   ExprPtr operand_;
 
   public:
+  bool is_read_only() const override { return operand_->is_read_only(); }
   explicit SizeofExprNode(ExprNode *opnd) : operand_(opnd) {}
   EvalResult eval(int pid, bool &success) const override;
   std::string to_string() const override;
@@ -327,6 +361,7 @@ class TypeofNode : public ExprNode
   ExprPtr operand_;
 
   public:
+  bool is_read_only() const override { return operand_->is_read_only(); }
   explicit TypeofNode(ExprNode *opnd) : operand_(opnd) {}
   EvalResult eval(int pid, bool &success) const override;
   std::string to_string() const override;
@@ -340,6 +375,7 @@ class ProcessQualifiedNode : public ExprNode
   ExprPtr expr_;
 
   public:
+  bool is_read_only() const override { return expr_->is_read_only(); }
   ProcessQualifiedNode(int pid, ExprNode *e) : proc_id_(pid), expr_(e) {}
   int get_proc_id() const { return proc_id_; }
   int get_target_pid() const override;
@@ -368,13 +404,14 @@ class ExprCache
 {
   public:
   static ExprCache &instance();
-  std::shared_ptr<ExprNode> get(const std::string &expr);
+  std::shared_ptr<ExprNode> get(std::string_view expr);
   void clear();
   size_t size() const;
 
   private:
   ExprCache() = default;
-  std::unordered_map<std::string, std::shared_ptr<ExprNode>> cache_;
+  std::unordered_map<std::string, std::shared_ptr<ExprNode>,
+                     detsim::ExpressionStringHash, std::equal_to<>> cache_;
   mutable std::mutex mutex_;
   static constexpr size_t MAX_CACHE_SIZE = 1024;
 };

@@ -1,29 +1,148 @@
 #include "fsstate.h"
 #include "cereal/archives/binary.hpp"
 #include "cereal/cereal.hpp"
-#include "cereal/types/deque.hpp"
 #include "cereal/types/map.hpp"
+#include "cereal/types/deque.hpp"
 #include "cereal/types/string.hpp"
 #include "cereal/types/utility.hpp"
 #include "cereal/types/vector.hpp"
 #include "debug.h"
 #include "monitor.h"
-#include "sockstate.h"
-#include "ui/log_wrapper.h"
+#include "guest.h"
+#include "io.h"
+#include "state_store.h"
+#include "utils.h"
+#include <mutex>
 #include <algorithm>
-#include <cctype>
 #include <cstring>
 #include <ctime>
 #include <dirent.h>
 #include <fcntl.h>
 #include <fstream>
+#include <filesystem>
+#include <unistd.h>
 #include <iostream>
+#include <limits>
+#include <climits>
 #include <libgen.h>
 #include <string.h>
-#include <sys/mman.h>
-#include <sys/select.h>
 #include <sys/types.h>
 #include <time.h>
+
+static timespec modeled_fs_time()
+{
+  const int node = ptmc_state.cursor;
+  return node >= 0 && node < NP
+      ? timespec{ptmc_state.time[node].tv_sec, ptmc_state.time[node].tv_usec * 1000}
+      : timespec{};
+}
+
+namespace {
+thread_local bool external_file_content = false;
+constexpr size_t external_file_content_threshold = 4096;
+}
+
+FileContentSnapshotScope::FileContentSnapshotScope() : previous_(external_file_content) {
+  external_file_content = true;
+}
+FileContentSnapshotScope::~FileContentSnapshotScope() { external_file_content = previous_; }
+
+struct FileContent::Payload {
+  std::vector<uint8_t> owned;
+  std::shared_ptr<const std::vector<uint8_t>> restored;
+  std::mutex registration_mutex;
+  hash_type key = 0;
+  uint64_t generation = 0;
+};
+uint64_t FileContent::saved_blob_key() const {
+  if (!payload_) return 0;
+  std::lock_guard lock(payload_->registration_mutex);
+  return payload_->key;
+}
+const std::vector<uint8_t>& FileContent::bytes() const {
+  static const std::vector<uint8_t> empty;
+  return !payload_ ? empty : payload_->restored ? *payload_->restored : payload_->owned;
+}
+void FileContent::replace(std::vector<uint8_t> bytes) {
+  auto next = std::make_shared<Payload>();
+  next->owned = std::move(bytes);
+  payload_ = std::move(next);
+}
+std::vector<uint8_t>& FileContent::writable() {
+  if (!payload_ || !payload_.unique() || payload_->restored)
+    replace(bytes());
+  payload_->key = 0;
+  payload_->generation = 0;
+  return payload_->owned;
+}
+void FileContent::write(size_t offset, const void* source, size_t count) {
+  if (!count) return;
+  if (count > std::numeric_limits<size_t>::max() - offset)
+    throw std::length_error("Virtual file write extent overflow");
+  if (!source) throw std::invalid_argument("Null virtual file write source");
+  // Keep an aliased read view alive if the source came from this payload.
+  const auto* start = static_cast<const char*>(source);
+  const bool aliases = std::less_equal<const char*>{}(data(), start) &&
+      std::less<const char*>{}(start, end());
+  auto retained = aliases ? payload_ : nullptr;
+  auto& destination = writable();
+  if (offset + count > destination.size()) destination.resize(offset + count);
+  memcpy(destination.data() + offset, source, count);
+}
+template<class Archive> void FileContent::save(Archive& ar) const {
+  const uint8_t tag = external_file_content && size() >= external_file_content_threshold ? 1 : 0;
+  ar(tag);
+  if (!tag) { ar(bytes()); return; }
+  auto& store = StateStore::instance();
+  std::lock_guard lock(payload_->registration_mutex);
+  // Readiness must be checked even when an immutable registration is cached.
+  const uint64_t generation = store.snapshot_generation();
+  if (payload_->generation != generation || !payload_->key) {
+    const hash_type key = store.save(data(), size());
+    if (store.snapshot_generation() != generation)
+      throw std::runtime_error("Store changed while saving virtual file content");
+    payload_->key = key;
+    payload_->generation = generation;
+  }
+  const uint64_t length = size();
+  ar(length, payload_->key);
+}
+template<class Archive> void FileContent::load(Archive& ar) {
+  uint8_t tag;
+  ar(tag);
+  if (!tag) {
+    std::vector<uint8_t> value;
+    ar(value);
+    replace(std::move(value));
+    return;
+  }
+  if (tag != 1) throw std::runtime_error("Invalid virtual file content tag");
+  uint64_t length;
+  hash_type key;
+  ar(length, key);
+  if (length < external_file_content_threshold || !key)
+    throw std::runtime_error("Invalid virtual file content reference");
+  auto& store = StateStore::instance();
+  const uint64_t generation = store.snapshot_generation();
+  auto value = store.load_shared(key);
+  if (!value || value->size() != length)
+    throw std::runtime_error("Missing or invalid virtual file content");
+  if (store.snapshot_generation() != generation)
+    throw std::runtime_error("Store changed while loading virtual file content");
+  auto next = std::make_shared<Payload>();
+  next->restored = std::move(value);
+  next->key = key;
+  next->generation = generation;
+  payload_ = std::move(next);
+}
+template void FileContent::save<cereal::BinaryOutputArchive>(cereal::BinaryOutputArchive&) const;
+template void FileContent::load<cereal::BinaryInputArchive>(cereal::BinaryInputArchive&);
+
+static constexpr uint64_t guest_inode_limit = uint64_t(1) << 63;
+static uint64_t initial_vfs_inode(const std::string& path)
+{
+  return XXHash64::hash(path.data(), path.size()) | guest_inode_limit;
+}
 
 /* --- Serialization Implementations --- */
 
@@ -37,59 +156,160 @@ void VFSNode::serialize(Archive &ar)
      CEREAL_NVP(metadata.st_gid), CEREAL_NVP(metadata.st_rdev),
      CEREAL_NVP(metadata.st_size), CEREAL_NVP(metadata.st_blksize),
      CEREAL_NVP(metadata.st_blocks), CEREAL_NVP(metadata.st_atime),
-     CEREAL_NVP(metadata.st_mtime), CEREAL_NVP(metadata.st_ctime));
+     CEREAL_NVP(metadata.st_mtim.tv_sec), CEREAL_NVP(metadata.st_mtim.tv_nsec),
+     CEREAL_NVP(metadata.st_ctime));
 #else
   ar(CEREAL_NVP(content), CEREAL_NVP(metadata.st_size),
-     CEREAL_NVP(metadata.st_mode));
+     CEREAL_NVP(metadata.st_mode), CEREAL_NVP(metadata.st_ino), CEREAL_NVP(metadata.st_mtim.tv_sec),
+     CEREAL_NVP(metadata.st_mtim.tv_nsec));
 #endif
+  if (metadata.st_mtim.tv_nsec < 0 || metadata.st_mtim.tv_nsec >= 1000000000)
+    throw std::runtime_error("Invalid virtual file modification nanoseconds");
 }
 
 template <class Archive>
 void OpenFileDescription::serialize(Archive &ar)
 {
-  ar(CEREAL_NVP(path), CEREAL_NVP(offset), CEREAL_NVP(flags));
+  ar(CEREAL_NVP(path), CEREAL_NVP(offset));
 }
 
-template <class Archive>
-void DeviceSpec::serialize(Archive &ar)
+static std::map<uint64_t,uint64_t> mapping_coverage(
+    const std::map<uint64_t,std::pair<uint64_t,std::string>>& sources)
 {
-  ar(CEREAL_NVP(path), CEREAL_NVP(type));
+  std::map<uint64_t,uint64_t> coverage;
+  for (const auto& [start, source] : sources) {
+    if (!coverage.empty() && coverage.rbegin()->second == start)
+      coverage.rbegin()->second = source.first;
+    else coverage.emplace(start, source.first);
+  }
+  return coverage;
 }
 
 template <class Archive>
 void FileSystemState::serialize(Archive &ar)
 {
   /* Note: fd_manager_ is shared and not serialized per instance */
-  ar(filesystem, open_files, cwd, mappings, devices, pipes_, pipe_fds_,
-     next_pipe_id_);
-}
-
-template <class Archive>
-void FileSystemState::Pipe::serialize(Archive &ar)
-{
-  ar(buffer, read_closed, write_closed);
+  ar(filesystem, open_files, cwd, mappings, pipes_, pipe_fds_, creation_mask_, virtual_file_mappings, virtual_file_mapping_sources, next_inode_);
+  uint64_t previous_end = 0;
+  bool first = true;
+  for (const auto& [start, end] : virtual_file_mappings) {
+    if (start >= end || start % 4096 || end % 4096 || (!first && start <= previous_end))
+      throw std::runtime_error("Invalid virtual file mapping provenance");
+    first = false;
+    previous_end = end;
+  }
+  previous_end = 0;
+  std::string previous_path;
+  first = true;
+  for (const auto& [start, source] : virtual_file_mapping_sources) {
+    const auto& [end, path] = source;
+    std::string canonical;
+    const auto node = filesystem.find(path);
+    if (start >= end || start % 4096 || end % 4096 ||
+        (!first && (start < previous_end || (start == previous_end && path == previous_path))) ||
+        node == filesystem.end() || !S_ISREG(node->second.metadata.st_mode) ||
+        resolve_path_checked(AT_FDCWD, path, canonical) || canonical != path)
+      throw std::runtime_error("Invalid virtual file mapping source");
+    first = false; previous_end = end; previous_path = path;
+  }
+  if (mapping_coverage(virtual_file_mapping_sources) != virtual_file_mappings)
+    throw std::runtime_error("Virtual file mapping sources do not cover provenance");
+  validate_inode_state();
+  if (creation_mask_ & ~0777)
+    throw std::runtime_error("Invalid virtual filesystem creation mask");
 }
 
 /* --- FileSystemState Method Implementations --- */
 
-int FileSystemState::get_new_fd()
+FileSystemState::FileSystemState() : cwd(""), fd_manager_()
 {
-  if (!fd_manager_)
+  ensure_dir_exists("/");
+  // Embedded NUL keys cannot be named by a guest pathname.
+  for (int fd = 0; fd < 3; ++fd)
   {
-    LOG_ERROR("FdManager not set!");
-    return -1;
+    std::string path(1, '\0');
+    path += "stdio" + std::to_string(fd);
+    VFSNode node{};
+    node.metadata.st_mode = S_IFCHR | 0600;
+    filesystem.emplace(path, std::move(node));
+    open_files.emplace(fd, OpenFileDescription{path, 0});
   }
-  return fd_manager_->allocate_fd(FdType::FILE);
 }
 
-int FileSystemState::allocate_fd(FdType type)
+FileSystemState::FileSystemState(FdManagerPtr fd_mgr) : FileSystemState()
+{
+  set_fd_manager(std::move(fd_mgr));
+}
+
+bool FileSystemState::overlaps_virtual_file_mapping(uint64_t start, uint64_t end) const
+{
+  if (start >= end) return false;
+  auto next = virtual_file_mappings.lower_bound(start);
+  if (next != virtual_file_mappings.end() && next->first < end) return true;
+  return next != virtual_file_mappings.begin() && std::prev(next)->second > start;
+}
+
+void FileSystemState::remove_virtual_file_mapping(uint64_t start, uint64_t end)
+{
+  if (start >= end) return;
+  if (start % 4096 || end % 4096)
+    throw std::runtime_error("Unaligned virtual file mapping removal");
+  auto next = virtual_file_mapping_sources.lower_bound(start);
+  if (next != virtual_file_mapping_sources.begin()) --next;
+  while (next != virtual_file_mapping_sources.end() && next->first < end) {
+    const auto left = next->first;
+    const auto [right, path] = next->second;
+    if (right <= start) { ++next; continue; }
+    next = virtual_file_mapping_sources.erase(next);
+    if (left < start) virtual_file_mapping_sources.emplace(left, std::make_pair(start, path));
+    if (right > end) {
+      virtual_file_mapping_sources.emplace(end, std::make_pair(right, path));
+      break;
+    }
+  }
+  virtual_file_mappings = mapping_coverage(virtual_file_mapping_sources);
+}
+
+void FileSystemState::add_virtual_file_mapping(uint64_t start, uint64_t end, const std::string& path)
+{
+  std::string canonical;
+  const auto node = filesystem.find(path);
+  if (start >= end || start % 4096 || end % 4096 ||
+      node == filesystem.end() || !S_ISREG(node->second.metadata.st_mode) ||
+      resolve_path_checked(AT_FDCWD, path, canonical) || canonical != path)
+    throw std::runtime_error("Invalid virtual file mapping source");
+  remove_virtual_file_mapping(start, end);
+  auto next = virtual_file_mapping_sources.lower_bound(start);
+  if (next != virtual_file_mapping_sources.begin()) {
+    const auto previous = std::prev(next);
+    if (previous->second.first == start && previous->second.second == canonical) {
+      start = previous->first;virtual_file_mapping_sources.erase(previous);
+    }
+  }
+  if (next != virtual_file_mapping_sources.end() && next->first == end && next->second.second == canonical) {
+    end = next->second.first;virtual_file_mapping_sources.erase(next);
+  }
+  virtual_file_mapping_sources.emplace(start, std::make_pair(end, canonical));
+  virtual_file_mappings = mapping_coverage(virtual_file_mapping_sources);
+}
+
+void FileSystemState::require_unmapped_file(const std::string& path) const
+{
+  for (const auto& [start, source] : virtual_file_mapping_sources) {
+    (void)start;
+    if (source.second == path)
+      throw std::runtime_error("Modification of a mapped virtual file is unsupported");
+  }
+}
+
+int FileSystemState::allocate_fd(FdType type, int status_flags, int descriptor_flags)
 {
   if (!fd_manager_)
   {
     LOG_ERROR("FdManager not set!");
     return -1;
   }
-  return fd_manager_->allocate_fd(type);
+  return fd_manager_->allocate_fd(type, status_flags, descriptor_flags);
 }
 
 void FileSystemState::release_fd(int fd)
@@ -115,102 +335,22 @@ static std::string join_paths(const std::string &base, const std::string &rel)
   return out;
 }
 
-static std::string normalize_device_path(const std::string &path)
-{
-  if (path.empty() || path[0] == '/')
-    return path;
-  return std::string("/") + path;
-}
-
-static std::string normalize_device_type(const std::string &type)
-{
-  std::string normalized = type;
-  std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-                 [](unsigned char ch)
-                 { return static_cast<char>(std::tolower(ch)); });
-  return normalized;
-}
-
-static bool is_zero_read_device(const DeviceSpec *device)
-{
-  return device != nullptr && normalize_device_type(device->type) == "urandom";
-}
-
-static bool is_stdout_device(const DeviceSpec *device)
-{
-  return device != nullptr && normalize_device_type(device->type) == "stdout";
-}
-
-static bool is_stderr_device(const DeviceSpec *device)
-{
-  return device != nullptr && normalize_device_type(device->type) == "stderr";
-}
-
-static bool is_output_device(const DeviceSpec *device)
-{
-  return is_stdout_device(device) || is_stderr_device(device);
-}
-
-static void init_device_node(const DeviceSpec *device, VFSNode &node)
-{
-  node.content.clear();
-#ifdef FSSTATE_DETAILED_METADATA
-  memset(&node.metadata, 0, sizeof(struct stat));
-  node.metadata.st_nlink = 1;
-#endif
-  if (is_output_device(device))
-    node.metadata.st_mode = S_IFCHR | 0222; // write-only
-  else
-    node.metadata.st_mode =
-        S_IFCHR | (is_zero_read_device(device) ? 0444 : 0644);
-  node.metadata.st_size = 0;
-}
-
-static const DeviceSpec *find_device(const std::vector<DeviceSpec> &devices,
-                                     const std::string &path)
-{
-  auto it = std::find_if(devices.begin(), devices.end(),
-                         [&path](const DeviceSpec &device)
-                         { return device.path == path; });
-  return it == devices.end() ? nullptr : &(*it);
-}
-
-void FileSystemState::register_device(const std::string &path,
-                                      const std::string &type)
-{
-  std::string normalized_path = normalize_device_path(path);
-  std::string normalized_type = normalize_device_type(type);
-
-  if (normalized_type != "urandom" && normalized_type != "stdout" &&
-      normalized_type != "stderr")
-  {
-    LOG_ERROR("Unsupported device type: %s", type.c_str());
-    return;
-  }
-
-  auto it = std::find_if(devices.begin(), devices.end(),
-                         [&normalized_path](const DeviceSpec &device)
-                         { return device.path == normalized_path; });
-  if (it != devices.end())
-  {
-    it->type = normalized_type;
-    return;
-  }
-
-  devices.push_back({normalized_path, normalized_type});
-}
-
-bool FileSystemState::is_device_path(const std::string &path) const
-{
-  return find_device(devices, path) != nullptr;
-}
-
 void FileSystemState::ensure_dir_exists(const std::string &path)
 {
-  if (filesystem.find(path) != filesystem.end())
+  const size_t slash = path.find_last_of('/');
+  if (slash != std::string::npos && slash > 0)
+    ensure_dir_exists(path.substr(0, slash));
+  else if (path != "/")
+    ensure_dir_exists("/");
+  // Ordered overlays can leave an existing directory below a replaced parent.
+  // Validate the whole chain before trusting or creating this directory.
+  if (const auto existing = filesystem.find(path); existing != filesystem.end()) {
+    if (!S_ISDIR(existing->second.metadata.st_mode))
+      throw std::runtime_error("VFS ancestor is not a directory: " + path);
     return;
+  }
 
-  VFSNode dir;
+  VFSNode dir{};
   dir.metadata.st_mode = S_IFDIR | 0755;
   dir.metadata.st_size = 0;
   filesystem[path] = std::move(dir);
@@ -223,86 +363,93 @@ void FileSystemState::init_from_mappings(
 
   ensure_dir_exists("/");
 
-  for (const auto &m : mappings)
-  {
-    const std::string &host_base = m.first;
-    const std::string &target_base = m.second;
-
-    ensure_dir_exists(target_base);
-
-    DIR *d = opendir(host_base.c_str());
-    if (!d)
-      continue;
-    struct dirent *de;
-    std::vector<std::string> stack;
-    stack.push_back(host_base);
-    while (!stack.empty())
-    {
-      std::string cur = stack.back();
-      stack.pop_back();
-      DIR *cd = opendir(cur.c_str());
-      if (!cd)
-        continue;
-      while ((de = readdir(cd)) != NULL)
-      {
-        if (de->d_name[0] == '.')
-          continue;
-        std::string host_p = cur + "/" + de->d_name;
-        struct stat st;
-        if (stat(host_p.c_str(), &st) < 0)
-          continue;
-
-        std::string rel = host_p.substr(host_base.size());
-        if (!rel.empty() && rel[0] == '/')
-          rel = rel.substr(1);
-        std::string target_p = target_base;
-        if (target_p.back() != '/')
-          target_p += '/';
-        target_p += rel;
-
-        if (S_ISDIR(st.st_mode))
-        {
-          ensure_dir_exists(target_p);
-          stack.push_back(host_p);
-          continue;
-        }
-
-        // Create parent directories for the file
-        size_t last_slash = target_p.find_last_of('/');
-        if (last_slash != std::string::npos && last_slash > 0)
-        {
-          std::string parent = target_p.substr(0, last_slash);
-          ensure_dir_exists(parent);
-        }
-
-        std::ifstream ifs(host_p, std::ios::binary);
-        std::vector<char> content;
-        if (ifs)
-        {
-          ifs.seekg(0, std::ios::end);
-          std::streamsize sz = ifs.tellg();
-          ifs.seekg(0, std::ios::beg);
-          if (sz > 0)
-          {
-            content.resize((size_t)sz);
-            ifs.read(content.data(), sz);
-          }
-        }
-
-        VFSNode node;
-        node.content = std::move(content);
-#ifdef FSSTATE_DETAILED_METADATA
-        memset(&node.metadata, 0, sizeof(struct stat));
-        node.metadata.st_nlink = 1;
-        node.metadata.st_mtime = st.st_mtime;
-#endif
-        node.metadata.st_mode = st.st_mode;
-        node.metadata.st_size = node.content.size();
-        filesystem[target_p] = std::move(node);
+  // Capture objects in mapping order. Never follow a captured final symlink or
+  // turn an unreadable/unsupported object into a successful empty file.
+  for (const auto& [host_base, target_base] : mappings) {
+    if (target_base.empty() || target_base.front() != '/')
+      throw std::runtime_error("VFS mapping target must be absolute: " + target_base);
+    std::vector<std::pair<std::string, std::string>> pending{
+        {host_base, resolve_path(AT_FDCWD, target_base)}};
+    while (!pending.empty()) {
+      auto [host, target] = std::move(pending.back());
+      pending.pop_back();
+      const auto fail = [&host](const char* operation) {
+        throw std::runtime_error(std::string("Cannot capture VFS ") + operation + ": " + host);
+      };
+      struct stat st{};
+      if (lstat(host.c_str(), &st) < 0) fail("metadata");
+      if (!S_ISDIR(st.st_mode) && !S_ISREG(st.st_mode) && !S_ISLNK(st.st_mode))
+        fail("unsupported object");
+      if (target == "/" && !S_ISDIR(st.st_mode)) fail("non-directory root");
+      if (target != "/") {
+        const size_t slash = target.find_last_of('/');
+        ensure_dir_exists(slash == 0 ? "/" : target.substr(0, slash));
       }
-      closedir(cd);
+      VFSNode node{};
+#ifdef FSSTATE_DETAILED_METADATA
+      if (S_ISREG(st.st_mode)) {
+        node.metadata.st_nlink = 1;
+      }
+#endif
+      node.metadata.st_mtim = st.st_mtim;
+      node.metadata.st_mode = st.st_mode;
+      node.metadata.st_size = 0;
+      if (S_ISLNK(st.st_mode)) {
+        std::vector<char> bytes(4096);
+        const ssize_t length = readlink(host.c_str(), bytes.data(), bytes.size());
+        if (length < 0 || static_cast<size_t>(length) == bytes.size()) fail("symlink");
+        bytes.resize(length);
+        node.content = bytes;
+        node.metadata.st_size = length;
+      } else {
+        const int raw = open(host.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW |
+            (S_ISDIR(st.st_mode) ? O_DIRECTORY : O_NONBLOCK));
+        if (raw < 0) fail("open");
+        struct Descriptor { int fd; ~Descriptor() { if (fd >= 0) close(fd); } } descriptor{raw};
+        struct stat opened{};
+        if (fstat(raw, &opened) < 0 || opened.st_dev != st.st_dev ||
+            opened.st_ino != st.st_ino || opened.st_mode != st.st_mode ||
+            opened.st_size != st.st_size) fail("changed object");
+        if (S_ISDIR(st.st_mode)) {
+          DIR* directory = fdopendir(raw);
+          if (!directory) fail("directory");
+          descriptor.fd = -1;
+          struct Directory { DIR* value; ~Directory() { closedir(value); } } owner{directory};
+          while (true) {
+            errno = 0;
+            const auto* entry = readdir(directory);
+            if (!entry) {
+              if (errno) fail("directory entries");
+              break;
+            }
+            const std::string name(entry->d_name);
+            if (name == "." || name == "..") continue;
+            pending.emplace_back(join_paths(host, name), join_paths(target, name));
+          }
+        } else {
+          if (st.st_size < 0 || static_cast<uintmax_t>(st.st_size) >
+              std::numeric_limits<size_t>::max()) fail("file size");
+          std::vector<char> bytes(static_cast<size_t>(st.st_size));
+          size_t offset = 0;
+          while (offset < bytes.size()) {
+            const ssize_t count = read(raw, bytes.data() + offset,
+                std::min(bytes.size() - offset, static_cast<size_t>(SSIZE_MAX)));
+            if (count < 0 && errno == EINTR) continue;
+            if (count <= 0) fail("file bytes");
+            offset += count;
+          }
+          char extra;
+          ssize_t count;
+          do { count = read(raw, &extra, 1); } while (count < 0 && errno == EINTR);
+          if (count != 0) fail("file extent");
+          node.content = bytes;
+          node.metadata.st_size = bytes.size();
+        }
+      }
+      // A later mapping may replace the object at exactly the same path. Its
+      // descendants retain the established ordered overlay behavior.
+      filesystem[target] = std::move(node);
     }
-    closedir(d);
   }
 }
 
@@ -320,38 +467,10 @@ const std::string &FileSystemState::get_cwd() const { return cwd; }
 
 std::string FileSystemState::resolve_path(int dirfd, const std::string &path)
 {
-  if (path.empty())
-    return cwd.empty() ? std::string("/") : cwd;
-  if (path[0] == '/')
-  {
-    return path;
-  }
-  // relative path
   std::string base;
-  if (dirfd == AT_FDCWD)
-  {
-    base = cwd.empty() ? "/" : cwd;
-  }
-  else
-  {
-    auto it = open_files.find(dirfd);
-    if (it != open_files.end())
-    {
-      std::string p = it->second.path;
-      // if it's a file, use its directory
-      size_t pos = p.find_last_of('/');
-      if (pos == std::string::npos)
-        base = "/";
-      else if (pos == 0)
-        base = "/";
-      else
-        base = p.substr(0, pos);
-    }
-    else
-    {
-      base = cwd.empty() ? "/" : cwd;
-    }
-  }
+  if (!path.empty() && path[0] == '/') base = "";
+  else if (dirfd == AT_FDCWD) base = cwd.empty() ? "/" : cwd;
+  else base = open_files.at(dirfd).path;
   // normalize
   std::string combined = join_paths(base, path);
   // collapse /. and /.. (simple implementation)
@@ -395,63 +514,184 @@ std::string FileSystemState::resolve_path(int dirfd, const std::string &path)
   return out;
 }
 
+int FileSystemState::resolve_path_checked(int dirfd, const std::string& path, std::string& result, bool follow_final, bool check_search, bool creating)
+{
+  if (path.empty()) return -ENOENT;
+  if (path[0]!='/' && dirfd!=AT_FDCWD) {
+    if (!fd_manager_ || !fd_manager_->is_allocated(dirfd)) return -EBADF;
+    const auto open=open_files.find(dirfd);
+    if (open==open_files.end()) return -ENOTDIR;
+    const auto node=filesystem.find(open->second.path);
+    if (node==filesystem.end()) throw std::runtime_error("Directory descriptor has no payload");
+    if (!S_ISDIR(node->second.metadata.st_mode)) return -ENOTDIR;
+  }
+  // Resolve one component at a time. In particular, link/.. walks the target
+  // before interpreting ..; normalizing the input first changes Linux behavior.
+  std::string current = path[0]=='/' ? "/" :
+      (dirfd==AT_FDCWD ? (cwd.empty() ? "/" : cwd) : open_files.at(dirfd).path);
+  std::deque<std::string> pending;
+  auto prepend = [&](const std::string& value) {
+    std::deque<std::string> parts;
+    size_t position = 0;
+    while (position < value.size()) {
+      const size_t end = value.find('/', position);
+      if (end != position) parts.push_back(value.substr(position, end-position));
+      if (end == std::string::npos) break;
+      position = end + 1;
+    }
+    // A slash after the final component still requires a directory and follows
+    // a final symlink, even for lstat/readlink/O_NOFOLLOW.
+    if (!value.empty() && value.back() == '/' && pending.empty()) parts.push_back("");
+    pending.insert(pending.begin(), parts.begin(), parts.end());
+  };
+  prepend(path);
+  unsigned links = 0;
+  while (!pending.empty()) {
+    const auto parent = filesystem.find(current);
+    if (parent == filesystem.end()) return -ENOENT;
+    if (!S_ISDIR(parent->second.metadata.st_mode)) return -ENOTDIR;
+    if (check_search && (parent->second.metadata.st_mode & 0111) != 0111)
+      throw std::runtime_error("VFS search permission requires captured credentials: " + current);
+    // On open(O_CREAT), a final name followed by / fails after searching
+    // its parent, even if that name is a missing file or a looping link.
+    if (creating && pending.size() == 2 && pending.back().empty()) return -EISDIR;
+    const std::string part = pending.front();
+    pending.pop_front();
+    // The virtual Linux namespace uses the fixed Linux NAME_MAX.
+    // Check after reaching the parent, including components from link bytes.
+    if (part.size() > NAME_MAX) return -ENAMETOOLONG;
+    if (part.empty() || part == ".") continue;
+    if (part == "..") {
+      const size_t slash = current.find_last_of('/');
+      current = slash == 0 ? "/" : current.substr(0, slash);
+      continue;
+    }
+    const std::string next = join_paths(current, part);
+    const auto node = filesystem.find(next);
+    if (node != filesystem.end() && S_ISLNK(node->second.metadata.st_mode) &&
+        (!pending.empty() || follow_final)) {
+      if (++links > 40) return -ELOOP;
+      const auto& bytes = node->second.content;
+      const std::string target(bytes.begin(), bytes.end());
+      if (target.empty()) return -ENOENT;
+      if (target.find('\0') != std::string::npos)
+        throw std::runtime_error("Captured symlink contains a null byte: " + next);
+      if (target[0] == '/') current = "/";
+      prepend(target);
+      continue;
+    }
+    current = next;
+  }
+  result = current;
+  return 0;
+}
+
 int FileSystemState::do_open(const std::string &path, int flags, mode_t mode)
 {
-  // Simplified path handling for now. Assumes absolute paths.
-  const DeviceSpec *device = find_device(devices, path);
-  auto it = filesystem.find(path);
-  bool exists = (it != filesystem.end());
+  return do_openat(AT_FDCWD, path, flags, mode);
+}
 
-  if (device != nullptr && !exists)
-  {
-    VFSNode newNode;
-    init_device_node(device, newNode);
-    filesystem[path] = std::move(newNode);
-    exists = true;
+int FileSystemState::do_openat(int dirfd, const std::string &input, int flags, mode_t mode)
+{
+  std::string path = input;
+  if (path.empty())
+    return -ENOENT;
+  if (path.find('\0') != std::string::npos)
+    return -EINVAL;
+  if ((flags & O_ACCMODE) == O_ACCMODE ||
+      ((flags & O_CREAT) && (flags & O_DIRECTORY)))
+    return -EINVAL;
+  if ((flags & (O_ASYNC | O_DIRECT | O_NOATIME | O_PATH)) ||
+      (flags & O_TMPFILE) == O_TMPFILE)
+    throw std::runtime_error("Unsupported virtual open flags");
+  if (!fd_manager_)
+    return -EMFILE;
+  std::string checked;
+  const bool exclusive = (flags & O_CREAT) && (flags & O_EXCL);
+  const int path_error = resolve_path_checked(dirfd, path, checked,
+                                              !exclusive && !(flags & O_NOFOLLOW), false, flags & O_CREAT);
+  if (path_error) return path_error;
+  path = checked;
+  if (path == "/proc/self" && (flags & O_NOFOLLOW))
+    throw std::runtime_error("Virtual proc self nofollow open is not modeled");
+  auto it = filesystem.find(path);
+  if (it != filesystem.end() && S_ISLNK(it->second.metadata.st_mode)) {
+    if (exclusive) return -EEXIST;
+    return (flags & O_DIRECTORY) ? -ENOTDIR : -ELOOP;
   }
+  bool exists = (it != filesystem.end());
 
   if (exists)
   {
-    // File exists. Check permissions, etc. (to be implemented)
-    if ((flags & O_CREAT) && (flags & O_EXCL))
-    {
-      return -EEXIST;
-    }
+    if (exclusive) return -EEXIST;
+    if ((flags & O_DIRECTORY) && !S_ISDIR(it->second.metadata.st_mode))
+      return -ENOTDIR;
+    if (S_ISDIR(it->second.metadata.st_mode) &&
+        ((flags & O_CREAT) || (flags & O_ACCMODE) != O_RDONLY))
+      return -EISDIR;
   }
   else
   {
-    // File does not exist.
-    if (flags & O_CREAT)
-    {
-      // Create a new file node
-      VFSNode newNode;
-#ifdef FSSTATE_DETAILED_METADATA
-      memset(&newNode.metadata, 0, sizeof(struct stat));
-      newNode.metadata.st_nlink = 1;
-      newNode.metadata.st_uid = getuid();
-      newNode.metadata.st_gid = getgid();
-      newNode.metadata.st_atime = newNode.metadata.st_mtime =
-          newNode.metadata.st_ctime = time(NULL);
-#endif
-      newNode.metadata.st_mode = mode;
-      newNode.metadata.st_size = 0;
-      filesystem[path] = newNode;
-    }
-    else
-    {
-      return -ENOENT;
-    }
+    if ((flags & O_DIRECTORY) || !(flags & O_CREAT)) return -ENOENT;
   }
 
-  // If we got here, the file is accessible or was created.
-  // Now, create an open file description for it.
-  int fd = get_new_fd();
-  OpenFileDescription ofd;
-  ofd.path = path;
-  ofd.flags = flags;
-  ofd.offset = 0; // TODO: handle O_APPEND
+  const auto executable_link = filesystem.find("/proc/self/exe");
+  if (executable_link != filesystem.end() && S_ISLNK(executable_link->second.metadata.st_mode)) {
+    const auto& bytes = executable_link->second.content;
+    const std::string executable_path(bytes.begin(), bytes.end());
+    if (path == executable_path && ((flags & O_ACCMODE) != O_RDONLY || (flags & O_TRUNC)))
+      return -ETXTBSY;
+  }
 
-  open_files[fd] = ofd;
+  if (flags & O_TRUNC) require_unmapped_file(path);
+
+  // Allocate every fallible namespace/description object before publishing a
+  // descriptor or a new inode. Node-handle insertion below cannot allocate.
+  const int candidate = fd_manager_->get_next_fd();
+  if (candidate < 0) return -EMFILE;
+  if (open_files.contains(candidate))
+    throw std::runtime_error("Free descriptor still has a virtual file description");
+  std::map<int, OpenFileDescription> prepared_description;
+  prepared_description.emplace(candidate, OpenFileDescription{path, 0});
+  std::map<std::string, VFSNode> prepared_file;
+  auto prepared_parent = filesystem.end();
+  const auto timestamp = modeled_fs_time();
+  if (!exists) {
+    const size_t slash = path.find_last_of('/');
+    prepared_parent = filesystem.find(slash == 0 ? "/" : path.substr(0, slash));
+    if (prepared_parent == filesystem.end() || !S_ISDIR(prepared_parent->second.metadata.st_mode))
+      throw std::runtime_error("New virtual file has no directory parent");
+    if (next_inode_ >= guest_inode_limit)
+      throw std::runtime_error("Virtual guest inode domain exhausted");
+    VFSNode node;
+    node.metadata.st_mode = S_IFREG | ((mode & 07777) & ~creation_mask_);
+    node.metadata.st_ino = next_inode_;
+    node.metadata.st_mtim = timestamp;
+#ifdef FSSTATE_DETAILED_METADATA
+    node.metadata.st_nlink = 1;
+    node.metadata.st_atime = node.metadata.st_ctime = timestamp.tv_sec;
+#endif
+    prepared_file.emplace(path, std::move(node));
+  }
+  const int fd = allocate_fd(FdType::FILE,
+      flags & ~(O_CLOEXEC | O_CREAT | O_EXCL | O_TRUNC), (flags & O_CLOEXEC) ? FD_CLOEXEC : 0);
+  if (fd < 0) return fd;
+  if (fd != candidate) {
+    release_fd(fd);
+    throw std::runtime_error("Virtual descriptor allocation changed during open");
+  }
+  auto current = it;
+  if (!exists) {
+    current = filesystem.insert(prepared_file.extract(prepared_file.begin())).position;
+    ++next_inode_;
+    prepared_parent->second.metadata.st_mtim = timestamp;
+  }
+  if ((flags & O_TRUNC) && (flags & O_ACCMODE) != O_RDONLY) {
+    current->second.content.clear();
+    current->second.metadata.st_size = 0;
+    current->second.metadata.st_mtim = timestamp;
+  }
+  open_files.insert(prepared_description.extract(prepared_description.begin()));
 
   return fd;
 }
@@ -464,34 +704,27 @@ ssize_t FileSystemState::do_read(int fd, void *buf, size_t count)
     return -EBADF;
   }
 
+  if (!fd_manager_ || !fd_manager_->is_allocated(fd))
+    return -EBADF;
+
   OpenFileDescription &ofd = it->second;
   VFSNode &node = filesystem.at(ofd.path);
-  const DeviceSpec *device = find_device(devices, ofd.path);
 
-  if ((ofd.flags & O_ACCMODE) == O_WRONLY)
+  if (S_ISDIR(node.metadata.st_mode))
+    return -EISDIR;
+  if ((fd_manager_->get_status_flags(fd) & O_ACCMODE) == O_WRONLY)
   {
     return -EBADF;
   }
 
-  if (is_zero_read_device(device))
-  {
-    memset(buf, 0, count);
-    ofd.offset += count;
-    return static_cast<ssize_t>(count);
-  }
-
-  if (is_output_device(device))
-  {
-    return -EBADF;
-  }
-
-  ssize_t readable_bytes = node.content.size() - ofd.offset;
-  if (readable_bytes <= 0)
+  if (static_cast<uint64_t>(ofd.offset) >= node.content.size())
   {
     return 0; // EOF
   }
 
-  ssize_t bytes_to_read = std::min((ssize_t)count, readable_bytes);
+  size_t bytes_to_read = std::min(count, node.content.size() - static_cast<size_t>(ofd.offset));
+  if (bytes_to_read == 0)
+    return 0;
   memcpy(buf, node.content.data() + ofd.offset, bytes_to_read);
   ofd.offset += bytes_to_read;
 
@@ -506,251 +739,99 @@ ssize_t FileSystemState::do_write(int fd, const void *buf, size_t count)
     return -EBADF;
   }
 
+  if (!fd_manager_ || !fd_manager_->is_allocated(fd))
+    return -EBADF;
+
   OpenFileDescription &ofd = it->second;
   VFSNode &node = filesystem.at(ofd.path);
-  const DeviceSpec *device = find_device(devices, ofd.path);
 
-  if (device != nullptr)
-  {
-    if (is_output_device(device))
-    {
-      detsim::ui::ui_printf("%.*s", (int)count, buf);
-      return count;
-    }
-    return -EBADF;
-  }
-
-  if ((ofd.flags & O_ACCMODE) == O_RDONLY)
+  if ((fd_manager_->get_status_flags(fd) & O_ACCMODE) == O_RDONLY)
   {
     return -EBADF;
   }
 
-  // Handle append mode
-  if (ofd.flags & O_APPEND)
+  if (count == 0)
+    return 0;
+  require_unmapped_file(ofd.path);
+  off_t write_offset = ofd.offset;
+  // Output streams retain branch-owned bytes; they are always append-only.
+  if ((fd_manager_->get_status_flags(fd) & O_APPEND) ||
+      fd_manager_->get_fd_type(fd) == FdType::STDIO)
   {
-    ofd.offset = node.content.size();
+    write_offset = node.content.size();
   }
 
-  size_t new_size = ofd.offset + count;
-  if (new_size > node.content.size())
-  {
-    node.content.resize(new_size);
-  }
-
-  memcpy(node.content.data() + ofd.offset, buf, count);
-  ofd.offset += count;
+  if (count > static_cast<size_t>(std::numeric_limits<off_t>::max() - write_offset))
+    return -EFBIG;
+  node.content.write(static_cast<size_t>(write_offset), buf, count);
+  ofd.offset = write_offset + count;
   node.metadata.st_size = node.content.size();
-#ifdef FSSTATE_DETAILED_METADATA
-  node.metadata.st_mtime = time(NULL);
-#endif
+  node.metadata.st_mtim = modeled_fs_time();
 
   return count;
 }
 
-int FileSystemState::do_select(int nfds, fd_set *readfds, fd_set *writefds,
-                               fd_set *exceptfds, struct timeval *timeout)
+int FileSystemState::do_ftruncate(int fd, int64_t length)
 {
-  (void)timeout;
-
-  if (nfds < 0)
-  {
-    return -EINVAL;
-  }
-
-  if (nfds > FD_SETSIZE)
-  {
-    nfds = FD_SETSIZE;
-  }
-
-  auto &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
-  int ready_count = 0;
-
-  fd_set read_out;
-  fd_set write_out;
-  fd_set except_out;
-  if (readfds)
-    FD_ZERO(&read_out);
-  if (writefds)
-    FD_ZERO(&write_out);
-  if (exceptfds)
-    FD_ZERO(&except_out);
-
-  for (int fd = 0; fd < nfds; fd++)
-  {
-    bool want_read = readfds && FD_ISSET(fd, readfds);
-    bool want_write = writefds && FD_ISSET(fd, writefds);
-    bool want_except = exceptfds && FD_ISSET(fd, exceptfds);
-
-    if (!want_read && !want_write && !want_except)
-      continue;
-
-    bool valid = false;
-    bool can_read = false;
-    bool can_write = false;
-
-    if (sock_state.is_valid_socket(fd))
-    {
-      const Socket *sock = sock_state.get_socket(fd);
-      if (!sock)
-      {
-        return -EBADF;
-      }
-
-      valid = true;
-      if (sock->type == SOCK_DGRAM)
-      {
-        can_write = true;
-        auto it = sock_state.udp_recv_buffers().find(fd);
-        if (it != sock_state.udp_recv_buffers().end() && !it->second.empty())
-        {
-          can_read = true;
-        }
-      }
-      else if (sock->type == SOCK_STREAM)
-      {
-        if (sock->connected)
-        {
-          can_write = true;
-          auto conn_it = sock_state.tcp_connections().find(fd);
-          if (conn_it != sock_state.tcp_connections().end() &&
-              !conn_it->second.recv_buffer.empty())
-          {
-            can_read = true;
-          }
-        }
-        if (sock->listening)
-        {
-          can_write = true;
-          if (!sock->pending_connections.empty())
-          {
-            can_read = true;
-          }
-        }
-      }
-    }
-    else if (is_pipe(fd))
-    {
-      valid = true;
-      int pipe_id = pipe_fds_.at(fd);
-      bool is_read_end = pipe_id > 0;
-      if (!is_read_end)
-        pipe_id = -pipe_id;
-
-      auto pipe_it = pipes_.find(pipe_id);
-      if (pipe_it == pipes_.end())
-      {
-        return -EBADF;
-      }
-
-      const Pipe &pipe = pipe_it->second;
-      if (is_read_end)
-      {
-        if (!pipe.buffer.empty() || pipe.write_closed)
-          can_read = true;
-      }
-      else
-      {
-        if (!pipe.read_closed)
-          can_write = true;
-      }
-    }
-    else if (open_files.find(fd) != open_files.end())
-    {
-      valid = true;
-      can_read = true;
-      can_write = true;
-    }
-
-    if (!valid)
-    {
-      return -EBADF;
-    }
-
-    bool fd_ready = false;
-    if (want_read && can_read)
-    {
-      FD_SET(fd, &read_out);
-      fd_ready = true;
-    }
-    if (want_write && can_write)
-    {
-      FD_SET(fd, &write_out);
-      fd_ready = true;
-    }
-    if (want_except)
-    {
-      // Exceptional conditions are not modeled yet.
-    }
-
-    if (fd_ready)
-    {
-      ready_count++;
-    }
-  }
-
-  if (readfds)
-  {
-    memcpy(readfds, &read_out, sizeof(fd_set));
-  }
-  if (writefds)
-  {
-    memcpy(writefds, &write_out, sizeof(fd_set));
-  }
-  if (exceptfds)
-  {
-    memset(exceptfds, 0, sizeof(fd_set));
-  }
-
-  return ready_count;
+  // Linux checks signed length before looking up even an invalid descriptor.
+  if (length < 0) return -EINVAL;
+  if (!fd_manager_ || !fd_manager_->is_allocated(fd)) return -EBADF;
+  if (fd_manager_->get_fd_type(fd) != FdType::FILE) return -EINVAL;
+  const auto opened = open_files.find(fd);
+  if (opened == open_files.end()) throw std::runtime_error("Truncated descriptor has no file payload");
+  auto& node = filesystem.at(opened->second.path);
+  if (!S_ISREG(node.metadata.st_mode) ||
+      (fd_manager_->get_status_flags(fd) & O_ACCMODE) == O_RDONLY) return -EINVAL;
+  require_unmapped_file(opened->second.path);
+  const uint64_t size = static_cast<uint64_t>(length);
+  if (size > node.content.size() && size - node.content.size() > maximum_dense_growth)
+    throw std::runtime_error("Virtual ftruncate exceeds single-operation dense growth bound");
+  node.content.resize(size);
+  node.metadata.st_size = length;
+  node.metadata.st_mtim = modeled_fs_time();
+  return 0;
 }
 
 int FileSystemState::do_close(int fd)
 {
-  if (open_files.erase(fd) == 0)
+  if (!fd_manager_ || !fd_manager_->is_allocated(fd) ||
+      open_files.erase(fd) == 0)
   {
     return -EBADF;
   }
+  release_fd(fd);
   return 0;
 }
 
 off_t FileSystemState::do_lseek(int fd, off_t offset, int whence)
 {
-  // Pre-opened stdout/stderr are not seekable
-  if (fd == 1 || fd == 2)
-  {
-    return -ESPIPE;
-  }
-
   auto it = open_files.find(fd);
   if (it == open_files.end())
   {
     return -EBADF;
   }
 
+  if (!fd_manager_ || !fd_manager_->is_allocated(fd))
+    return -EBADF;
+
   OpenFileDescription &ofd = it->second;
   VFSNode &node = filesystem.at(ofd.path);
-  const DeviceSpec *device = find_device(devices, ofd.path);
-
-  if (device != nullptr)
-  {
+  if (fd_manager_->get_fd_type(fd) == FdType::STDIO)
     return -ESPIPE;
-  }
   off_t new_offset;
 
+  off_t base = 0;
   switch (whence)
   {
-    case SEEK_SET:
-      new_offset = offset;
-      break;
-    case SEEK_CUR:
-      new_offset = ofd.offset + offset;
-      break;
+    case SEEK_SET: break;
+    case SEEK_CUR: base = ofd.offset; break;
     case SEEK_END:
-      new_offset = node.content.size() + offset;
-      break;
-    default:
-      return -EINVAL;
+      if (S_ISDIR(node.metadata.st_mode)) return -EINVAL;
+      base = node.content.size(); break;
+    default: return -EINVAL;
   }
+  if (__builtin_add_overflow(base, offset, &new_offset))
+    return -EOVERFLOW;
 
   if (new_offset < 0)
   {
@@ -761,65 +842,325 @@ off_t FileSystemState::do_lseek(int fd, off_t offset, int whence)
   return new_offset;
 }
 
-int FileSystemState::do_stat(const std::string &path, struct stat *statbuf)
+// Initial objects use a high-bit path-derived domain. Guest-created objects
+// retain monotonically allocated low-domain IDs across closed-leaf renames.
+static std::map<std::string, uint64_t> vfs_inodes(const std::map<std::string, VFSNode>& filesystem)
 {
-  auto it = filesystem.find(path);
+  std::map<std::string, uint64_t> result;
+  std::map<uint64_t, std::string> owners;
+  for (const auto& [path, node] : filesystem) {
+    const uint64_t inode = node.metadata.st_ino ? node.metadata.st_ino : initial_vfs_inode(path);
+    if (!owners.emplace(inode, path).second)
+      throw std::runtime_error("Captured VFS path inode collision");
+    result.emplace(path, inode);
+  }
+  return result;
+}
+
+void FileSystemState::validate_inode_state() const
+{
+  if (!next_inode_ || next_inode_ > guest_inode_limit)
+    throw std::runtime_error("Invalid virtual guest inode counter");
+  for (const auto& [path, node] : filesystem) {
+    const uint64_t inode = node.metadata.st_ino;
+    if (inode && (inode == initial_vfs_inode(path) ||
+        (!S_ISREG(node.metadata.st_mode) && !S_ISLNK(node.metadata.st_mode)) ||
+        (inode < guest_inode_limit && inode >= next_inode_)))
+      throw std::runtime_error("Invalid virtual inode override");
+  }
+  (void)vfs_inodes(filesystem);
+}
+
+static int leaf_unlink_flags(unsigned flags)
+{
+  if (flags & ~unsigned(AT_REMOVEDIR)) return -EINVAL;
+  if (flags) throw std::runtime_error("Directory removal is unsupported");
+  return 0;
+}
+
+static int leaf_rename_flags(unsigned flags)
+{
+  // Linux RENAME_NOREPLACE/EXCHANGE/WHITEOUT, using the unsigned32 ABI.
+  if ((flags & ~7U) || ((flags & 2U) && (flags & 5U))) return -EINVAL;
+  if (flags & 6U) throw std::runtime_error("Rename exchange/whiteout is unsupported");
+  return 0;
+}
+
+int FileSystemState::resolve_namespace_leaf(int dirfd, const std::string& input, NamespaceLeaf& leaf)
+{
+  if (input.empty()) return -ENOENT;
+  if (input.find('\0') != std::string::npos) return -EINVAL;
+  leaf = NamespaceLeaf{};
+  leaf.trailing_slash = input.back() == '/';
+  const size_t last = input.find_last_not_of('/');
+  if (last == std::string::npos) {
+    leaf.kind = NamespaceLeaf::Kind::Root;leaf.parent = leaf.path = "/";return 0;
+  }
+  const std::string stem = input.substr(0, last + 1);
+  const size_t slash = stem.find_last_of('/');
+  leaf.name = stem.substr(slash == std::string::npos ? 0 : slash + 1);
+  const std::string parent = slash == std::string::npos ? "./" : stem.substr(0, slash + 1);
+  // Only the parent walk follows symlinks, including the parent's final slash.
+  const int error = resolve_path_checked(dirfd, parent, leaf.parent);
+  if (error) return error;
+  const auto directory = filesystem.find(leaf.parent);
+  if (directory == filesystem.end()) return -ENOENT;
+  if (!S_ISDIR(directory->second.metadata.st_mode)) return -ENOTDIR;
+  if (leaf.name == ".") {
+    leaf.kind = NamespaceLeaf::Kind::Dot;leaf.path = leaf.parent;
+  } else if (leaf.name == "..") {
+    leaf.kind = NamespaceLeaf::Kind::DotDot;
+    const auto end = leaf.parent.find_last_of('/');
+    leaf.path = end == 0 ? "/" : leaf.parent.substr(0, end);
+  } else leaf.path = join_paths(leaf.parent, leaf.name);
+  return 0;
+}
+
+void FileSystemState::require_namespace_mutable(const std::string& path) const
+{
+  if (path == "/proc/self/exe")
+    throw std::runtime_error("Synthetic executable link namespace mutation is unsupported");
+  const auto executable = filesystem.find("/proc/self/exe");
+  if (executable != filesystem.end() && S_ISLNK(executable->second.metadata.st_mode) &&
+      path == std::string(executable->second.content.begin(), executable->second.content.end()))
+    throw std::runtime_error("Running executable namespace mutation is unsupported");
+  for (const auto& [fd, opened] : open_files) {
+    (void)fd;
+    if (opened.path == path) throw std::runtime_error("Open virtual object namespace mutation is unsupported");
+  }
+  require_unmapped_file(path);
+}
+
+int FileSystemState::do_unlinkat(int dirfd, const std::string& input, unsigned flags)
+{
+  const int flag_error = leaf_unlink_flags(flags);if (flag_error) return flag_error;
+  NamespaceLeaf leaf;
+  const int error = resolve_namespace_leaf(dirfd, input, leaf);if (error) return error;
+  if (leaf.kind != NamespaceLeaf::Kind::Normal) return -EISDIR;
+  if (leaf.name.size() > NAME_MAX) return -ENAMETOOLONG;
+  const auto node = filesystem.find(leaf.path);
+  if (node == filesystem.end()) return -ENOENT;
+  if (leaf.trailing_slash && !S_ISDIR(node->second.metadata.st_mode)) return -ENOTDIR;
+  if (S_ISDIR(node->second.metadata.st_mode)) return -EISDIR;
+  if (!S_ISREG(node->second.metadata.st_mode) && !S_ISLNK(node->second.metadata.st_mode))
+    throw std::runtime_error("Only regular or symlink leaf deletion is supported");
+  if (filesystem.at(leaf.parent).metadata.st_mode & S_ISVTX)
+    throw std::runtime_error("Sticky-directory namespace mutation is unsupported");
+  require_namespace_mutable(leaf.path);
+  validate_inode_state();
+  auto& parent = filesystem.at(leaf.parent);
+  const auto timestamp = modeled_fs_time();
+  filesystem.erase(node);
+  parent.metadata.st_mtim = timestamp;
+  return 0;
+}
+
+int FileSystemState::do_renameat2(int olddirfd, const std::string& oldname,
+                                 int newdirfd, const std::string& newname, unsigned flags)
+{
+  const int flag_error = leaf_rename_flags(flags);if (flag_error) return flag_error;
+  NamespaceLeaf oldleaf, newleaf;
+  int error = resolve_namespace_leaf(olddirfd, oldname, oldleaf);if (error) return error;
+  error = resolve_namespace_leaf(newdirfd, newname, newleaf);if (error) return error;
+  if (oldleaf.kind == NamespaceLeaf::Kind::Root || newleaf.kind == NamespaceLeaf::Kind::Root)
+    throw std::runtime_error("Root/mount namespace rename is unsupported");
+  if (oldleaf.kind != NamespaceLeaf::Kind::Normal) return -EBUSY;
+  if (newleaf.kind != NamespaceLeaf::Kind::Normal) return (flags & 1U) ? -EEXIST : -EBUSY;
+  if (oldleaf.name.size() > NAME_MAX) return -ENAMETOOLONG;
+  const auto source = filesystem.find(oldleaf.path);
+  if (source == filesystem.end()) return -ENOENT;
+  if (newleaf.name.size() > NAME_MAX) return -ENAMETOOLONG;
+  const auto target = filesystem.find(newleaf.path);
+  if ((flags & 1U) && target != filesystem.end()) return -EEXIST;
+  const bool directory = S_ISDIR(source->second.metadata.st_mode);
+  if ((oldleaf.trailing_slash || newleaf.trailing_slash) && !directory) return -ENOTDIR;
+  if (target != filesystem.end()) {
+    if (!directory && S_ISDIR(target->second.metadata.st_mode)) return -EISDIR;
+    if (directory && !S_ISDIR(target->second.metadata.st_mode)) return -ENOTDIR;
+  }
+  if (oldleaf.path == newleaf.path) return 0;
+  if (directory) throw std::runtime_error("Directory moves are unsupported");
+  if (!S_ISREG(source->second.metadata.st_mode) && !S_ISLNK(source->second.metadata.st_mode))
+    throw std::runtime_error("Only regular or symlink leaf rename is supported");
+  if ((filesystem.at(oldleaf.parent).metadata.st_mode | filesystem.at(newleaf.parent).metadata.st_mode) & S_ISVTX)
+    throw std::runtime_error("Sticky-directory namespace mutation is unsupported");
+  require_namespace_mutable(oldleaf.path);
+  require_namespace_mutable(newleaf.path);
+  validate_inode_state();
+  uint64_t inode = source->second.metadata.st_ino;
+  if (!inode) inode = initial_vfs_inode(oldleaf.path);
+  if (inode == initial_vfs_inode(newleaf.path)) inode = 0;
+  // Allocate the new key before extracting either live object. Swapping keys
+  // and moving node handles after validation cannot allocate.
+  std::string prepared_key = newleaf.path;
+  auto& old_parent = filesystem.at(oldleaf.parent);
+  auto& new_parent = filesystem.at(newleaf.parent);
+  const auto timestamp = modeled_fs_time();
+  auto moved = filesystem.extract(source);
+  auto replaced = target == filesystem.end() ? decltype(filesystem)::node_type{} : filesystem.extract(target);
+  moved.key().swap(prepared_key);
+  moved.mapped().metadata.st_ino = inode;
+  filesystem.insert(std::move(moved));
+  old_parent.metadata.st_mtim = timestamp;
+  new_parent.metadata.st_mtim = timestamp;
+  return 0;
+}
+
+static void copy_vfs_stat(const VFSNode& node, uint64_t inode, struct stat* statbuf)
+{
+#ifdef FSSTATE_DETAILED_METADATA
+  memcpy(statbuf, &node.metadata, sizeof(struct stat));
+#else
+  // Minimal mode retains size, mode and precise semantic modification time.
+  memset(statbuf, 0, sizeof(struct stat));
+  statbuf->st_size = node.metadata.st_size;
+  statbuf->st_mode = node.metadata.st_mode;
+  statbuf->st_mtim = node.metadata.st_mtim;
+#endif
+  statbuf->st_ino = inode;
+}
+
+int FileSystemState::do_stat(const std::string &path, struct stat *statbuf, bool follow)
+{
+  std::string checked;
+  const int path_error = resolve_path_checked(AT_FDCWD, path, checked, follow);
+  if (path_error) return path_error;
+  if (!follow && checked == "/proc/self")
+    throw std::runtime_error("Virtual proc self link metadata is not modeled");
+  auto it = filesystem.find(checked);
   if (it == filesystem.end())
   {
-    const DeviceSpec *device = find_device(devices, path);
-    if (device == nullptr)
-    {
-      return -ENOENT;
-    }
-
-    VFSNode device_node;
-    init_device_node(device, device_node);
-#ifdef FSSTATE_DETAILED_METADATA
-    memcpy(statbuf, &device_node.metadata, sizeof(struct stat));
-#else
-    // Minimal mode: only fill size and mode, zero out the rest
-    memset(statbuf, 0, sizeof(struct stat));
-    statbuf->st_size = device_node.metadata.st_size;
-    statbuf->st_mode = device_node.metadata.st_mode;
-#endif
-    return 0;
+    return -ENOENT;
   }
 
-#ifdef FSSTATE_DETAILED_METADATA
-  memcpy(statbuf, &it->second.metadata, sizeof(struct stat));
-#else
-  // Minimal mode: only fill size and mode, zero out the rest
-  memset(statbuf, 0, sizeof(struct stat));
-  statbuf->st_size = it->second.metadata.st_size;
-  statbuf->st_mode = it->second.metadata.st_mode;
-#endif
+  copy_vfs_stat(it->second, vfs_inodes(filesystem).at(checked), statbuf);
   return 0;
 }
 
 int FileSystemState::do_fstat(int fd, struct stat *statbuf)
 {
-  // Pre-opened stdout/stderr
-  if (fd == 1 || fd == 2)
-  {
-    memset(statbuf, 0, sizeof(struct stat));
-    statbuf->st_mode = S_IFCHR | 0622;
-    statbuf->st_nlink = 1;
-    statbuf->st_size = 0;
-    return 0;
-  }
-
   auto it = open_files.find(fd);
   if (it == open_files.end())
   {
     return -EBADF;
   }
 
-  return do_stat(it->second.path, statbuf);
+  if (!fd_manager_ || !fd_manager_->is_allocated(fd))
+    return -EBADF;
+  // Descriptions already name the opened object, including unnameable stdio
+  // payloads. fstat must not perform a pathname walk or follow a later alias.
+  const auto node = filesystem.find(it->second.path);
+  if (node == filesystem.end())
+    throw std::runtime_error("Open descriptor has no captured payload");
+  copy_vfs_stat(node->second, vfs_inodes(filesystem).at(node->first), statbuf);
+  return 0;
+}
+
+long FileSystemState::do_getdents64(int fd, void* buffer, unsigned int count, pid_t pid)
+{
+  if (!fd_manager_ || !fd_manager_->is_allocated(fd)) return -EBADF;
+  const auto opened = open_files.find(fd);
+  if (opened == open_files.end()) return -ENOTDIR;
+  auto& description = opened->second;
+  const auto node = filesystem.find(description.path);
+  if (node == filesystem.end()) throw std::runtime_error("Directory descriptor has no captured payload");
+  if (!S_ISDIR(node->second.metadata.st_mode)) return -ENOTDIR;
+  if (description.offset < 0) throw std::runtime_error("Negative captured directory cursor");
+  const auto inodes = vfs_inodes(filesystem);
+  struct Entry { std::string name, path; };
+  const auto slash = description.path.find_last_of('/');
+  const std::string parent = slash == 0 ? "/" : description.path.substr(0, slash);
+  std::vector<Entry> entries{{".", description.path}, {"..", parent}};
+  const std::string prefix = description.path == "/" ? "/" : description.path + "/";
+  for (auto it = filesystem.lower_bound(prefix); it != filesystem.end() && it->first.starts_with(prefix); ++it) {
+    const auto name = it->first.substr(prefix.size());
+    if (!name.empty() && name.find('/') == std::string::npos) {
+      // Validate the complete stream before writing even its dot entries.
+      // Captured mapping targets can bypass pathname lookup's NAME_MAX check;
+      // narrowing an oversized record first would wrap its length/count bound.
+      if (name.size() > NAME_MAX || name.find('\0') != std::string::npos)
+        throw std::runtime_error("Invalid captured directory entry name");
+      entries.push_back({name, it->first});
+    }
+  }
+  if (uint64_t(description.offset) >= entries.size()) return 0;
+  const uintptr_t start = reinterpret_cast<uintptr_t>(buffer);
+  // The reserved control page must never be overwritten, even by a later
+  // partial record. Count is the raw unsigned x86-64 syscall argument.
+  if (count && start < scratch_page + 4096 &&
+      (count > UINTPTR_MAX - start || start + count > scratch_page))
+    throw std::runtime_error("getdents64 output overlaps reserved scratch page");
+  std::vector<maps_item> maps;
+  auto scalar = [&](uintptr_t address, const auto& value) {
+    constexpr size_t size = sizeof(value);
+    if (size > UINTPTR_MAX - address) return false;
+    if (address % 4096 + size > 4096) {
+      if (maps.empty()) {
+        auto file = fileutils::open_cfile("/proc/" + std::to_string(pid) + "/maps", "r");
+        if (!file) throw std::runtime_error("Cannot inspect directory scalar mappings");
+        get_maps_item(maps, file.get());
+        if (ferror(file.get()) || maps.empty()) throw std::runtime_error("Cannot read directory scalar mappings");
+      }
+      auto cursor = address;
+      for (const auto& map : maps) {
+        if (map.end <= cursor) continue;
+        if (map.start > cursor || map.flags[1] != 'w') break;
+        cursor = std::min<uint64_t>(map.end, address + size);
+        if (cursor == address + size) break;
+      }
+      if (cursor != address + size) return false;
+    }
+    return guest_write_exact(pid, reinterpret_cast<void*>(address), &value, size);
+  };
+  int remaining = static_cast<int32_t>(count);
+  size_t written = 0, previous = 0;
+  long error = 0;
+  while (uint64_t(description.offset) < entries.size()) {
+    const auto& entry = entries[description.offset];
+    const uint16_t length = (19 + entry.name.size() + 1 + 7) & ~size_t(7);
+    if (length > remaining) { error = -EINVAL; break; }
+    const uintptr_t address = start + written;
+    // Match access_ok's range check without requiring padding to be mapped.
+    if (address < start || address >= (uint64_t(1) << 47) || length > (uint64_t(1) << 47) - address) {
+      error = -EFAULT; break;
+    }
+    const uint64_t cookie = description.offset;
+    const uint64_t inode = inodes.at(entry.path);
+    const auto mode = filesystem.at(entry.path).metadata.st_mode;
+    const uint8_t type = S_ISDIR(mode) ? DT_DIR : S_ISREG(mode) ? DT_REG : S_ISLNK(mode) ? DT_LNK : DT_UNKNOWN;
+    const uint8_t zero = 0;
+    // Linux 6.12 filldir64: previous d_off, inode, reclen, type,
+    // name terminator, name; final d_off is stored on syscall completion.
+    if (!scalar(address - previous + 8, cookie) || !scalar(address, inode) ||
+        !scalar(address + 16, length) || !scalar(address + 18, type) ||
+        !scalar(address + 19 + entry.name.size(), zero) ||
+        !guest_write_exact(pid, reinterpret_cast<void*>(address + 19), entry.name.data(), entry.name.size())) {
+      error = -EFAULT; break;
+    }
+    ++description.offset;
+    previous = length;
+    written += length;
+    remaining -= length;
+  }
+  if (previous) {
+    const uint64_t cookie = description.offset;
+    if (!scalar(start + written - previous + 8, cookie)) return -EFAULT;
+    return written;
+  }
+  return error;
+}
+
+long emu_vfs_getdents64(int fd, void* buffer, unsigned int count)
+{
+  return ptmc_state.fs_states[ptmc_state.cursor].do_getdents64(fd, buffer, count, ptmc_state.pids[ptmc_state.cursor]);
 }
 
 int FileSystemState::do_chdir(const std::string &path)
 {
-  std::string resolved = resolve_path(AT_FDCWD, path);
+  if (path.empty()) return -ENOENT;
+  std::string resolved;
+  const int error = resolve_path_checked(AT_FDCWD, path, resolved);
+  if (error) return error;
 
   auto it = filesystem.find(resolved);
   if (it == filesystem.end())
@@ -843,204 +1184,57 @@ int FileSystemState::do_chdir(const std::string &path)
 
 #include "monitor.h"
 
-// Helper to read a null-terminated string from guest memory.
-// Returns empty string if guest_addr is 0 or string exceeds max length.
-static std::string read_guest_string(uintptr_t guest_addr)
+// Path arguments are copied exactly; an invalid guest address cannot become
+// an empty or partially read pathname.
+static long read_guest_string(const char *guest_addr, std::string &result)
 {
-  if (guest_addr == 0)
-    return "";
-
-  std::string str;
-  str.reserve(256);
-  char ch;
-  size_t max_len = 4096; // Reasonable limit for path strings
-  do
+  if (!guest_addr)
+    return -EFAULT;
+  result.clear();
+  for (size_t i = 0; i < 4096; ++i)
   {
-    if (str.length() >= max_len)
-      break;
-    memcpy_guest2host(&ch, (void *)(guest_addr + str.length()), 1);
-    if (ch != '\0')
-    {
-      str += ch;
-    }
-  } while (ch != '\0');
-  return str;
+    char ch;
+    if (!guest_read_exact(ptmc_state.pids[ptmc_state.cursor],
+                          guest_addr + i, &ch, 1))
+      return -EFAULT;
+    if (ch == '\0')
+      return 0;
+    result += ch;
+  }
+  return -ENAMETOOLONG;
+}
+
+long emu_vfs_unlinkat(int dirfd, const char* pointer, unsigned flags)
+{
+  const int error = leaf_unlink_flags(flags);if (error) return error;
+  std::string path;
+  const long copied = read_guest_string(pointer, path);if (copied) return copied;
+  return ptmc_state.fs_states[ptmc_state.cursor].do_unlinkat(dirfd, path, flags);
+}
+
+long emu_vfs_renameat2(int olddirfd, const char* oldpointer, int newdirfd, const char* newpointer, unsigned flags)
+{
+  const int error = leaf_rename_flags(flags);if (error) return error;
+  std::string oldname, newname;
+  long copied = read_guest_string(oldpointer, oldname);if (copied) return copied;
+  auto& fs = ptmc_state.fs_states[ptmc_state.cursor];
+  FileSystemState::NamespaceLeaf oldleaf;
+  // Linux walks the old parent before copying the second pathname. It does not
+  // look up the old leaf until both parent walks and pathname copies succeeded.
+  const int parent_error = fs.resolve_namespace_leaf(olddirfd, oldname, oldleaf);
+  if (parent_error) return parent_error;
+  copied = read_guest_string(newpointer, newname);if (copied) return copied;
+  return fs.do_renameat2(olddirfd, oldname, newdirfd, newname, flags);
 }
 
 long emu_vfs_openat(int dirfd, const char *path_ptr, int flags, mode_t mode)
 {
-  if (!path_ptr)
-    return -EFAULT;
-  std::string path = read_guest_string((uintptr_t)path_ptr);
-  std::string resolved =
-      ptmc_state.fs_states[ptmc_state.cursor].resolve_path(dirfd, path);
-  return ptmc_state.fs_states[ptmc_state.cursor].do_open(resolved, flags, mode);
-}
-
-long emu_vfs_read(int fd, void *buf, size_t count)
-{
-  // Check if fd is a pipe
-  auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
-  if (fs.is_pipe(fd))
-  {
-    ssize_t ret = fs.do_pipe_read(fd, buf, count);
-    return ret;
-  }
-
-  // Check if fd is a socket
-  SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
-  if (sock_state.is_valid_socket(fd))
-  {
-    ssize_t ret = sock_state.do_recv(fd, buf, count, 0);
-    return ret;
-  }
-
-  std::vector<char> host_buf(count);
-  long bytes_read = fs.do_read(fd, host_buf.data(), count);
-
-  if (bytes_read > 0)
-  {
-    memcpy_host2guest(buf, host_buf.data(), bytes_read);
-  }
-  return bytes_read;
-}
-
-long emu_vfs_write(int fd, const void *buf, size_t count)
-{
-  // Check if fd is a pipe
-  auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
-  if (fs.is_pipe(fd))
-  {
-    ssize_t ret = fs.do_pipe_write(fd, buf, count);
-    return ret;
-  }
-
-  // Check if fd is a socket
-  SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
-  if (sock_state.is_valid_socket(fd))
-  {
-    ssize_t ret = sock_state.do_send(fd, buf, count, 0);
-    return ret;
-  }
-
-  // Pre-opened stdout/stderr (fd 1/2 are inherited, not in open_files)
-  if (fd == 1 || fd == 2)
-  {
-    std::vector<char> host_buf(count);
-    memcpy_guest2host(host_buf.data(), buf, count);
-    detsim::ui::ui_printf("%.*s", (int)count, host_buf.data());
-    return count;
-  }
-
-  std::vector<char> host_buf(count);
-  memcpy_guest2host(host_buf.data(), buf, count);
-
-  return ptmc_state.fs_states[ptmc_state.cursor].do_write(fd, host_buf.data(),
-                                                          count);
-}
-
-long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt)
-{
-
-  size_t total_len = 0;
-  std::vector<struct iovec> host_iov(iovcnt);
-
-  for (int i = 0; i < iovcnt; i++)
-  {
-    struct iovec tmp;
-    memcpy_guest2host(&tmp, (void *)&iov[i], sizeof(tmp));
-    host_iov[i] = tmp;
-    total_len += tmp.iov_len;
-  }
-
-  std::vector<char> buf(total_len);
-
-  size_t offset = 0;
-  for (int i = 0; i < iovcnt; i++)
-  {
-    if (host_iov[i].iov_len == 0)
-      continue;
-
-    memcpy_guest2host(buf.data() + offset, host_iov[i].iov_base,
-                      host_iov[i].iov_len);
-    offset += host_iov[i].iov_len;
-  }
-
-  // Pre-opened stdout/stderr
-  if (fd == 1 || fd == 2)
-  {
-    detsim::ui::ui_printf("%.*s", (int)total_len, buf.data());
-    return total_len;
-  }
-
-  // Check if fd is a pipe
-  auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
-  if (fs.is_pipe(fd))
-  {
-    return fs.do_pipe_write(fd, buf.data(), total_len);
-  }
-
-  // Check if fd is a socket
-  SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
-  if (sock_state.is_valid_socket(fd))
-  {
-    return sock_state.do_send(fd, buf.data(), total_len, 0);
-  }
-
-  return fs.do_write(fd, buf.data(), total_len);
-}
-
-long emu_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
-                struct timeval *timeout)
-{
-  (void)timeout;
-  return ptmc_state.fs_states[ptmc_state.cursor].do_select(
-      nfds, readfds, writefds, exceptfds, timeout);
-}
-
-long emu_pselect6(int nfds, fd_set *readfds, fd_set *writefds,
-                  fd_set *exceptfds, const struct timespec *timeout,
-                  const sigset_t *sigmask, size_t sigsetsize)
-{
-  (void)sigmask;
-  (void)sigsetsize;
-  struct timeval tv;
-  struct timeval *tv_ptr = nullptr;
-  if (timeout)
-  {
-    tv.tv_sec = timeout->tv_sec;
-    tv.tv_usec = timeout->tv_nsec / 1000;
-    tv_ptr = &tv;
-  }
-  return ptmc_state.fs_states[ptmc_state.cursor].do_select(
-      nfds, readfds, writefds, exceptfds, tv_ptr);
-}
-
-long emu_vfs_close(int fd)
-{
-  auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
-
-  // Pre-opened stdout/stderr
-  if (fd == 1 || fd == 2)
-  {
-    return 0;
-  }
-
-  // Check if it's a socket
-  SockState &sock_state = ptmc_state.sock_states[ptmc_state.cursor];
-  if (sock_state.get_socket(fd) != nullptr)
-  {
-    return sock_state.do_close(fd);
-  }
-
-  // Check if it's a pipe
-  if (fs.is_pipe(fd))
-  {
-    return fs.do_pipe_close(fd);
-  }
-
-  // Regular file
-  return fs.do_close(fd);
+  std::string path;
+  long copied = read_guest_string(path_ptr, path);
+  if (copied < 0)
+    return copied;
+  auto& fs=ptmc_state.fs_states[ptmc_state.cursor];
+  return fs.do_openat(dirfd,path,flags,mode);
 }
 
 long emu_vfs_lseek(int fd, off_t offset, int whence)
@@ -1048,158 +1242,18 @@ long emu_vfs_lseek(int fd, off_t offset, int whence)
   return ptmc_state.fs_states[ptmc_state.cursor].do_lseek(fd, offset, whence);
 }
 
-long emu_vfs_stat(const char *path_ptr, struct stat *statbuf)
+long emu_vfs_stat(const char* path,struct stat* destination)
 {
-  if (!path_ptr)
-    return -EFAULT;
-  std::string path = read_guest_string((uintptr_t)path_ptr);
-
-  struct stat host_statbuf;
-  long result =
-      ptmc_state.fs_states[ptmc_state.cursor].do_stat(path, &host_statbuf);
-
-  if (result == 0)
-  {
-    memcpy_host2guest(statbuf, &host_statbuf, sizeof(struct stat));
-  }
-  return result;
-}
-
-long emu_vfs_fstat(int fd, struct stat *statbuf)
-{
-  struct stat host_statbuf;
-  long result =
-      ptmc_state.fs_states[ptmc_state.cursor].do_fstat(fd, &host_statbuf);
-
-  if (result == 0)
-  {
-    memcpy_host2guest(statbuf, &host_statbuf, sizeof(struct stat));
-  }
-  return result;
+  return emu_vfs_statat(AT_FDCWD,path,destination,0);
 }
 
 long emu_chdir(const char *path_ptr)
 {
-  if (!path_ptr)
-    return -EFAULT;
-  std::string path = read_guest_string((uintptr_t)path_ptr);
+  std::string path;
+  long copied = read_guest_string(path_ptr, path);
+  if (copied < 0)
+    return copied;
   return ptmc_state.fs_states[ptmc_state.cursor].do_chdir(path);
-}
-
-void *FileSystemState::do_mmap(void *addr, size_t length, int prot, int flags,
-                               int fd, off_t offset)
-{
-  (void)flags;
-  (void)addr;
-
-  auto it = open_files.find(fd);
-  if (it == open_files.end())
-  {
-    return MAP_FAILED;
-  }
-
-  std::string &path = it->second.path;
-  auto node_it = filesystem.find(path);
-  if (node_it == filesystem.end())
-  {
-    return MAP_FAILED;
-  }
-
-  VFSNode &node = node_it->second;
-
-  // Check offset bounds
-  if ((size_t)offset > node.content.size())
-  {
-    return MAP_FAILED;
-  }
-
-  // Allocate memory via host mmap
-  size_t map_len = length;
-  if (offset + (off_t)length > (off_t)node.content.size())
-  {
-    map_len = node.content.size() - offset;
-  }
-
-  void *mem = mmap(nullptr, length, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if (mem == MAP_FAILED)
-  {
-    return MAP_FAILED;
-  }
-
-  // Copy file content to the allocated memory
-  if (map_len > 0)
-  {
-    memcpy(mem, node.content.data() + offset, map_len);
-  }
-
-  // Zero the rest if length > file size
-  if (length > map_len)
-  {
-    memset((char *)mem + map_len, 0, length - map_len);
-  }
-
-  // Track this mmap region
-  MmapRegion region;
-  region.fd = fd;
-  region.offset = offset;
-  region.length = length;
-  region.prot = prot;
-  mmap_regions[(uintptr_t)mem] = region;
-
-  // Apply protection
-  int host_prot = 0;
-  if (prot & PROT_READ)
-    host_prot |= PROT_READ;
-  if (prot & PROT_WRITE)
-    host_prot |= PROT_WRITE;
-  if (prot & PROT_EXEC)
-    host_prot |= PROT_EXEC;
-  mprotect(mem, length, host_prot);
-
-  return mem;
-}
-
-int FileSystemState::do_munmap(void *addr, size_t length)
-{
-  uintptr_t key = (uintptr_t)addr;
-  auto it = mmap_regions.find(key);
-  if (it != mmap_regions.end())
-  {
-    mmap_regions.erase(it);
-  }
-  return 0;
-}
-
-long emu_mmap(void *addr, size_t length, int prot, int flags, int fd,
-              off_t offset)
-{
-  // Check if fd is a VFS file
-  auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
-  if (fd >= 0 && fs.open_files.find(fd) != fs.open_files.end())
-  {
-    void *result = fs.do_mmap(addr, length, prot, flags, fd, offset);
-    return (long)result;
-  }
-
-  // Not a VFS file, let the host handle it (this will likely fail or be NOP)
-  // We still need to return something valid for anonymous mappings
-  if (fd == -1)
-  {
-    // Anonymous mapping - let host handle it
-    void *result = mmap(addr, length, prot, flags, fd, offset);
-    return (long)result;
-  }
-
-  // For non-VFS files with fd >= 0, we can't really support this
-  // Return MAP_FAILED
-  return (long)MAP_FAILED;
-}
-
-long emu_munmap(void *addr, size_t length)
-{
-  auto &fs = ptmc_state.fs_states[ptmc_state.cursor];
-  return fs.do_munmap(addr, length);
 }
 
 template void
@@ -1217,24 +1271,22 @@ template void FileSystemState::serialize<cereal::BinaryInputArchive>(
 template void FileSystemState::serialize<cereal::BinaryOutputArchive>(
     cereal::BinaryOutputArchive &);
 
-template void FileSystemState::Pipe::serialize<cereal::BinaryInputArchive>(
-    cereal::BinaryInputArchive &);
-template void FileSystemState::Pipe::serialize<cereal::BinaryOutputArchive>(
-    cereal::BinaryOutputArchive &);
-
 int FileSystemState::do_pipe(int pipefd[2], int flags)
 {
-  (void)flags;
-
-  // Allocate pipe ID
-  int pipe_id = next_pipe_id_++;
+  if (flags & ~(O_NONBLOCK | O_CLOEXEC))
+    return -EINVAL;
+  int pipe_id = 1;
+  while (pipes_.contains(pipe_id))
+    ++pipe_id;
 
   // Create the pipe
   pipes_[pipe_id] = Pipe();
 
   // Allocate two fds: read end and write end
-  int read_fd = allocate_fd(FdType::PIPE);
-  int write_fd = allocate_fd(FdType::PIPE);
+  int read_fd = allocate_fd(FdType::PIPE, O_RDONLY | (flags & O_NONBLOCK),
+                            (flags & O_CLOEXEC) ? FD_CLOEXEC : 0);
+  int write_fd = allocate_fd(FdType::PIPE, O_WRONLY | (flags & O_NONBLOCK),
+                             (flags & O_CLOEXEC) ? FD_CLOEXEC : 0);
 
   if (read_fd < 0 || write_fd < 0)
   {
@@ -1265,7 +1317,8 @@ bool FileSystemState::is_pipe(int fd) const
 ssize_t FileSystemState::do_pipe_read(int fd, void *buf, size_t count)
 {
   auto it = pipe_fds_.find(fd);
-  if (it == pipe_fds_.end())
+  if (!fd_manager_ || fd_manager_->get_fd_type(fd) != FdType::PIPE ||
+      it == pipe_fds_.end())
   {
     return -EBADF;
   }
@@ -1283,6 +1336,8 @@ ssize_t FileSystemState::do_pipe_read(int fd, void *buf, size_t count)
   }
 
   Pipe &pipe = pipe_it->second;
+  if (count == 0)
+    return 0;
   if (pipe.buffer.empty())
   {
     if (pipe.write_closed)
@@ -1294,7 +1349,8 @@ ssize_t FileSystemState::do_pipe_read(int fd, void *buf, size_t count)
 
   size_t to_read = std::min(count, pipe.buffer.size());
   std::vector<char> data(pipe.buffer.begin(), pipe.buffer.begin() + to_read);
-  memcpy_host2guest(buf, data.data(), to_read);
+  if (!guest_write_exact(ptmc_state.pids[ptmc_state.cursor], buf, data.data(), to_read))
+    return -EFAULT;
   pipe.buffer.erase(pipe.buffer.begin(), pipe.buffer.begin() + to_read);
 
   LOG_TRACE("pipe_read(fd=%d, count=%zu) = %zu", fd, count, to_read);
@@ -1304,7 +1360,8 @@ ssize_t FileSystemState::do_pipe_read(int fd, void *buf, size_t count)
 ssize_t FileSystemState::do_pipe_write(int fd, const void *buf, size_t count)
 {
   auto it = pipe_fds_.find(fd);
-  if (it == pipe_fds_.end())
+  if (!fd_manager_ || fd_manager_->get_fd_type(fd) != FdType::PIPE ||
+      it == pipe_fds_.end())
   {
     return -EBADF;
   }
@@ -1323,14 +1380,25 @@ ssize_t FileSystemState::do_pipe_write(int fd, const void *buf, size_t count)
   }
 
   Pipe &pipe = pipe_it->second;
+  if (count == 0)
+    return 0;
   if (pipe.read_closed)
   {
     return -EPIPE; // Reader closed
   }
 
   // Read data from guest
+  if (count > static_cast<size_t>(std::numeric_limits<ssize_t>::max()))
+    return -EINVAL;
+  const size_t available = pipe_capacity - pipe.buffer.size();
+  if (count > pipe_atomic_limit && count > available &&
+      !(fd_manager_->get_status_flags(fd) & O_NONBLOCK))
+    throw std::runtime_error("Blocking pipe writes requiring partial progress are unsupported");
+  if (!available || (count <= pipe_atomic_limit && count > available)) return -EAGAIN;
+  count = std::min(count, available);
   std::vector<char> data(count);
-  memcpy_guest2host(data.data(), buf, count);
+  if (!guest_read_exact(ptmc_state.pids[ptmc_state.cursor], buf, data.data(), count))
+    return -EFAULT;
 
   // Append to pipe buffer
   pipe.buffer.insert(pipe.buffer.end(), data.begin(), data.end());
@@ -1342,7 +1410,8 @@ ssize_t FileSystemState::do_pipe_write(int fd, const void *buf, size_t count)
 int FileSystemState::do_pipe_close(int fd)
 {
   auto it = pipe_fds_.find(fd);
-  if (it == pipe_fds_.end())
+  if (!fd_manager_ || fd_manager_->get_fd_type(fd) != FdType::PIPE ||
+      it == pipe_fds_.end())
   {
     return -EBADF;
   }
@@ -1387,3 +1456,214 @@ long emu_pipe(int pipefd[2], int flags)
 }
 
 long emu_pipe2(int pipefd[2], int flags) { return emu_pipe(pipefd, flags); }
+template <class Archive>
+void FileSystemState::Pipe::serialize(Archive &ar)
+{
+  ar(buffer, read_closed, write_closed);
+}
+
+template void FileSystemState::Pipe::serialize<cereal::BinaryInputArchive>(cereal::BinaryInputArchive &);
+template void FileSystemState::Pipe::serialize<cereal::BinaryOutputArchive>(cereal::BinaryOutputArchive &);
+
+long emu_vfs_statat(int dirfd,const char* path_ptr,struct stat* destination,int flags)
+{
+  if (flags & ~(AT_EMPTY_PATH|AT_SYMLINK_NOFOLLOW|AT_NO_AUTOMOUNT)) return -EINVAL;
+  std::string path;
+  const long copied=read_guest_string(path_ptr,path);
+  if (copied) return copied;
+  auto& fs=ptmc_state.fs_states[ptmc_state.cursor];
+  if (path.empty() && (flags&AT_EMPTY_PATH)) {
+    if (dirfd!=AT_FDCWD) return emu_fstat(dirfd,destination);
+    path=fs.get_cwd().empty()?"/":fs.get_cwd();
+  }
+  std::string resolved;
+  const int error=fs.resolve_path_checked(dirfd,path,resolved,!(flags&AT_SYMLINK_NOFOLLOW));
+  if (error) return error;
+  struct stat value{};
+  const int result=fs.do_stat(resolved,&value,!(flags&AT_SYMLINK_NOFOLLOW));
+  if (result) return result;
+  return guest_write_exact(ptmc_state.pids[ptmc_state.cursor],destination,&value,sizeof(value))?0:-EFAULT;
+}
+long FileSystemState::do_access(int dirfd, const std::string& input, int mode, int flags)
+{
+  if ((mode & ~(R_OK | W_OK | X_OK)) ||
+      (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))) return -EINVAL;
+  /* Permission checks use the captured VFS permission bits only. Every modeled
+   * tracee runs as one fixed effective identity, so the owner-class bits decide
+   * R/W/X for the model; guest credentials remain outside this closure. */
+  const auto permission_mode = [this, mode](const std::string &path) -> mode_t {
+    const auto node = filesystem.find(path);
+    if (node == filesystem.end()) return 0;
+    const mode_t bits = node->second.metadata.st_mode;
+    if (!S_ISDIR(bits) && (mode & W_OK))
+      return 0; // Read-only virtual storage: only directories are modeled writable.
+    mode_t allowed = 0;
+    if (bits & S_IREAD) allowed |= R_OK;
+    if (bits & S_IWRITE) allowed |= W_OK;
+    if (bits & S_IEXEC) allowed |= X_OK;
+    return allowed;
+  };
+  std::string path = input;
+  if (path.empty() && (flags & AT_EMPTY_PATH)) {
+    if (dirfd == AT_FDCWD) path = cwd.empty() ? "/" : cwd;
+    else {
+      if (!fd_manager_ || !fd_manager_->is_allocated(dirfd)) return -EBADF;
+      const auto opened = open_files.find(dirfd);
+      if (opened == open_files.end())
+        throw std::runtime_error("VFS empty access on non-file descriptor is not modeled");
+      path = opened->second.path;
+    }
+  }
+  std::string resolved;
+  if (path != input) {
+    if (!filesystem.contains(path)) return -ENOENT;
+    resolved = path;
+  } else {
+    const int error = resolve_path_checked(dirfd, path, resolved,
+        !(flags & AT_SYMLINK_NOFOLLOW), true);
+    if (error) return error;
+  }
+  if (!filesystem.contains(resolved)) return -ENOENT;
+  if (mode != F_OK && (permission_mode(resolved) & mode) != mode) return -EACCES;
+  return 0;
+}
+
+long emu_vfs_accessat(int dirfd, const char* path_ptr, int mode, int flags)
+{
+  if ((mode & ~(R_OK | W_OK | X_OK)) ||
+      (flags & ~(AT_EACCESS | AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH))) return -EINVAL;
+  std::string path;
+  const long copied = read_guest_string(path_ptr, path);
+  if (copied) return copied;
+  return ptmc_state.fs_states[ptmc_state.cursor].do_access(dirfd, path, mode, flags);
+}
+
+long emu_getcwd(char* destination,size_t size)
+{
+  if (!size) return -EINVAL;
+  const auto& stored=ptmc_state.fs_states[ptmc_state.cursor].get_cwd();
+  const std::string path=stored.empty()?"/":stored;
+  if (size<path.size()+1) return -ERANGE;
+  return guest_write_exact(ptmc_state.pids[ptmc_state.cursor],destination,path.c_str(),path.size()+1)?long(path.size()+1):-EFAULT;
+}
+
+long FileSystemState::do_readlink(const std::string& path, std::string& target)
+{
+  std::string resolved;
+  const int error = resolve_path_checked(AT_FDCWD, path, resolved, false);
+  if (error) return error;
+  if (resolved == "/proc/self")
+    throw std::runtime_error("Virtual proc self link target is not modeled");
+  const auto node = filesystem.find(resolved);
+  if (node == filesystem.end()) return -ENOENT;
+  if (!S_ISLNK(node->second.metadata.st_mode)) return -EINVAL;
+  target.assign(node->second.content.begin(), node->second.content.end());
+  return 0;
+}
+
+long emu_vfs_readlinkat(int dirfd, const char* path_ptr, char* buffer, size_t size)
+{
+  // Linux's ABI takes an int, even though libc exposes size_t.
+  const int count = static_cast<int>(size);
+  if (count <= 0) return -EINVAL;
+  std::string path;
+  const long copied = read_guest_string(path_ptr, path);
+  if (copied) return copied;
+  auto& fs = ptmc_state.fs_states[ptmc_state.cursor];
+  std::string resolved;
+  const int error = fs.resolve_path_checked(dirfd, path, resolved, false);
+  if (error) return error;
+  std::string target;
+  const long result = fs.do_readlink(resolved, target);
+  if (result) return result;
+  const size_t length = std::min(target.size(), static_cast<size_t>(count));
+  return guest_write_exact(ptmc_state.pids[ptmc_state.cursor], buffer, target.data(), length)
+      ? static_cast<long>(length) : -EFAULT;
+}
+
+void FileSystemState::capture_executable(const std::string& executable)
+{
+  namespace fs = std::filesystem;
+  const fs::path absolute = fs::absolute(executable);
+  const std::string canonical = fs::canonical(absolute).string();
+  std::string path = absolute.lexically_normal().string();
+  if (fs::canonical(path).string() != canonical)
+    throw std::runtime_error("Executable link/dot-dot traversal is not modeled");
+  for (unsigned depth = 0; ; ++depth) {
+    if (depth == 40) throw std::runtime_error("Executable symlink chain exceeds model limit");
+    struct stat metadata{};
+    if (lstat(path.c_str(), &metadata))
+      throw std::runtime_error("Cannot capture executable path: " + path);
+    VFSNode node{};
+    node.metadata.st_mode = metadata.st_mode;
+    node.metadata.st_mtim = metadata.st_mtim;
+    if (S_ISLNK(metadata.st_mode)) {
+      char target[4096];
+      const ssize_t length = readlink(path.c_str(), target, sizeof(target));
+      if (length < 0 || static_cast<size_t>(length) == sizeof(target))
+        throw std::runtime_error("Cannot capture executable symlink: " + path);
+      node.content.assign(target, target + length);
+    } else {
+      if (!S_ISREG(metadata.st_mode)) throw std::runtime_error("Executable is not a regular file");
+      std::ifstream input(path, std::ios::binary);
+      node.content.assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
+      if (!input || node.content.size() != static_cast<size_t>(metadata.st_size))
+        throw std::runtime_error("Cannot capture executable content: " + path);
+    }
+    node.metadata.st_size = node.content.size();
+    const bool link = S_ISLNK(metadata.st_mode);
+    const std::string target(node.content.begin(), link ? node.content.end() : node.content.begin());
+    // Capture ancestors, without flattening host directory symlinks into fake
+    // directories. Modeled traversal uses only these captured link bytes.
+    fs::path prefix;
+    for (const auto& component : fs::path(path).parent_path()) {
+      prefix /= component;
+      const std::string name = prefix.string();
+      struct stat ancestor{};
+      if (lstat(name.c_str(), &ancestor)) throw std::runtime_error("Cannot capture executable ancestor: " + name);
+      VFSNode directory{};
+      directory.metadata.st_mode = ancestor.st_mode;
+      directory.metadata.st_mtim = ancestor.st_mtim;
+      if (S_ISLNK(ancestor.st_mode)) {
+        char target[4096];
+        const ssize_t length = readlink(name.c_str(), target, sizeof(target));
+        if (length < 0 || static_cast<size_t>(length) == sizeof(target))
+          throw std::runtime_error("Cannot capture executable ancestor link: " + name);
+        directory.content.assign(target, target + length);
+      }
+      directory.metadata.st_size = directory.content.size();
+      const auto existing = filesystem.find(name);
+      if (existing != filesystem.end() &&
+          ((existing->second.metadata.st_mode & S_IFMT) != (directory.metadata.st_mode & S_IFMT) ||
+           (S_ISLNK(directory.metadata.st_mode) && existing->second.content != directory.content)))
+        throw std::runtime_error("Executable ancestor conflicts with configured virtual file: " + name);
+      filesystem.emplace(name, std::move(directory));
+    }
+    const auto prior = filesystem.find(path);
+    if (prior != filesystem.end() &&
+        (prior->second.metadata.st_mode != node.metadata.st_mode || prior->second.content != node.content))
+      throw std::runtime_error("Executable conflicts with configured virtual file: " + path);
+    filesystem[path] = std::move(node);
+    if (!link) {
+      if (path != canonical) { path = canonical; continue; }
+      break;
+    }
+    const fs::path next = fs::path(target).is_absolute() ? fs::path(target) : fs::path(path).parent_path()/target;
+    path = next.lexically_normal().string();
+    if (fs::canonical(next).string() != fs::canonical(path).string())
+      throw std::runtime_error("Executable link/dot-dot traversal is not modeled");
+  }
+  VFSNode proc_link{};
+  proc_link.metadata.st_mode = S_IFLNK | 0777;
+  proc_link.content.assign(canonical.begin(), canonical.end());
+  proc_link.metadata.st_size = proc_link.content.size();
+  if (filesystem.contains("/proc/self/exe"))
+    throw std::runtime_error("Executable link conflicts with configured virtual file: /proc/self/exe");
+  ensure_dir_exists("/");
+  ensure_dir_exists("/proc");
+  ensure_dir_exists("/proc/self");
+  if (!S_ISDIR(filesystem.at("/proc").metadata.st_mode) ||
+      !S_ISDIR(filesystem.at("/proc/self").metadata.st_mode))
+    throw std::runtime_error("Executable proc projection conflicts with configured virtual filesystem");
+  filesystem["/proc/self/exe"] = std::move(proc_link);
+}

@@ -1,19 +1,24 @@
 #include "scheduler.h"
+#include "config.h"
+
 #include "debug.h"
+#include "net/emu.h"
 #include "expr_eval.hpp"
 #include "fs/fsstate.h"
 #include "guest.h"
 #include "monitor.h"
-#include "net/emu.h"
-#include "net/sockstate.h"
 #include "proc_status.h"
-#include "scheduler/scheduler.h"
+#include "net/sockstate.h"
 #include "state/state.h"
+#include "state/resident_memory.h"
 #include "state/state_store.h"
 #include "state/state_store_packed.h"
 #include "state/state_transition.h"
 #include "state/sysstate_store.h"
 #include "utils.h"
+#include "state/soft_dirty_experiment.h"
+#include "state/page_capture.h"
+#include "state/page_restore_stats.h"
 
 /* NCursesUI integration */
 #include "ui/log_wrapper.h"
@@ -23,6 +28,7 @@
 // 外部声明：get_ncurses_ui 定义在 main.cpp
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui();
 
+#include <array>
 #include <assert.h>
 #include <atomic>
 #include <chrono>
@@ -30,31 +36,23 @@ extern "C" detsim::ui::NCursesUI *get_ncurses_ui();
 #include <cstddef>
 #include <cstdlib>
 #include <fcntl.h>
-#include <pthread.h>
+#include <limits>
+#include <optional>
+#include <nlohmann/json.hpp>
 #include <random>
+#include <set>
 #include <readline/readline.h>
 #include <signal.h>
 #include <string.h>
-#include <sys/ioctl.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
-#include <thread>
 #include <unistd.h>
+#include <unordered_map>
 
 #define pids ptmc_state.pids
 extern FILE *log_fp;
 double start_time = 0.0;
-
-/* Apply user choice modifications to syscall arguments */
-void apply_choose(const syscall_info &info, choose_out *out)
-{
-  for (int i = 0; i < 6; i++)
-  {
-    if (out->len[i])
-      memcpy_host2guest((void *)info.args[i], out->args[i], out->len[i]);
-  }
-}
 
 void show_syscall_history();
 /* For single step use. Should get hash from ptmc_state.sysstate_hash. *
@@ -71,50 +69,23 @@ void load(hash_type hash)
 
 /* Forward declarations for status monitor */
 static void stop_status_monitor();
+static void poll_status_monitor();
 
-long expr(const char *e, bool *success);
-/* Judge state assertions. Return 0 if legal */
-static int check_state()
-{
-  hash_type current_hash = ptmc_state.running_state.ss_hash;
-  for (auto &assertion : ptmc_state.assertions)
-  {
-    bool success;
-    long val = expr(assertion.c_str(), &success);
-    LOG_DEBUG("Assertion \"%s\" = %ld (success=%d)", assertion.c_str(), val,
-              success);
-    if (!success)
-      LOG_ERROR("Failed to evaluate expression \"%s\"", assertion.c_str());
-    if (val == false)
-    {
-      detsim::ui::ui_printf("Assertion \"%s\" fail at sys_state " HASH_FORMAT
-                            "!\n",
-                            assertion.c_str(), current_hash);
-      return 1;
-    }
-  }
-  for (auto f : ptmc_state.user_checks)
-    if (f())
-      return 1;
-
-  return 0;
-}
-
-int load_exec_store()
+int load_exec_store(TransitionAction action)
 {
   int index = ptmc_state.cursor;
   // Save original state before attempting transition
   sys_state original_state = ptmc_state.running_state;
   sys_state s = original_state;
 
-  if (DISEXITED(s.status[index]))
+  if (action == TransitionAction::Normal && DISEXITED(s.status[index]))
   {
     detsim::ui::ui_printf(
         "Tracee #%d has exited with status %d. Please do something else.\n",
         index, DEXITSTATUS(s.status[index]));
     return 0;
   }
-  else if (DISCRASHED(s.status[index]))
+  else if (action == TransitionAction::Normal && DISCRASHED(s.status[index]))
   {
     detsim::ui::ui_printf(
         "Tracee #%d stopped for signal %s. Please do something else.\n", index,
@@ -122,39 +93,80 @@ int load_exec_store()
     return 0;
   }
 
-  TransitionResult result = state_transition(s, index);
+  // The requested action decides the transition; a timeout step targets the
+  // selected actor exactly like an automatic-search timeout action.
+  const int thread = ptmc_state.current_thread_idx[index];
+  TransitionResult result = state_transition(s, index,
+      action == TransitionAction::Timeout ? thread : -1, action);
+  poll_status_monitor();
 
   // Check if the current thread is blocked
   if (result.code == CKPT_DISCARD)
   {
     int thread_idx = ptmc_state.current_thread_idx[index];
     detsim::ui::ui_printf(
-        "Thread %d is blocked (waiting on futex). Cannot step.\n", thread_idx);
+        "Thread %d is blocked (pending syscall). Use 'pending' for details, "
+        "'thread N' to pick another actor, or 'si timeout' for a finite deadline.\n",
+        thread_idx);
     // Restore to the original state before this si command
-    // The tracee is in an unstable state (syscall entry), so we must roll back
+    // A blocked actor did not execute; retain the exact source state.
     ptmc_state.running_state = original_state;
-    // BUT: Preserve the thread information from the attempted transition
-    // so user can see and switch to other threads
-    ptmc_state.running_state.child[index].threads =
-        result.new_state.child[index].threads;
-    ptmc_state.running_state.child[index].current_thread_idx =
-        result.new_state.child[index].current_thread_idx;
-    // The thread_blocked flag is already set in ptmc_state by the futex handler
     return -1;
   }
 
-  if (check_state() != 0){
+  if (result.property_violation != 0)
     detsim::ui::ui_printf("Reach illegal state.\n");
-    return 0;
-  }
-  if (result.code == CKPT_YES){
-    return 0;
-  }
-  return 1;
+
+  return 0;
 }
 extern SSS state_set;
 extern TSS state_tree;
 extern int sigint_received;
+
+// BFS records completed direct expansions while draining its saved queue. Only
+// a whole successful, unbounded BFS proves those nodes' reachable closure was
+// covered; its in-progress direct records are not a DFS subtree proof.
+static constexpr int kExpandedUnbounded = std::numeric_limits<int>::max();
+static std::unordered_map<hash_type, int> expanded_remaining;
+static std::unordered_set<hash_type> fully_covered;
+
+struct SearchCoverage
+{
+  bool depth_cut = false;
+  void merge(const SearchCoverage& child) { depth_cut |= child.depth_cut; }
+};
+// The result belongs to this exact bounded query. A larger-depth result is not
+// substituted: even a completed enumeration may have found a cutoff below it.
+static std::unordered_map<hash_type, std::unordered_map<int, SearchCoverage>> dfs_coverage;
+
+static int expanded_budget(hash_type hash)
+{
+  const auto found = expanded_remaining.find(hash);
+  return found == expanded_remaining.end() ? -1 : found->second;
+}
+
+static void record_expanded(hash_type hash, int remaining)
+{
+  auto [position, inserted] = expanded_remaining.try_emplace(hash, remaining);
+  if (!inserted && remaining > position->second)
+    position->second = remaining;
+}
+
+static bool all_discovered_fully_expanded()
+{
+  for (hash_type hash : state_set)
+    if (expanded_budget(hash) != kExpandedUnbounded)
+      return false;
+  return true;
+}
+
+static void clear_search_bookkeeping()
+{
+  state_set.clear();
+  expanded_remaining.clear();
+  fully_covered.clear();
+  dfs_coverage.clear();
+}
 
 #include <sys/time.h>
 static double gettime()
@@ -163,6 +175,7 @@ static double gettime()
   gettimeofday(&tv, NULL);
   return tv.tv_sec + tv.tv_usec / 1000000.0;
 }
+
 
 /* ======================================================================
  * Status Monitor - Real-time statistics display
@@ -174,7 +187,8 @@ static std::atomic<size_t> g_states_searched{0};
 static std::atomic<size_t> g_states_new{0};
 static std::atomic<size_t> g_queue_size{0};
 static std::atomic<double> g_start_time{0.0};
-static std::atomic<bool> g_monitor_running{false};
+static bool g_monitor_running = false;
+static double g_next_status_update = 0;
 
 /* Depth tracking for depth vs states analysis */
 static std::atomic<size_t> g_max_depth_recorded{0}; // Maximum depth seen so far
@@ -272,8 +286,6 @@ static std::atomic<uint64_t> g_syscall_time_us{
     0};                                        // Total syscall execution time
 static std::atomic<size_t> g_save_count{0};    // Number of saves
 static std::atomic<size_t> g_restore_count{0}; // Number of restores
-static std::chrono::high_resolution_clock::time_point g_last_stat_time;
-static std::thread g_monitor_thread;
 
 /* Calculate real depth from state_tree by backtracking to root
  * This is the actual path length from current state to initial state */
@@ -299,19 +311,6 @@ static size_t calculate_state_depth(hash_type current_hash)
   }
 
   return depth;
-}
-
-/* Get terminal size */
-static void get_terminal_size(int &rows, int &cols)
-{
-  struct winsize w;
-  rows = 24;
-  cols = 80; /* defaults */
-  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &w) == 0)
-  {
-    rows = w.ws_row;
-    cols = w.ws_col;
-  }
 }
 
 /* Format bytes to human readable */
@@ -384,8 +383,7 @@ static void update_depth_statistics(size_t depth, size_t total_searched)
 }
 
 /* Helper: Calculate subsystem memory usage */
-static void calculate_subsystem_stats(size_t &sock_state_total,
-                                      size_t &fs_state_total)
+static void calculate_subsystem_stats(size_t &sock_state_total, size_t &fs_state_total)
 {
   sock_state_total = 0;
   fs_state_total = 0;
@@ -405,9 +403,8 @@ static void format_time(double elapsed, int &hours, int &minutes, int &seconds)
 }
 
 /* Helper: Update NCursesUI status display */
-static void update_ui_status(detsim::ui::NCursesUI *ui,
-                             const struct StoreStats &stats, double elapsed,
-                             size_t depth, size_t queue_size,
+static void update_ui_status(detsim::ui::NCursesUI *ui, const struct StoreStats &stats,
+                             double elapsed, size_t depth, size_t queue_size,
                              size_t state_tree_size, size_t total_sysstates,
                              size_t unique_states, size_t sock_state_total,
                              size_t fs_state_total, size_t state_queue_internal)
@@ -429,21 +426,21 @@ static void update_ui_status(detsim::ui::NCursesUI *ui,
   ui->set_status_line(1, buf);
 
   /* Line 2: Worker queues & prefetch stats */
-  snprintf(buf, sizeof(buf),
-           "IO: %zu/%zu | Prefetch: %zu Q(%lu/%lu H) | Tree: %zu | Sys: %zu",
-           stats.io_queue_size, stats.io_queue_cap, stats.prefetch_queue_size,
-           stats.prefetch_issued, stats.prefetch_hits, state_tree_size,
-           total_sysstates);
+  snprintf(
+      buf, sizeof(buf),
+      "IO: %zu/%zu | Prefetch: %zu Q(%lu/%lu H) | Tree: %zu | Sys: %zu",
+      stats.io_queue_size, stats.io_queue_cap, stats.prefetch_queue_size,
+      stats.prefetch_issued, stats.prefetch_hits, state_tree_size,
+      total_sysstates);
   ui->set_status_line(2, buf);
 
   /* Line 3: Cache L1 & L2 with hit rate */
-  snprintf(buf, sizeof(buf),
-           "L1: %s/%s (%.0f%%) [%zu] | L2: %s/%s (%.0f%%) [%zu] | Hit: %.1f%%",
-           format_bytes(stats.l1_usage).c_str(),
-           format_bytes(stats.l1_cap).c_str(), l1_pct, stats.l1_entries,
-           format_bytes(stats.l2_usage).c_str(),
-           format_bytes(stats.l2_cap).c_str(), l2_pct, stats.l2_entries,
-           stats.hit_rate);
+  snprintf(
+      buf, sizeof(buf),
+      "L1: %s/%s (%.0f%%) [%zu] | L2: %s/%s (%.0f%%) [%zu] | Hit: %.1f%%",
+      format_bytes(stats.l1_usage).c_str(), format_bytes(stats.l1_cap).c_str(), l1_pct,
+      stats.l1_entries, format_bytes(stats.l2_usage).c_str(),
+      format_bytes(stats.l2_cap).c_str(), l2_pct, stats.l2_entries, stats.hit_rate);
   ui->set_status_line(3, buf);
 
   /* Line 4: Eviction & subsystem stats */
@@ -456,12 +453,40 @@ static void update_ui_status(detsim::ui::NCursesUI *ui,
   /* Line 5: State stats */
   snprintf(buf, sizeof(buf), "Error Bound: %d", ptmc_state.error_bound);
   ui->set_status_line(5, buf);
+
+  /* Line 6: Logical thread/pending summary; details are in the `pending` command. */
+  int runnable = 0, waiting = 0, ready = 0, retry = 0;
+  for (int process = 0; process < NP; ++process) {
+    if (DISDEAD(ptmc_state.status[process])) continue;
+    const auto &threads = ptmc_state.running_state.child[process].threads;
+    if (threads.empty()) {
+      ++runnable;
+      continue;
+    }
+    for (const auto &thread : threads) {
+      if (!thread.alive) continue;
+      if (!thread.pending_syscall) {
+        ++runnable;
+      } else if (thread.pending_syscall->phase == PendingPhase::Waiting) {
+        ++waiting;
+      } else if (thread.pending_syscall->phase == PendingPhase::Ready) {
+        ++ready;
+      } else {
+        ++retry;
+      }
+    }
+  }
+  snprintf(buf, sizeof(buf),
+           "Threads: runnable=%d waiting=%d ready=%d retry=%d | 'pending' for details",
+           runnable, waiting, ready, retry);
+  ui->set_status_line(6, buf);
+  refresh_thread_panel();
 }
 
 /* Helper: Print text status to console */
 static void print_text_status(const struct StoreStats &stats, double elapsed,
-                              size_t depth, size_t queue_size,
-                              size_t total_sysstates, size_t unique_states)
+                              size_t depth, size_t queue_size, size_t total_sysstates,
+                              size_t unique_states)
 {
   static time_t last_status_time = 0;
   time_t current_time = time(NULL);
@@ -490,17 +515,17 @@ static void print_text_status(const struct StoreStats &stats, double elapsed,
 
   /* Line 3: Cache L1 */
   printf("[STATUS] L1 Hot: %s / %s (%.1f%%) | %zu entries\n",
-         format_bytes(stats.l1_usage).c_str(),
-         format_bytes(stats.l1_cap).c_str(), l1_pct, stats.l1_entries);
+         format_bytes(stats.l1_usage).c_str(), format_bytes(stats.l1_cap).c_str(),
+         l1_pct, stats.l1_entries);
 
   /* Line 4: Cache L2 */
   printf("[STATUS] L2 Warm: %s / %s (%.1f%%) | %zu entries\n",
-         format_bytes(stats.l2_usage).c_str(),
-         format_bytes(stats.l2_cap).c_str(), l2_pct, stats.l2_entries);
+         format_bytes(stats.l2_usage).c_str(), format_bytes(stats.l2_cap).c_str(),
+         l2_pct, stats.l2_entries);
 
   /* Line 5: Time */
-  printf("[STATUS] Elapsed: %02d:%02d:%02d | Total SysStates: %zu\n", hours,
-         minutes, seconds, total_sysstates);
+  printf("[STATUS] Elapsed: %02d:%02d:%02d | Total SysStates: %zu\n",
+         hours, minutes, seconds, total_sysstates);
 
   /* Line 6: Mode */
   const char *mode_str = "DFS";
@@ -522,77 +547,64 @@ static void print_text_status(const struct StoreStats &stats, double elapsed,
     else
       running++;
   }
-  printf("[STATUS] Processes: %d running | %d exited | Current: %d\n", running,
-         exited, ptmc_state.cursor);
+  printf("[STATUS] Processes: %d running | %d exited | Current: %d\n",
+         running, exited, ptmc_state.cursor);
 
   /* Line 8: Current hash */
   printf("[STATUS] Current: %016lx\n", ptmc_state.running_state.ss_hash);
   fflush(stdout);
 }
 
-static void status_monitor_thread()
+// Inspect mutable exploration state only on the exploration thread, after a
+// completed transition. Telemetry cannot race snapshots or delay completion.
+static void poll_status_monitor()
 {
-  std::this_thread::sleep_for(std::chrono::milliseconds(500));
-
+  if (!g_monitor_running) return;
+  const double now = gettime();
+  if (now < g_next_status_update) return;
+  g_next_status_update = now + 1.0;
   detsim::ui::NCursesUI *ui = get_ncurses_ui();
-  int rows, cols;
-  get_terminal_size(rows, cols);
+  struct StoreStats stats;
+  collect_store_stats(stats);
 
-  while (g_monitor_running.load())
+  double elapsed = gettime() - g_start_time.load();
+  size_t total_sysstates = state_set.size();
+  size_t unique_states = g_states_new.load();
+  size_t queue_size = g_queue_size.load();
+  size_t depth = calculate_state_depth(ptmc_state.running_state.ss_hash);
+
+  update_depth_statistics(depth, g_states_searched.load());
+
+  size_t sock_state_total, fs_state_total;
+  calculate_subsystem_stats(sock_state_total, fs_state_total);
+
+  size_t state_tree_size = state_tree.size();
+  size_t state_queue_internal = StateStore::instance().queue_size();
+
+  if (ui)
   {
-    struct StoreStats stats;
-    collect_store_stats(stats);
-
-    double elapsed = gettime() - g_start_time.load();
-    size_t total_sysstates = state_set.size();
-    size_t unique_states = g_states_new.load();
-    size_t queue_size = g_queue_size.load();
-    size_t depth = calculate_state_depth(ptmc_state.running_state.ss_hash);
-
-    update_depth_statistics(depth, g_states_searched.load());
-
-    size_t sock_state_total, fs_state_total;
-    calculate_subsystem_stats(sock_state_total, fs_state_total);
-
-    size_t state_tree_size = state_tree.size();
-    size_t state_queue_internal = StateStore::instance().queue_size();
-
-    if (ui)
-    {
-      update_ui_status(ui, stats, elapsed, depth, queue_size, state_tree_size,
-                       total_sysstates, unique_states, sock_state_total,
-                       fs_state_total, state_queue_internal);
-    }
-    else
-    {
-      print_text_status(stats, elapsed, depth, queue_size, total_sysstates,
-                        unique_states);
-    }
-
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    update_ui_status(ui, stats, elapsed, depth, queue_size,
+                     state_tree_size, total_sysstates, unique_states,
+                     sock_state_total, fs_state_total, state_queue_internal);
   }
+  else
+  {
+    print_text_status(stats, elapsed, depth, queue_size, total_sysstates, unique_states);
+  }
+
 }
 
 static void start_status_monitor()
 {
   g_monitor_running = true;
   g_start_time = gettime();
-  g_last_stat_time = std::chrono::high_resolution_clock::now();
+  g_next_status_update = g_start_time.load() + 0.5;
   g_max_depth_recorded = 0;
-
-  /* Open depth statistics file for append */
-  std::lock_guard<std::mutex> lock(g_depth_stat_mutex);
-  g_monitor_thread = std::thread(status_monitor_thread);
-  pthread_setname_np(g_monitor_thread.native_handle(), "status_monitor");
 }
 
 static void stop_status_monitor()
 {
   g_monitor_running = false;
-  if (g_monitor_thread.joinable())
-  {
-    g_monitor_thread.join();
-  }
 
   /* Clear depth data points for next run */
   {
@@ -606,28 +618,146 @@ static void stop_status_monitor()
   }
   g_max_depth_recorded = 0;
 
-  /* If not using UI, clear status area and show cursor */
-  detsim::ui::NCursesUI *ui = get_ncurses_ui();
 }
 
-bool state_to_be_discarded(int index, syscall_info *infos)
+// Search failures must finish telemetry before main catches the exception.
+// Existing explicit stops retain their reporting order on normal/early exits.
+class StatusMonitorScope
 {
-  if (ptmc_state.error_bound <= 0)
-    return true;
-
-  if (index == 0)
+public:
+  StatusMonitorScope() { start_status_monitor(); }
+  ~StatusMonitorScope()
   {
-    uintptr_t raft = eval<uintptr_t>("raft", 0);
-    if (raft == 0)
-      return false; // If we can't evaluate, don't discard
-    int state = eval<int>("((raft_server*)raft)->state", 0);
-    if (state == 2 || state == 3)
-    {
-      return true;
-    }
+    if (g_monitor_running)
+      stop_status_monitor();
   }
+  StatusMonitorScope(const StatusMonitorScope &) = delete;
+  StatusMonitorScope &operator=(const StatusMonitorScope &) = delete;
+};
 
-  return false;
+// Search UI selection need not end at an exited state. Keep only the first
+// actual incoming edge to an all-exited result, without retaining its snapshot.
+struct SearchExitedReceipt
+{
+  hash_type source;
+  hash_type target;
+  int process;
+  int thread;
+  int choice;
+  TransitionAction action;
+  std::array<int, NP> exit_codes;
+};
+
+static void remember_search_exited(std::optional<SearchExitedReceipt>& receipt,
+                                   hash_type source,const ActorAction& actor,
+                                   const TransitionResult& result)
+{
+  if (receipt || result.code==CKPT_DISCARD || result.property_violation ||
+      result.new_state.property_failed)
+    return;
+  for (int process=0;process<NP;++process)
+    if (!DISEXITED(result.new_state.status[process]))
+      return;
+  SearchExitedReceipt incoming{source,result.new_state.ss_hash,actor.process,
+      actor.thread,actor.action==TransitionAction::Timeout ? DETSIM_CHOICE_TIMEOUT :
+          (ptmc_state.n_choose ? ptmc_state.choose : -1),actor.action,{}};
+  for (int process=0;process<NP;++process)
+    incoming.exit_codes[process]=DEXITSTATUS(result.new_state.status[process]);
+  receipt=incoming;
+}
+
+static void report_search_exited(const std::optional<SearchExitedReceipt>& receipt)
+{
+  if (!receipt || sigint_received)
+    return;
+  char source[17],target[17];
+  snprintf(source,sizeof(source),HASH_FORMAT,receipt->source);
+  snprintf(target,sizeof(target),HASH_FORMAT,receipt->target);
+  const nlohmann::json value={
+      {"schema",1},{"source",source},{"target",target},
+      {"process",receipt->process},{"thread",receipt->thread},
+      {"choice",receipt->choice},
+      {"action",receipt->action==TransitionAction::Timeout ? "timeout" : "normal"},
+      {"exit_codes",receipt->exit_codes}};
+  detsim::ui::ui_printf("SEARCH_EXITED %s\n",value.dump().c_str());
+}
+
+// Discover alternatives separately for every source x logical actor x action.
+// Restoring the source never carries a previous actor's choice cardinality.
+static TransitionResult search_actor_choice(const sys_state& source,const ActorAction& actor,
+                                           int preset,int& cardinality,std::vector<int>& remaining)
+{
+  ptmc_state.n_choose=0;
+  ptmc_state.choose=preset;
+  TransitionResult result;
+  try { result=state_transition(source,actor.process,actor.thread,actor.action); }
+  catch (const ActionRejected& error) {
+    throw std::runtime_error(std::string("Enumerated actor action was rejected: ")+error.what());
+  }
+  if (result.code==CKPT_DISCARD)
+    throw std::runtime_error("Enumerated actor action did not execute");
+  const int discovered=ptmc_state.n_choose;
+  const int selected=ptmc_state.choose;
+  if (discovered<0 || (discovered && (selected<0 || selected>=discovered)))
+    throw std::runtime_error("Invalid syscall choice discovery");
+  if (cardinality<0) {
+    cardinality=discovered;
+    for (int choice=0;choice<discovered;++choice)
+      if (choice!=selected) remaining.push_back(choice);
+  } else if (discovered!=cardinality || !discovered || selected!=preset) {
+    throw std::runtime_error("Syscall choice cardinality/preset changed for the same saved actor action");
+  }
+  return result;
+}
+
+EnumerationKind classify_enumeration(const sys_state& source,
+    const std::vector<ActorAction>& actors, bool may_expand)
+{
+  if (source.property_failed) return EnumerationKind::Violation;
+  if (actors.empty()) return EnumerationKind::Terminal;
+
+  if (!may_expand) return EnumerationKind::DepthCut;
+  return EnumerationKind::Expanded;
+}
+
+EnumerationSummary enumerate_state(const sys_state& source, bool may_expand,
+                                   const EdgeCallback& callback)
+{
+  detsim::resident::Scope controlled_execution;
+  const auto actions = enabled_actor_actions(source);
+  const auto kind = classify_enumeration(source, actions, may_expand);
+  if (kind != EnumerationKind::Expanded) return {kind, 0};
+  if (!callback) throw std::runtime_error("Single-state expansion requires an edge callback");
+  // This API owns its choice policy independently of the invoking UI command.
+  // In particular a persistent worker has no stdin, and a previous RAND command
+  // must not replace explicit saved-actor presets with random choices.
+  struct PresetChoiceScope {
+    int previous_auto = auto_mode;
+    decltype(ptmc_state.mode) previous_mode = ptmc_state.mode;
+    PresetChoiceScope() { auto_mode = 1; ptmc_state.mode = PTMC_STATE::MODE_BFS; }
+    ~PresetChoiceScope() { auto_mode = previous_auto; ptmc_state.mode = previous_mode; }
+  } choice_scope;
+  uint64_t emitted = 0;
+  for (const auto& actor : actions) {
+    int cardinality = -1;
+    std::vector<int> choices;
+    do {
+      int preset = 0;
+      if (cardinality >= 0) { preset = choices.back(); choices.pop_back(); }
+      TransitionResult result = search_actor_choice(source, actor, preset, cardinality, choices);
+      if (!result.new_state.ss_hash)
+        throw std::runtime_error("Single-state expansion produced no target identity");
+      const int choice = actor.action == TransitionAction::Timeout ? DETSIM_CHOICE_TIMEOUT :
+          (ptmc_state.n_choose ? ptmc_state.choose : -1);
+      const bool violation = result.property_violation || result.new_state.property_failed;
+      callback(actor, choice, cardinality, result);
+      ++emitted;
+      if (violation) return {EnumerationKind::Violation, emitted};
+    } while (!choices.empty());
+  }
+  // A failed final restore is a worker failure, never a successful Done receipt.
+  load(source.ss_hash);
+  return {EnumerationKind::Expanded, emitted};
 }
 
 /* auto mode: */
@@ -649,11 +779,13 @@ bool state_to_be_discarded(int index, syscall_info *infos)
  */
 int exec_bfs()
 {
+  detsim::resident::Scope controlled_execution;
+  g_save_count = 0; g_save_time_us = 0; g_restore_time_us = 0;
+  std::optional<SearchExitedReceipt> exited_receipt;
   ptmc_state.mode = PTMC_STATE::MODE_BFS;
   start_time = gettime();
   srand(time(NULL));
   std::optional<sys_state> state_fetched = std::nullopt;
-  syscall_info syscall_info[NP];
 
   /* Statistics for this execution only */
   size_t states_searched_this_run = 0;
@@ -668,16 +800,18 @@ int exec_bfs()
   g_states_new = 0;
   g_queue_size = 0;
 
-  sys_state s = ptmc_state.running_state;
+  const auto& initial = ptmc_state.running_state;
+  std::unordered_set<hash_type> queued;
+  queued.insert(initial.ss_hash);
   StateStore::instance().queue_clear();
   state_queue_append(ptmc_state.running_state);
 
   /* Check if this is a new state or was already in state_set */
-  if (!state_set.count(s.ss_hash))
+  if (!state_set.count(initial.ss_hash))
   {
     states_new_this_run++;
   }
-  state_set.emplace(s.ss_hash);
+  state_set.emplace(initial.ss_hash);
   states_searched_this_run++;
 
   /* Update global stats */
@@ -688,7 +822,28 @@ int exec_bfs()
   ptmc_state.choose = 0;
 
   /* Start status monitor in auto mode */
-  start_status_monitor();
+  StatusMonitorScope status_monitor;
+
+  auto report_work = []() {
+    detsim::ui::ui_printf(
+        "SEARCH_WORK {\"transitions\":%zu,\"restore_us\":%llu,\"capture_check_commit_us\":%llu}\n",
+        g_save_count.load(), static_cast<unsigned long long>(g_restore_time_us.load()),
+        static_cast<unsigned long long>(g_save_time_us.load()));
+  };
+
+  auto stop_for_violation = [&]() {
+    stop_status_monitor();
+    detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu "
+                          "sys_states (new: %zu)\n",
+                          states_searched_this_run, states_new_this_run);
+    show_syscall_history();
+    double time_used = gettime() - start_time;
+    detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
+                          time_used, states_searched_this_run / time_used);
+    StateStore::instance().print_stats();
+    report_work();
+    return 1;
+  };
 
   /* until no state in queue */
   int loop_count = 0;
@@ -708,19 +863,21 @@ int exec_bfs()
                 states_searched_this_run);
       break;
     }
-    std::vector<int> indexes;
-    for (int k = 0; k < NP; k++)
-      indexes.push_back(k);
-    shuffle(indexes.begin(), indexes.end(), std::default_random_engine(rand()));
-
-    for (auto &i : indexes)
+    // A duplicate queue entry (for example a self-loop) is already covered by
+    // an expansion recorded while this search was running.
+    if (expanded_budget(state_fetched->ss_hash) == kExpandedUnbounded)
+      continue;
+    if (state_fetched->property_failed)
+      return stop_for_violation();
+    const auto actions=enabled_actor_actions(state_fetched.value());
+    bool state_complete = true;
+    for (const auto& actor:actions)
     {
-    again:
-      s = state_fetched.value();
-
-      if (DISDEAD(s.status[i]))
-        continue;
-
+      int cardinality=-1;
+      std::vector<int> choices;
+      do
+      {
+      const auto& s = state_fetched.value();
       for (int j = 0; j < NP; j++)
         ptmc_state.status[j] = s.status[j];
 
@@ -730,51 +887,43 @@ int exec_bfs()
                    "happen if the state is properly saved.",
                    j);
 
-      TransitionResult result = state_transition(s, i);
+      int preset=0;
+      if (cardinality>=0) { preset=choices.back(); choices.pop_back(); }
+      TransitionResult result=search_actor_choice(s,actor,preset,cardinality,choices);
+      poll_status_monitor();
       g_save_time_us += result.save_time.count();
       g_restore_time_us += result.restore_time.count();
       g_save_count++;
       states_searched_this_run++;
       g_states_searched = states_searched_this_run;
 
-      int check_result = check_state();
+      int check_result = result.property_violation;
       if (check_result != 0)
-      {
-        detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu "
-                              "sys_states (new: %zu)\n",
-                              states_searched_this_run, states_new_this_run);
-        show_syscall_history();
-        double time_used = gettime() - start_time;
-        detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
-                              time_used, states_searched_this_run / time_used);
-        StateStore::instance().print_stats();
-        state_fetched.reset();
-      }
+        return stop_for_violation();
 
-      if (result.code != CKPT_DISCARD &&
-          !state_to_be_discarded(i, syscall_info))
+      remember_search_exited(exited_receipt,s.ss_hash,actor,result);
+
+      if (result.code != CKPT_DISCARD)
       {
-        bool is_new = !state_set.count(result.new_state.ss_hash);
+        const hash_type successor = result.new_state.ss_hash;
+        bool is_new = !state_set.count(successor);
         if (is_new)
         {
-          if (check_result == 0)
-            state_queue_append(result.new_state);
-          state_set.emplace(result.new_state.ss_hash);
+          state_set.emplace(successor);
           states_new_this_run++;
         }
+        // A DFS or random walk may have discovered this identity without
+        // expanding it. Enqueue it even when it is not new to state_set.
+        if (check_result == 0 &&
+            expanded_budget(successor) != kExpandedUnbounded &&
+            queued.insert(successor).second)
+          state_queue_append(result.new_state);
       }
 
-      if (ptmc_state.n_choose)
-      {
-        if (ptmc_state.mode == PTMC_STATE::MODE_BFS)
-        {
-          ptmc_state.choose++;
-          if (ptmc_state.choose < ptmc_state.n_choose)
-            goto again;
-          ptmc_state.choose = 0;
-        }
-      }
+      } while (!choices.empty());
     }
+    if (state_complete)
+      record_expanded(state_fetched->ss_hash, kExpandedUnbounded);
 
     /* Update global statistics for monitor */
     g_states_searched = states_searched_this_run;
@@ -805,20 +954,30 @@ int exec_bfs()
       detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
                             time_used, states_searched_this_run / time_used);
       StateStore::instance().print_stats();
+      report_work();
       sigint_received = 0;
-      state_set.clear();
+      clear_search_bookkeeping();
       return 0;
     }
   }
   stop_status_monitor();
-  detsim::ui::ui_printf(
-      "Complete explore all %zu sys_states (new: %zu), total unique: %zu\n",
-      states_searched_this_run, states_new_this_run, state_set.size());
+  if (all_discovered_fully_expanded())
+    fully_covered.insert(state_set.begin(), state_set.end());
+  if (!all_discovered_fully_expanded())
+    detsim::ui::ui_printf(
+        "Search coverage incomplete; Searched for %zu sys_states (new: %zu), total unique: %zu\n",
+        states_searched_this_run, states_new_this_run, state_set.size());
+  else
+    detsim::ui::ui_printf(
+        "Complete explore all %zu sys_states (new: %zu), total unique: %zu\n",
+        states_searched_this_run, states_new_this_run, state_set.size());
   show_syscall_history();
   double time_used = gettime() - start_time;
   detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
                         states_searched_this_run / time_used);
   StateStore::instance().print_stats();
+  report_work();
+  report_search_exited(exited_receipt);
   return 0;
 }
 
@@ -827,178 +986,27 @@ static int states_new_this_run = 0;
 
 struct DFSFrame
 {
-  hash_type ss_hash;
-  int depth;
-  int i;
-  int state;
-  sys_state s;
-  std::vector<int> indexes;
-  size_t index_pos;
+  hash_type ss_hash=0;
+  int depth=0;
+  int state=0;
+  std::optional<sys_state> s;
+  std::vector<ActorAction> actors;
+  size_t actor_pos=0;
   std::vector<int> choices;
-  int n_choose;
-  int choosed;
-  int ptmc_n_choose;
-  int ptmc_choose;
-  struct syscall_info si_arr[NP];
-
-  DFSFrame()
-      : ss_hash(0), depth(0), i(0), state(0), index_pos(0), n_choose(-1),
-        choosed(0), ptmc_n_choose(0), ptmc_choose(-1)
-  {
-  }
+  int cardinality=-1;
+  SearchCoverage coverage;
 };
 
-/**
- * @brief Recursive DFS state space exploration
- *
- * Recursively explores the state space depth-first:
- * 1. Track visited states to avoid revisiting
- * 2. Stop if max depth reached
- * 3. For each alive process, try all choice combinations
- * 4. Recursively explore each new state
- * 5. Check for illegal states and SIGINT
- *
- * @param ss_hash Hash of current state to explore
- * @param depth Remaining depth to explore
- * @return 0 on completion, 1 if stopped early
- */
-int do_dfs(hash_type ss_hash, int depth)
+/* Move to the next actor of the current state. */
+static void advance_actor(DFSFrame& frame)
 {
-  states_searched_this_run++;
-  bool is_new = !state_set.count(ss_hash);
-  if (is_new)
-  {
-    state_set.emplace(ss_hash);
-    states_new_this_run++;
-  }
-  else
-    return 0;
-
-  if (depth <= 0)
-    return 0;
-
-  /* already at this state */
-  sys_state s = sys_state(ss_hash);
-  syscall_info syscall_info[NP];
-
-  std::vector<int> indexes;
-  for (int i = 0; i < NP; i++)
-  {
-    ptmc_state.status[i] = s.status[i];
-    indexes.push_back(i);
-    if (s.ts_hash[i] == 0)
-    {
-      LOG_CRIT("Child state hash is 0 for tracee %d. This should not happen if "
-               "the state is properly saved.",
-               i);
-      print_call_stack();
-    }
-  }
-  shuffle(indexes.begin(), indexes.end(), std::default_random_engine(rand()));
-
-  for (auto &i : indexes)
-  {
-    if (DISDEAD(s.status[i]))
-      continue;
-
-    std::vector<int> choices;
-    ptmc_state.n_choose = 0;
-    ptmc_state.choose = -1;
-    int choosed = 0;
-    int n_choose = -1;
-
-    do
-    {
-      for (int j = 0; j < NP; j++)
-      {
-        ptmc_state.status[j] = s.status[j];
-      }
-      g_restore_count++;
-      g_states_searched = states_searched_this_run;
-      g_states_new = states_new_this_run;
-      g_queue_size = 0;
-
-      if (choosed)
-      {
-        ptmc_state.n_choose = n_choose;
-        ptmc_state.choose = choices.back();
-        choices.pop_back();
-      }
-
-      TransitionResult result = state_transition(s, i);
-      g_save_time_us += result.save_time.count();
-      g_restore_time_us += result.restore_time.count();
-
-      n_choose = ptmc_state.n_choose;
-      if (!choosed && choices.empty() && n_choose > 1)
-      {
-        choosed = 1;
-        for (int c = 0; c < ptmc_state.n_choose; c++)
-          if (c != ptmc_state.choose)
-            choices.push_back(c);
-        shuffle(choices.begin(), choices.end(),
-                std::default_random_engine(rand()));
-      }
-
-      g_save_count++;
-      if (check_state() != 0)
-      {
-        stop_status_monitor();
-        detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu "
-                              "sys_states (new: %zu)\n",
-                              states_searched_this_run, states_new_this_run);
-        show_syscall_history();
-        double time_used = gettime() - start_time;
-        detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
-                              time_used, states_searched_this_run / time_used);
-        StateStore::instance().print_stats();
-        return 1;
-      }
-
-      if (result.code != CKPT_DISCARD &&
-          !state_to_be_discarded(i, syscall_info))
-      {
-        LOG_DEBUG("DFS depth %d, tracee %d, choose %d, hash %016lx", depth, i,
-                  ptmc_state.choose, result.new_state.ss_hash);
-        if (do_dfs(result.new_state.ss_hash, depth - 1) == 1)
-          return 1;
-      }
-    } while (!choices.empty());
-  }
-
-  if (sigint_received)
-  {
-    stop_status_monitor();
-    detsim::ui::ui_printf("Program received signal SIGINT, Interrupt.\n");
-    /* Wait for pending StateStore writes to complete to ensure data consistency
-     */
-    detsim::ui::ui_printf("Flushing pending state writes...\n");
-    StateStore::instance().wait_for_completion();
-    /* Flush StateStorePacked index */
-    StateStorePacked::instance().flush_index();
-    /* Flush SysStateStore index to merge incremental entries */
-    SysStateStore::instance().flush_index();
-    detsim::ui::ui_printf(
-        "Searched for %zu sys_states (new: %zu), total unique: %zu\n",
-        states_searched_this_run, states_new_this_run, state_set.size());
-    if (ptmc_state.running_state.ss_hash == 0)
-      LOG_CRIT("Current state hash is 0. This should not happen if states are "
-               "properly saved.");
-    show_syscall_history();
-    stop_status_monitor();
-    double time_used = gettime() - start_time;
-    detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
-                          time_used, states_searched_this_run / time_used);
-    StateStore::instance().print_stats();
-    sigint_received = 0;
-    state_set.clear();
-    return 1;
-  }
-
-  return 0;
+  frame.actor_pos++;
+  frame.state = 1;
 }
 
-int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth)
+int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
+                     std::optional<SearchExitedReceipt>& exited_receipt,
+                     bool& depth_limit_reached)
 {
   std::vector<DFSFrame> stack;
   stack.reserve(1024);
@@ -1006,138 +1014,161 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth)
   DFSFrame root;
   root.ss_hash = initial_ss_hash;
   root.depth = initial_depth;
-  root.i = 0;
   root.state = 0;
-  root.index_pos = 0;
+  root.actor_pos = 0;
   stack.push_back(std::move(root));
+
+  auto stop_for_violation = [&]() {
+    stop_status_monitor();
+    detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu "
+                          "sys_states (new: %zu)\n",
+                          states_searched_this_run, states_new_this_run);
+    show_syscall_history();
+    double time_used = gettime() - start_time;
+    detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
+                          time_used, states_searched_this_run / time_used);
+    StateStore::instance().print_stats();
+    return 1;
+  };
+
+  auto finish_frame = [&](const SearchCoverage& coverage, bool publish) {
+    const SearchCoverage result = coverage;
+    if (publish)
+    {
+      dfs_coverage[stack.back().ss_hash][stack.back().depth] = result;
+      // Inductively all actors/choices and every child's reachable closure
+      // finished without a cutoff. This proof is independent of query depth.
+      if (!result.depth_cut)
+        fully_covered.insert(stack.back().ss_hash);
+    }
+    stack.pop_back();
+    if (!stack.empty()) stack.back().coverage.merge(result);
+    depth_limit_reached |= result.depth_cut;
+  };
 
   while (!stack.empty())
   {
+    if (sigint_received)
+    {
+      stop_status_monitor();
+      detsim::ui::ui_printf("Program received signal SIGINT, Interrupt.\n");
+      detsim::ui::ui_printf("Flushing pending state writes...\n");
+      StateStore::instance().wait_for_completion();
+      StateStorePacked::instance().flush_index();
+      SysStateStore::instance().flush_index();
+      detsim::ui::ui_printf(
+          "Searched for %zu sys_states (new: %zu), total unique: %zu\n",
+          states_searched_this_run, states_new_this_run, state_set.size());
+      if (ptmc_state.running_state.ss_hash == 0)
+        LOG_CRIT(
+            "Current state hash is 0. This should not happen if states are "
+            "properly saved.");
+      show_syscall_history();
+      stop_status_monitor();
+      double time_used = gettime() - start_time;
+      detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
+                            time_used, states_searched_this_run / time_used);
+      StateStore::instance().print_stats();
+      sigint_received = 0;
+      return 1;
+    }
+
     DFSFrame &frame = stack.back();
 
     if (frame.state == 0)
     {
       states_searched_this_run++;
       bool is_new = !state_set.count(frame.ss_hash);
-      if (!is_new)
+      if (is_new)
       {
-        stack.pop_back();
-        continue;
-      }
-      state_set.emplace(frame.ss_hash);
-      states_new_this_run++;
-
-      if (frame.depth <= 0)
-      {
-        stack.pop_back();
-        continue;
+        state_set.emplace(frame.ss_hash);
+        states_new_this_run++;
       }
 
-      frame.s = sys_state(frame.ss_hash);
-      for (int j = 0; j < NP; j++)
+      if (fully_covered.count(frame.ss_hash))
       {
-        ptmc_state.status[j] = frame.s.status[j];
-        frame.indexes.push_back(j);
-        if (frame.s.ts_hash[j] == 0)
+        finish_frame({}, false);
+        continue;
+      }
+      const auto cached = dfs_coverage.find(frame.ss_hash);
+      if (cached != dfs_coverage.end())
+      {
+        const auto outcome = cached->second.find(frame.depth);
+        if (outcome != cached->second.end())
         {
-          LOG_CRIT(
-              "Child state hash is 0 for tracee %d. This should not happen if "
-              "the state is properly saved.",
-              j);
-          print_call_stack();
+          finish_frame(outcome->second, false);
+          continue;
         }
       }
-      shuffle(frame.indexes.begin(), frame.indexes.end(),
-              std::default_random_engine(rand()));
+
+      frame.s.emplace(frame.ss_hash);
+      if (frame.s->property_failed)
+        return stop_for_violation();
+      frame.actors=enabled_actor_actions(*frame.s);
+      if (frame.actors.empty())
+      {
+        finish_frame({}, true);
+        continue;
+      }
+      if (frame.depth <= 0)
+      {
+        finish_frame({true}, true);
+        continue;
+      }
 
       frame.state = 1;
-      frame.index_pos = 0;
+      frame.actor_pos = 0;
     }
 
     if (frame.state == 1)
     {
-      if (frame.index_pos >= frame.indexes.size())
+      if (frame.actor_pos >= frame.actors.size())
       {
-        stack.pop_back();
-        continue;
-      }
-
-      int i = frame.indexes[frame.index_pos];
-      frame.i = i;
-
-      if (DISDEAD(frame.s.status[i]))
-      {
-        frame.index_pos++;
+        // All source actors/choices and their bounded child queries finished.
+        // Budget/depth cutoffs are completed results, not partial enumerations.
+        finish_frame(frame.coverage, true);
         continue;
       }
 
       frame.choices.clear();
-      frame.n_choose = -1;
-      frame.choosed = 0;
-      ptmc_state.n_choose = 0;
-      ptmc_state.choose = -1;
-      frame.ptmc_n_choose = 0;
-      frame.ptmc_choose = -1;
+      frame.cardinality=-1;
 
       frame.state = 2;
     }
 
     if (frame.state == 2)
     {
-      int i = frame.i;
+      const auto actor=frame.actors[frame.actor_pos];
+      if (!frame.s)
+        frame.s.emplace(frame.ss_hash);
 
       for (int j = 0; j < NP; j++)
       {
-        ptmc_state.status[j] = frame.s.status[j];
+        ptmc_state.status[j] = frame.s->status[j];
       }
       g_restore_count++;
       g_states_searched = states_searched_this_run;
       g_states_new = states_new_this_run;
       g_queue_size = 0;
 
-      if (frame.choosed)
-      {
-        ptmc_state.n_choose = frame.ptmc_n_choose;
-        ptmc_state.choose = frame.choices.back();
-        frame.choices.pop_back();
-      }
-
-      TransitionResult result = state_transition(frame.s, i);
+      int preset=-1;
+      if (frame.cardinality>=0) { preset=frame.choices.back(); frame.choices.pop_back(); }
+      TransitionResult result=search_actor_choice(*frame.s,actor,preset,frame.cardinality,frame.choices);
+      poll_status_monitor();
       g_save_time_us += result.save_time.count();
       g_restore_time_us += result.restore_time.count();
 
-      frame.ptmc_n_choose = ptmc_state.n_choose;
-
-      if (!frame.choosed && frame.choices.empty() && frame.ptmc_n_choose > 1)
-      {
-        frame.choosed = 1;
-        for (int c = 0; c < ptmc_state.n_choose; c++)
-          if (c != ptmc_state.choose)
-            frame.choices.push_back(c);
-        shuffle(frame.choices.begin(), frame.choices.end(),
-                std::default_random_engine(rand()));
-      }
-
       g_save_count++;
-      if (check_state() != 0)
-      {
-        stop_status_monitor();
-        detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu "
-                              "sys_states (new: %zu)\n",
-                              states_searched_this_run, states_new_this_run);
-        show_syscall_history();
-        double time_used = gettime() - start_time;
-        detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
-                              time_used, states_searched_this_run / time_used);
-        StateStore::instance().print_stats();
-        return 1;
-      }
+      if (result.property_violation != 0)
+        return stop_for_violation();
 
-      if (result.code != CKPT_DISCARD &&
-          !state_to_be_discarded(i, frame.si_arr))
+      remember_search_exited(exited_receipt,frame.ss_hash,actor,result);
+
+      bool expanded = result.code != CKPT_DISCARD;
+      if (expanded)
       {
         LOG_DEBUG("DFS depth %d, tracee %d, choose %d, hash %016lx",
-                  frame.depth, i, ptmc_state.choose, result.new_state.ss_hash);
+                  frame.depth, actor.process, ptmc_state.choose, result.new_state.ss_hash);
 
         if (!frame.choices.empty())
         {
@@ -1145,59 +1176,32 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth)
         }
         else
         {
-          frame.index_pos++;
-          frame.state = 1;
+          advance_actor(frame);
         }
 
         DFSFrame new_frame;
         new_frame.ss_hash = result.new_state.ss_hash;
         new_frame.depth = frame.depth - 1;
-        new_frame.i = 0;
         new_frame.state = 0;
-        new_frame.index_pos = 0;
+        new_frame.actor_pos = 0;
+        // Ancestors need only their identity and pending search choices while
+        // descendants run. Reopen persisted state when backtracking needs it.
+        frame.s.reset();
         stack.push_back(std::move(new_frame));
         continue;
       }
 
       if (frame.choices.empty())
       {
-        frame.index_pos++;
-        frame.state = 1;
+        advance_actor(frame);
       }
     }
 
     if (frame.state == 3)
     {
-      if (sigint_received)
-      {
-        stop_status_monitor();
-        detsim::ui::ui_printf("Program received signal SIGINT, Interrupt.\n");
-        detsim::ui::ui_printf("Flushing pending state writes...\n");
-        StateStore::instance().wait_for_completion();
-        StateStorePacked::instance().flush_index();
-        SysStateStore::instance().flush_index();
-        detsim::ui::ui_printf(
-            "Searched for %zu sys_states (new: %zu), total unique: %zu\n",
-            states_searched_this_run, states_new_this_run, state_set.size());
-        if (ptmc_state.running_state.ss_hash == 0)
-          LOG_CRIT(
-              "Current state hash is 0. This should not happen if states are "
-              "properly saved.");
-        show_syscall_history();
-        stop_status_monitor();
-        double time_used = gettime() - start_time;
-        detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
-                              time_used, states_searched_this_run / time_used);
-        StateStore::instance().print_stats();
-        sigint_received = 0;
-        state_set.clear();
-        return 1;
-      }
-
       if (frame.choices.empty())
       {
-        frame.index_pos++;
-        frame.state = 1;
+        advance_actor(frame);
       }
       else
       {
@@ -1211,25 +1215,44 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth)
 
 int exec_dfs(int depth)
 {
+  reset_model_budget();
+  detsim::resident::Scope controlled_execution;
+  g_save_count = 0; g_save_time_us = 0; g_restore_time_us = 0;
+  reset_page_capture_stats();
+  detsim::page_restore::reset();
+  if (auto* experiment = detsim::experiment::configured_capture())
+    experiment->reset_stats();
   srand(time(NULL));
   ptmc_state.mode = PTMC_STATE::MODE_DFS;
   StateStore::instance().reset_stats();
   StateStore::instance().disable_prefetch();
-  g_states_searched = 1;
-  g_states_new = 1;
-  states_searched_this_run = 1;
-  states_new_this_run = 1;
-  start_status_monitor();
+  g_states_searched = 0;
+  g_states_new = 0;
+  states_searched_this_run = 0;
+  states_new_this_run = 0;
+  StatusMonitorScope status_monitor;
 
   StateStore::instance().queue_clear();
   start_time = gettime();
 
-  do_dfs_iterative(ptmc_state.running_state.ss_hash, depth);
+  std::optional<SearchExitedReceipt> exited_receipt;
+  bool depth_limit_reached = false;
+  const int stopped = do_dfs_iterative(ptmc_state.running_state.ss_hash, depth,
+                                       exited_receipt, depth_limit_reached);
+  if (stopped) {
+    stop_status_monitor();
+    return stopped;
+  }
 
   stop_status_monitor();
-  detsim::ui::ui_printf(
-      "Complete explore all %zu sys_states (new: %zu), total unique: %zu\n",
-      states_searched_this_run, states_new_this_run, state_set.size());
+  if (depth_limit_reached)
+    detsim::ui::ui_printf(
+        "Depth limit reached; Searched for %zu sys_states (new: %zu), total unique: %zu\n",
+        states_searched_this_run, states_new_this_run, state_set.size());
+  else
+    detsim::ui::ui_printf(
+        "Complete explore all %zu sys_states (new: %zu), total unique: %zu\n",
+        states_searched_this_run, states_new_this_run, state_set.size());
   show_syscall_history();
   double time_used = gettime() - start_time;
   detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n", time_used,
@@ -1249,12 +1272,20 @@ int exec_dfs(int depth)
                         100.0 * (total_save_us + total_restore_us) /
                             (time_used * 1000000));
 
+  if (auto* experiment = detsim::experiment::configured_capture())
+    experiment->report();
+  if (page_capture_enabled()) report_page_capture_stats();
+  detsim::page_restore::report();
+  detsim::ui::ui_printf("SEARCH_WORK {\"transitions\":%zu}\n", g_save_count.load());
+  report_search_exited(exited_receipt);
+
   return 0;
 }
 
 int exec_rand(int depth)
 {
   ptmc_state.mode = PTMC_STATE::MODE_RAND;
+  reset_model_budget();
   start_time = gettime();
   srand(time(NULL));
   hash_type current_hash = ptmc_state.running_state.ss_hash;
@@ -1273,7 +1304,7 @@ int exec_rand(int depth)
   g_states_searched = states_searched_this_run;
   g_states_new = states_new_this_run;
 
-  start_status_monitor();
+  StatusMonitorScope status_monitor;
 
   while (true)
   {
@@ -1281,9 +1312,14 @@ int exec_rand(int depth)
 
     for (int k = 0; k < depth; k++)
     {
-      int i = rand() % NP;
-      if (DISDEAD(s.status[i]))
-        continue;
+      // Pick a runnable saved actor; a waiting actor with a finite deadline uses
+      // its timeout outcome and is a runnable actor too.
+      std::vector<ActorAction> actors;
+      try { actors = enabled_actor_actions(s); } catch (const std::exception&) { actors.clear(); }
+      if (actors.empty())
+        break;
+      const auto& picked = actors[rand() % actors.size()];
+      const int i = picked.process;
 
       for (int j = 0; j < NP; j++)
       {
@@ -1297,7 +1333,8 @@ int exec_rand(int depth)
         }
       }
 
-      TransitionResult result = state_transition(s, i);
+      TransitionResult result = state_transition(s, i, picked.thread, picked.action);
+      poll_status_monitor();
       g_save_count++;
       g_save_time_us += result.save_time.count();
       g_restore_time_us += result.restore_time.count();
@@ -1310,8 +1347,9 @@ int exec_rand(int depth)
       }
       states_searched_this_run++;
 
-      if (check_state() != 0)
+      if (result.property_violation != 0)
       {
+        stop_status_monitor();
         detsim::ui::ui_printf("Stopped for illegal state. Searched for %zu "
                               "sys_states (new: %zu)\n",
                               states_searched_this_run, states_new_this_run);
@@ -1320,7 +1358,7 @@ int exec_rand(int depth)
         detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
                               time_used, states_searched_this_run / time_used);
         StateStore::instance().print_stats();
-        break;
+        return 1;
       }
       g_states_searched = states_searched_this_run;
       g_states_new = states_new_this_run;

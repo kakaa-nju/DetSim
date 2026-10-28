@@ -15,19 +15,18 @@
  * Command Table
  * ====================================================================== */
 
-struct CommandEntry
-{
-  const char *name;
-  const char *description;
-  int (*handler)(char *args);
+struct CommandEntry {
+    const char *name;
+    const char *description;
+    int (*handler)(char *args);
 };
 
 /* Get the command table and its size */
-const CommandEntry *get_command_table();
+const CommandEntry* get_command_table();
 size_t get_command_count();
 
 /* Find a command by name */
-const CommandEntry *find_command(const char *name);
+const CommandEntry* find_command(const char *name);
 
 /* Execute a command line (parses and dispatches) */
 int execute_command_line(char *cmd_line);
@@ -44,6 +43,11 @@ int cmd_q(char *args);
 int cmd_si(char *args);
 int cmd_sw(char *args);
 int cmd_thread(char *args);
+int cmd_pending(char *args);
+int cmd_inspect(char *args);
+int cmd_plugins(char *args);
+int cmd_parallel(char *args);
+int cmd_tree(char *args);
 int cmd_load(char *args);
 int cmd_info(char *args);
 int cmd_batch(char *args);
@@ -56,7 +60,6 @@ int cmd_ls(char *args);
 int cmd_stat(char *args);
 int cmd_hexdump(char *args);
 int cmd_diff(char *args);
-int cmd_ckpt(char *args);
 
 /* ======================================================================
  * Command Utilities
@@ -69,6 +72,6 @@ void show_welcome();
 void cleanup_readline();
 
 /* Read a line from the user (using readline) */
-char *read_line(const char *prompt);
+char* read_line(const char *prompt);
 
 #endif /* __CLI_COMMANDS_H */

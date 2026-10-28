@@ -1,11 +1,15 @@
 #include "core/config.h"
+#include "core/search/worker.h"
+#include <unistd.h>
 #include "core/state/state_store.h"
-#include "core/state/state_transition.h"
 #include "core/state/sysstate_store.h"
+#include "core/state/state_transition.h"
+#include "segv_handler.hpp"
 #include <cstdio>
 #include <cstring>
-#include <execinfo.h>
+#include <exception>
 #include <signal.h>
+#include <execinfo.h>
 
 // NCursesUI 集成
 #include "ui/log_wrapper.h"
@@ -30,11 +34,13 @@ extern "C" detsim::ui::NCursesUI *get_ncurses_ui() { return g_ui; }
 extern int use_ui;
 extern char *batch_file;
 
-int main(int argc, char *argv[])
+static int run_tracer(int argc, char *argv[])
 {
 
   /* 先解析参数（设置 loglevel, use_ui, batch_file） */
   parse_args(argc, argv);
+  if (worker_control_fd >= 0)
+    detsim::search::prepare_worker_process(worker_control_fd, worker_blob_fd);
 
   /* 检查是否有 --force */
   bool force_lock = false;
@@ -93,7 +99,8 @@ int main(int argc, char *argv[])
       ui.set_status_line(3, "Status: Ready");
       ui.set_status_line(4, "States: 0");
       ui.set_status_line(5, "Depth: 0");
-      ui.set_status_line(9, "Commands: c(ontinue), s(tep), b(ack), q(uit)");
+      ui.set_status_line(6, "Pending: use 'pending' for blocked syscalls");
+      ui.set_status_line(9, "Commands: help | si [choice|timeout] | sw N | thread [N] | pending | q");
     }
   }
 
@@ -108,7 +115,17 @@ int main(int argc, char *argv[])
 
   // 使用日志宏输出调试信息
   UI_LOG_DEBUG("About to call ui_mainloop");
-  ui_mainloop();
+  int result = 0;
+  if (worker_control_fd >= 0) {
+    detsim::search::wire::Limits limits;
+    limits.io_timeout_ms = worker_io_timeout_ms;
+    result = detsim::search::worker_loop(worker_control_fd, limits, worker_blob_fd);
+  } else {
+    ui_mainloop();
+    result = 0;
+  }
+  worker_blob_fd = -1;
+  worker_control_fd = -1; // worker_loop owns and closes its channel descriptor.
   UI_LOG_DEBUG("ui_mainloop returned");
 
   /* 清理资源 */
@@ -122,5 +139,22 @@ int main(int argc, char *argv[])
   /* 释放文件锁 */
   detsim::utils::FileLock::release();
 
-  return 0;
+  return result;
+}
+
+int main(int argc, char *argv[])
+{
+  ThreadAltStack main_altstack;
+  try
+  {
+    return run_tracer(argc, argv);
+  }
+  catch (const std::exception &error)
+  {
+    // Returning from main still runs the registered owned-tracee cleanup.
+    // A failed capture/restore is a checker failure, not a valid model state.
+    fprintf(stderr, "DetSim state/execution error: %s\n", error.what());
+    detsim::utils::FileLock::release();
+    return 1;
+  }
 }

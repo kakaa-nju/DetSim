@@ -5,12 +5,34 @@
 #include <cstring>
 #include <ctime>
 #include <string>
+#include <vector>
 #include <sys/time.h>
 
 namespace detsim
 {
 namespace ui
 {
+
+/* Format with an unbounded result; the previous fixed 4 KiB buffers truncated
+ * inspect JSON, history and long diagnostics. */
+static std::string format_v(const char *fmt, va_list args)
+{
+  va_list copy;
+  va_copy(copy, args);
+  char stack[4096];
+  const int needed = vsnprintf(stack, sizeof(stack), fmt, copy);
+  va_end(copy);
+  if (needed < 0)
+    return {};
+  if (static_cast<size_t>(needed) < sizeof(stack))
+    return std::string(stack, static_cast<size_t>(needed));
+
+  std::vector<char> dynamic(static_cast<size_t>(needed) + 1);
+  va_copy(copy, args);
+  vsnprintf(dynamic.data(), dynamic.size(), fmt, copy);
+  va_end(copy);
+  return std::string(dynamic.data(), static_cast<size_t>(needed));
+}
 
 NCursesUI *g_ncurses_ui = nullptr;
 bool g_ui_should_exit = false;
@@ -83,8 +105,7 @@ void ui_log_at_level(int level, const char *file, int line, const char *fmt,
   strftime(time_buf, sizeof(time_buf), "%H:%M:%S", tm_now);
 
   // 格式化消息
-  char msg_buf[4096];
-  vsnprintf(msg_buf, sizeof(msg_buf), fmt, args);
+  const std::string msg = format_v(fmt, args);
   va_end(args);
 
   // 提取文件名（去掉路径）
@@ -96,30 +117,28 @@ void ui_log_at_level(int level, const char *file, int line, const char *fmt,
   }
 
   // 完整格式化：时间 [级别][文件:行号] 消息
-  char full_buf[4600];
   const char *level_str = get_level_str(level);
-
-  snprintf(full_buf, sizeof(full_buf), "[%s][%s][%s:%d] %s", time_buf,
-           level_str, filename, line, msg_buf);
+  const std::string full =
+      std::string("[") + time_buf + "][" + level_str + "][" + filename + ":" +
+      std::to_string(line) + "] " + msg;
 
   if (g_ncurses_ui)
   {
     // 输出到 UI
-    g_ncurses_ui->add_line(full_buf);
+    g_ncurses_ui->add_line(full);
   }
   else
   {
     // 回退到标准输出（带颜色）
     const char *color = get_level_color(level);
-    printf("%s%s\033[0m\n", color, full_buf);
+    printf("%s%s\033[0m\n", color, full.c_str());
     fflush(stdout);
   }
 
   // 如果指定了日志文件（-1 参数），额外写入日志文件
   if (log_fp != NULL && log_fp != stdout)
   {
-    fprintf(log_fp, "[%s][%s][%s:%d] %s\n", time_buf, level_str, filename, line,
-            msg_buf);
+    fprintf(log_fp, "%s\n", full.c_str());
     fflush(log_fp);
   }
 }
@@ -128,26 +147,23 @@ void ui_printf(const char *fmt, ...)
 {
   va_list args;
   va_start(args, fmt);
-
-  char buffer[4096];
-  vsnprintf(buffer, sizeof(buffer), fmt, args);
-
+  const std::string text = format_v(fmt, args);
   va_end(args);
 
   if (g_ncurses_ui)
   {
-    g_ncurses_ui->print(buffer);
+    g_ncurses_ui->print(text);
   }
   else
   {
-    printf("%s", buffer);
+    fwrite(text.data(), 1, text.size(), stdout);
     fflush(stdout);
   }
 
   // 如果指定了日志文件，额外写入
   if (log_fp != NULL && log_fp != stdout)
   {
-    fprintf(log_fp, "%s", buffer);
+    fwrite(text.data(), 1, text.size(), log_fp);
     fflush(log_fp);
   }
 }
@@ -156,26 +172,25 @@ void ui_println(const char *fmt, ...)
 {
   va_list args;
   va_start(args, fmt);
-
-  char buffer[4096];
-  vsnprintf(buffer, sizeof(buffer), fmt, args);
-
+  const std::string text = format_v(fmt, args);
   va_end(args);
 
   if (g_ncurses_ui)
   {
-    g_ncurses_ui->add_line(buffer);
+    g_ncurses_ui->add_line(text);
   }
   else
   {
-    printf("%s\n", buffer);
+    fwrite(text.data(), 1, text.size(), stdout);
+    fputc('\n', stdout);
     fflush(stdout);
   }
 
   // 如果指定了日志文件，额外写入
   if (log_fp != NULL && log_fp != stdout)
   {
-    fprintf(log_fp, "%s\n", buffer);
+    fwrite(text.data(), 1, text.size(), log_fp);
+    fputc('\n', log_fp);
     fflush(log_fp);
   }
 }

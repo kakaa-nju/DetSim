@@ -3,6 +3,8 @@
 
 #include "common.h"
 #include "fd_manager.h"
+#include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <map>
 #include <memory>
@@ -19,44 +21,91 @@ void *memcpy_guest2host(void *dest, const void *src, size_t n);
  * They follow the naming convention of other emulated syscalls (emu_*).
  */
 long emu_vfs_openat(int dirfd, const char *path, int flags, mode_t mode);
-long emu_vfs_read(int fd, void *buf, size_t count);
-long emu_vfs_write(int fd, const void *buf, size_t count);
-long emu_vfs_writev(int fd, const struct iovec *iov, int iovcnt);
-long emu_vfs_close(int fd);
+long emu_vfs_unlinkat(int dirfd, const char* path, unsigned flags);
+long emu_vfs_renameat2(int olddirfd, const char* oldpath, int newdirfd, const char* newpath, unsigned flags);
 long emu_vfs_lseek(int fd, off_t offset, int whence);
+long emu_vfs_getdents64(int fd, void* buffer, unsigned int count);
 long emu_vfs_stat(const char *path, struct stat *statbuf);
-long emu_vfs_fstat(int fd, struct stat *statbuf);
-long emu_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
-                struct timeval *timeout);
-long emu_pselect6(int nfds, fd_set *readfds, fd_set *writefds,
-                  fd_set *exceptfds, const struct timespec *timeout,
-                  const sigset_t *sigmask, size_t sigsetsize);
+long emu_vfs_statat(int dirfd, const char* path, struct stat* statbuf, int flags);
+long emu_vfs_accessat(int dirfd, const char* path, int mode, int flags);
+long emu_vfs_readlinkat(int dirfd, const char* path, char* buffer, size_t size);
+long emu_getcwd(char* destination, size_t size);
 long emu_chdir(const char *path);
-long emu_mmap(void *addr, size_t length, int prot, int flags, int fd,
-              off_t offset);
-long emu_munmap(void *addr, size_t length);
 long emu_pipe(int pipefd[2], int flags);
 long emu_pipe2(int pipefd[2], int flags);
 
-// Represents a node in the virtual file system. Can be a file or a directory.
+// Only production snapshot metadata uses store references. Standalone archives
+// remain self-contained. Nested scopes restore the previous policy on exit.
+class FileContentSnapshotScope {
+  bool previous_;
+public:
+  FileContentSnapshotScope();
+  ~FileContentSnapshotScope();
+  FileContentSnapshotScope(const FileContentSnapshotScope&) = delete;
+  FileContentSnapshotScope& operator=(const FileContentSnapshotScope&) = delete;
+};
+
+// Copies share immutable bytes; mutations cannot leak writable aliases into a
+// sibling snapshot. Restored content retains StateStore's immutable buffer.
+class FileContent {
+  struct Payload;
+  std::shared_ptr<Payload> payload_;
+  const std::vector<uint8_t>& bytes() const;
+  std::vector<uint8_t>& writable();
+  void replace(std::vector<uint8_t> bytes);
+public:
+  // Zero for inline/unregistered content; no payload mutation or live fallback.
+  uint64_t saved_blob_key() const;
+  size_t size() const { return bytes().size(); }
+  bool empty() const { return bytes().empty(); }
+  const char* data() const { return empty() ? "" : reinterpret_cast<const char*>(bytes().data()); }
+  const char* begin() const { return data(); }
+  const char* end() const { return data() + size(); }
+  char operator[](size_t offset) const { return data()[offset]; }
+  void clear() { payload_.reset(); }
+  template<class Iterator> void assign(Iterator first, Iterator last) {
+    replace(std::vector<uint8_t>(first, last));
+  }
+  void assign(size_t count, char value) { replace(std::vector<uint8_t>(count, value)); }
+  FileContent& operator=(const std::vector<char>& value) {
+    assign(value.begin(), value.end()); return *this;
+  }
+  FileContent& operator=(std::initializer_list<char> value) {
+    assign(value.begin(), value.end()); return *this;
+  }
+  void write(size_t offset, const void* source, size_t count);
+  void resize(size_t size) { writable().resize(size); }
+  bool operator==(const FileContent& other) const {
+    return payload_ == other.payload_ || bytes() == other.bytes();
+  }
+  bool operator==(const std::vector<char>& other) const {
+    return size() == other.size() && std::equal(begin(), end(), other.begin());
+  }
+  template<class Archive> void save(Archive& ar) const;
+  template<class Archive> void load(Archive& ar);
+};
+
+// Represents a regular file, directory, captured stream, or symbolic link.
 struct VFSNode
 {
-  // Complete file content. For directories, this is typically empty.
-  std::vector<char> content;
+  // Complete file content or symlink target bytes. Directories have no content.
+  FileContent content;
 
   // File metadata.
   // When FSSTATE_DETAILED_METADATA is defined, full struct stat is stored.
-  // Otherwise, only minimal metadata (size, mode) is kept to reduce state
-  // space.
+  // Otherwise, size, mode and semantic modification time are kept.
+  // Access/change times and credential semantics remain outside minimal mode.
 #ifdef FSSTATE_DETAILED_METADATA
-  struct stat metadata;
+  struct stat metadata{};
 #else
-  // Minimal metadata: only size and file type/mode
+  // Minimal metadata includes precise saved input modification time.
   struct
   {
     off_t st_size;
     mode_t st_mode;
-  } metadata;
+    ino_t st_ino; // Zero is the canonical initial path-derived identity marker.
+    struct timespec st_mtim;
+  } metadata{};
 #endif
 
   template <class Archive>
@@ -69,24 +118,8 @@ struct OpenFileDescription
   // The absolute path of the file in the VFS.
   std::string path;
 
-  // The current read/write offset into the file's content.
+  // Byte offset for files; next ordinal cookie for captured directory entries.
   off_t offset;
-
-  // The flags used when opening the file (e.g., O_RDONLY, O_WRONLY, O_APPEND).
-  int flags;
-
-  template <class Archive>
-  void serialize(Archive &ar);
-};
-
-// Represents a configurable device entry.
-struct DeviceSpec
-{
-  // The absolute VFS path of the device, for example /dev/urandom.
-  std::string path;
-
-  // Device type name from config, kept as a string for forward compatibility.
-  std::string type;
 
   template <class Archive>
   void serialize(Archive &ar);
@@ -103,33 +136,34 @@ class FileSystemState
   // to its description.
   std::map<int, OpenFileDescription> open_files;
 
+  // Virtual file mappings use anonymous host VMAs. Preserve their semantic
+  // provenance independently of /proc maps: canonical page-aligned [start,end).
+  std::map<uint64_t, uint64_t> virtual_file_mappings;
+  // start -> (exclusive end, resolved regular-file path). Its union is coverage.
+  std::map<uint64_t, std::pair<uint64_t, std::string>> virtual_file_mapping_sources;
+  void add_virtual_file_mapping(uint64_t start, uint64_t end, const std::string& path);
+  void require_unmapped_file(const std::string& path) const;
+  void remove_virtual_file_mapping(uint64_t start, uint64_t end);
+  bool overlaps_virtual_file_mapping(uint64_t start, uint64_t end) const;
+
   // Current working directory for the tracee (in VFS namespace)
   std::string cwd;
 
-  // Mappings from host directories into the VFS. Each pair is (host_base,
+  // Mappings from host files/directories/symlinks into the VFS. Each pair is (host_base,
   // target_base)
   std::vector<std::pair<std::string, std::string>> mappings;
-
-  // Configured devices.
-  std::vector<DeviceSpec> devices;
-
-  // Mmap regions for VFS files: address -> (fd, offset, length, prot)
-  struct MmapRegion
-  {
-    int fd;
-    off_t offset;
-    size_t length;
-    int prot;
-  };
-  std::map<uintptr_t, MmapRegion> mmap_regions;
 
   private:
   // FdManager for unified fd allocation (shared with SockState)
   FdManagerPtr fd_manager_;
+  mode_t creation_mask_ = 0022;
+  uint64_t next_inode_ = 1;
+  void validate_inode_state() const;
+  void require_namespace_mutable(const std::string& path) const;
 
   public:
   // Default constructor - ensures all members are properly initialized
-  FileSystemState() : cwd(""), fd_manager_() {}
+  FileSystemState();
 
   // Copy control
   FileSystemState(const FileSystemState &other) = default;
@@ -139,13 +173,13 @@ class FileSystemState
   FileSystemState(FileSystemState &&other) noexcept = default;
   FileSystemState &operator=(FileSystemState &&other) noexcept = default;
 
-  explicit FileSystemState(FdManagerPtr fd_mgr) : fd_manager_(fd_mgr) {}
+  explicit FileSystemState(FdManagerPtr fd_mgr);
 
-  // Set the fd manager (must be called before using get_new_fd)
+  // Attach the captured descriptor namespace without creating any descriptors.
   void set_fd_manager(FdManagerPtr fd_mgr) { fd_manager_ = fd_mgr; }
-
-  // Allocate a new file descriptor via FdManager
-  int get_new_fd();
+  mode_t creation_mask() const { return creation_mask_; }
+  uint64_t next_inode() const { return next_inode_; }
+  void set_creation_mask(mode_t mask) { creation_mask_ = mask & 0777; }
 
   template <class Archive>
   void serialize(Archive &ar);
@@ -153,14 +187,29 @@ class FileSystemState
   // --- Syscall Implementations ---
   // These will be implemented in fsstate.cpp
   int do_open(const std::string &path, int flags, mode_t mode);
+  int do_openat(int dirfd, const std::string &path, int flags, mode_t mode);
   ssize_t do_read(int fd, void *buf, size_t count);
   ssize_t do_write(int fd, const void *buf, size_t count);
-  int do_select(int nfds, fd_set *readfds, fd_set *writefds, fd_set *exceptfds,
-                struct timeval *timeout);
+  int do_ftruncate(int fd, int64_t length);
+  // Implementation staging bound, not a Linux file-size/resource limit.
+  static constexpr uint64_t maximum_dense_growth = 64ULL * 1024 * 1024;
+  struct NamespaceLeaf {
+    enum class Kind { Normal, Dot, DotDot, Root } kind = Kind::Normal;
+    std::string parent, path, name;
+    bool trailing_slash = false;
+  };
+  int resolve_namespace_leaf(int dirfd, const std::string& path, NamespaceLeaf& leaf);
+  int do_unlinkat(int dirfd, const std::string& path, unsigned flags = 0);
+  int do_renameat2(int olddirfd, const std::string& oldpath,
+                   int newdirfd, const std::string& newpath, unsigned flags = 0);
   int do_close(int fd);
   off_t do_lseek(int fd, off_t offset, int whence);
-  int do_stat(const std::string &path, struct stat *statbuf);
+  int do_stat(const std::string &path, struct stat *statbuf, bool follow = true);
+  long do_access(int dirfd, const std::string& path, int mode, int flags);
+  long do_readlink(const std::string& path, std::string& target);
+  void capture_executable(const std::string& path);
   int do_fstat(int fd, struct stat *statbuf);
+  long do_getdents64(int fd, void* buffer, unsigned int count, pid_t pid);
 
   // Initialize VFS from host mappings (may load files into memory)
   void init_from_mappings(
@@ -169,6 +218,8 @@ class FileSystemState
   // Resolve a pathname according to dirfd and cwd. Returns an absolute VFS
   // path.
   std::string resolve_path(int dirfd, const std::string &path);
+  // Captured-only walk; a missing final component is returned for O_CREAT.
+  int resolve_path_checked(int dirfd, const std::string& path, std::string& result, bool follow_final = true, bool check_search = false, bool creating = false);
 
   // Set/get cwd
   void set_cwd(const std::string &path);
@@ -177,9 +228,9 @@ class FileSystemState
   // Helper to ensure a directory exists in the VFS
   void ensure_dir_exists(const std::string &path);
 
-  // Device support.
-  void register_device(const std::string &path, const std::string &type);
-  bool is_device_path(const std::string &path) const;
+  // Fixed capacity belongs to the virtual kernel profile.
+  static constexpr size_t pipe_capacity = 65536;
+  static constexpr size_t pipe_atomic_limit = 4096;
 
   // Pipe support
   struct Pipe
@@ -196,7 +247,6 @@ class FileSystemState
 
   std::map<int, Pipe> pipes_;
   std::map<int, int> pipe_fds_;
-  int next_pipe_id_ = 1;
 
   int do_pipe(int pipefd[2], int flags);
   bool is_pipe(int fd) const;
@@ -204,10 +254,7 @@ class FileSystemState
   ssize_t do_pipe_write(int fd, const void *buf, size_t count);
   int do_pipe_close(int fd);
   int do_chdir(const std::string &path);
-  void *do_mmap(void *addr, size_t length, int prot, int flags, int fd,
-                off_t offset);
-  int do_munmap(void *addr, size_t length);
-  int allocate_fd(FdType type);
+  int allocate_fd(FdType type, int status_flags = 0, int descriptor_flags = 0);
   void release_fd(int fd);
 };
 

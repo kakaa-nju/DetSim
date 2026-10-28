@@ -5,6 +5,8 @@
 #include <string.h>
 #include <sys/poll.h>
 #include <sys/time.h>
+
+/* Inputs a choose_<syscall> plugin may inspect for one enumerated outcome. */
 typedef struct choose_in
 {
   union
@@ -28,10 +30,11 @@ typedef struct choose_in
   }
 } choose_in;
 
+/* Values one enumerated outcome writes back; len[i] == 0 means "unmodified". */
 typedef struct choose_out
 {
   void *args[6];
-  int len[6]; /* 0 represents for unmodified */
+  int len[6];
   int rval;
 
   choose_out() = default;
@@ -48,9 +51,11 @@ typedef struct choose_out
 
 typedef choose_out *(*choose_func)(int pid, int choice, const choose_in &in);
 
-extern choose_func choose_syswhat[450];
+/* Per-syscall outcomes of the configured ChoosePoint entries. */
 extern int choose_many[450];
+/* Resolved choose_<syscall> symbols of the configured ChooseFunc plugin. */
+extern choose_func choose_syswhat[450];
 
 int emu_gettimeofday(struct timeval *tv, struct timezone *tz);
 
-#endif
+#endif /* __EMU_H */

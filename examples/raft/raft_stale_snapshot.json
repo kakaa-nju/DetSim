@@ -1,4 +1,7 @@
 {
+  "RuntimeProfile": {
+    "startup_syscall": 10
+  },
   "Loglevel": 2,
   "Nodes": 3,
   "Tracee": [
@@ -13,9 +16,6 @@
   "CheckInterval": 1,
   "ChoosePoint": [
     {"syscall": "gettimeofday", "choose": 2}
-  ],
-  "Checkpoint": [
-    "recvfrom", "gettimeofday"
   ],
   "Description": "Test for stale snapshot term bug. Leader creates snapshot, term increases, then node reloads stale snapshot causing term regression."
 }

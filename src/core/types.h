@@ -1,12 +1,12 @@
 /*
  * types.h - Core type definitions used across the project
- *
+ * 
  * This header contains:
  * - Basic integer type aliases (__s8, __u8, etc.)
  * - ptrace_syscall_info struct (from kernel headers)
  * - Global constants (HASH_LEN, KiB/MiB)
  * - Common typedefs (bytes, hash_type)
- *
+ * 
  * This is a minimal header designed to be included by almost all other headers
  * without causing circular dependencies.
  */
@@ -76,7 +76,7 @@ struct ptrace_syscall_info
  * ======================================================================== */
 
 #ifndef NP
-#define NP 0
+  #define NP 0
 #endif
 static_assert(NP > 0);
 
@@ -102,10 +102,10 @@ typedef struct maps_item
 {
   uint64_t start, end;
   char flags[5];
-  uint32_t offset;
-  int a, b, inode;
+  uint64_t offset, inode;
+  unsigned int a, b;
   char name[512];
-  maps_item() : start(0), end(0), offset(0), a(0), b(0), inode(0)
+  maps_item() : start(0), end(0), offset(0), inode(0), a(0), b(0)
   {
     name[0] = '\0';
   }

@@ -82,3 +82,10 @@ core.*
 # examples
 !examples/
 !examples/**
+
+# Storage tool binaries built by `make tools`
+/tools/sstate_query
+/tools/verify_sstate
+
+# Parallel-search worker artifacts (created in the run directory)
+.parallel-*/

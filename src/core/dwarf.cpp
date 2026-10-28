@@ -4,6 +4,8 @@
 
 #include "debug.h"
 #include "dwarf_info.h"
+#include "expr_ast.hpp"
+#include <atomic>
 #include <cctype>
 #include <cstring>
 #include <dwarf.h>
@@ -60,6 +62,16 @@ std::unordered_map<std::string, var_info> global_vars;
 /* Type cache */
 std::unordered_map<std::string, type_info> type_cache;
 
+// Offsets survive DIE deallocation and allow nested lookups without changing
+// libdwarf's compilation-unit cursor. Prefer definitions over same-name aliases.
+struct indexed_type
+{
+  Dwarf_Off offset;
+  Dwarf_Half tag;
+};
+static std::unordered_map<std::string, indexed_type> type_index;
+static std::unordered_set<std::string> resolving_types;
+
 /* Type size cache */
 std::unordered_map<std::string, size_t> type_size_cache;
 
@@ -89,7 +101,30 @@ struct library_symbols
 /* Global library cache */
 static std::unordered_map<std::string, library_symbols> elf_library_cache;
 static std::string current_elf_path;
+static bool current_elf_fixed = false;
+static std::vector<std::pair<uint64_t,uint64_t>> current_elf_ranges;
+const std::string& dwarf_executable_path() { return current_elf_path; }
+bool dwarf_fixed_executable() { return current_elf_fixed; }
+bool dwarf_main_image_contains(uint64_t address) {
+  for (const auto& [start,end] : current_elf_ranges)
+    if (address >= start && address < end) return true;
+  return false;
+}
 static int elf_symbols_loaded_for_pid = -1;
+
+/* Symbol/type invalidation epoch. The service is serial-control-thread state;
+ * the atomic only lets observation code read the epoch safely. */
+static std::atomic<uint64_t> symbol_generation{0};
+
+static void mark_symbol_change()
+{
+  symbol_generation.fetch_add(1, std::memory_order_acq_rel);
+}
+
+uint64_t dwarf_symbol_generation(void)
+{
+  return symbol_generation.load(std::memory_order_acquire);
+}
 
 /* Forward declarations for ELF symbol handling */
 static void load_elf_symbols(const char *executable);
@@ -121,7 +156,7 @@ static std::string get_array_type_name(Dwarf_Debug dbg, Dwarf_Die type_die,
     return "unknown[]";
 
   Dwarf_Die elem_die;
-  if (dwarf_offdie(dbg, type_offset, &elem_die, &err) != DW_DLV_OK)
+  if (dwarf_offdie_b(dbg, type_offset, true, &elem_die, &err) != DW_DLV_OK)
     return "unknown[]";
 
   /* Use simple name lookup to avoid recursion into struct members */
@@ -160,7 +195,7 @@ static std::string get_array_type_name(Dwarf_Debug dbg, Dwarf_Die type_die,
           }
         }
       }
-    } while (dwarf_siblingof(dbg, child_die, &child_die, &err) == DW_DLV_OK);
+    } while (dwarf_siblingof_b(dbg, child_die, true, &child_die, &err) == DW_DLV_OK);
   }
 
   if (info.array_elements > 0)
@@ -232,7 +267,7 @@ static void parse_struct_members(Dwarf_Debug dbg, Dwarf_Die struct_die,
         if (dwarf_global_formref(type_attr, &type_offset, &err) == DW_DLV_OK)
         {
           Dwarf_Die type_die;
-          if (dwarf_offdie(dbg, type_offset, &type_die, &err) == DW_DLV_OK)
+          if (dwarf_offdie_b(dbg, type_offset, true, &type_die, &err) == DW_DLV_OK)
           {
             /* Get type name without full recursion */
             m.type_name = get_type_name_simple(dbg, type_die);
@@ -257,7 +292,7 @@ static void parse_struct_members(Dwarf_Debug dbg, Dwarf_Die struct_die,
 
       info.members.push_back(m);
     }
-  } while (dwarf_siblingof(dbg, child_die, &child_die, &err) == DW_DLV_OK);
+  } while (dwarf_siblingof_b(dbg, child_die, true, &child_die, &err) == DW_DLV_OK);
 }
 
 static void parse_type_info(Dwarf_Debug dbg, Dwarf_Die type_die,
@@ -275,6 +310,7 @@ static void cache_type_info(Dwarf_Debug dbg, const std::string &name,
   parse_type_info(dbg, type_die, info);
   if (!info.name.empty())
   {
+    mark_symbol_change();
     type_cache[info.name] = info;
   }
 }
@@ -321,6 +357,7 @@ static void parse_type_info(Dwarf_Debug dbg, Dwarf_Die type_die,
       /* Cache the struct type for later lookup */
       if (!info.name.empty())
       {
+        mark_symbol_change();
         type_cache[info.name] = info;
       }
       break;
@@ -338,7 +375,7 @@ static void parse_type_info(Dwarf_Debug dbg, Dwarf_Die type_die,
         if (dwarf_global_formref(type_attr, &type_offset, &err) == DW_DLV_OK)
         {
           Dwarf_Die pointed_die;
-          if (dwarf_offdie(dbg, type_offset, &pointed_die, &err) == DW_DLV_OK)
+          if (dwarf_offdie_b(dbg, type_offset, true, &pointed_die, &err) == DW_DLV_OK)
           {
             std::string pointed_name = get_type_name_simple(dbg, pointed_die);
             if (!pointed_name.empty())
@@ -373,7 +410,7 @@ static void parse_type_info(Dwarf_Debug dbg, Dwarf_Die type_die,
           if (dwarf_global_formref(type_attr, &type_offset, &err) == DW_DLV_OK)
           {
             Dwarf_Die elem_die;
-            if (dwarf_offdie(dbg, type_offset, &elem_die, &err) == DW_DLV_OK)
+            if (dwarf_offdie_b(dbg, type_offset, true, &elem_die, &err) == DW_DLV_OK)
             {
               parse_type_info(dbg, elem_die, elem_info);
               info.size = elem_info.size * info.array_elements;
@@ -395,7 +432,7 @@ static void parse_type_info(Dwarf_Debug dbg, Dwarf_Die type_die,
         if (dwarf_global_formref(type_attr, &type_offset, &err) == DW_DLV_OK)
         {
           Dwarf_Die real_die;
-          if (dwarf_offdie(dbg, type_offset, &real_die, &err) == DW_DLV_OK)
+          if (dwarf_offdie_b(dbg, type_offset, true, &real_die, &err) == DW_DLV_OK)
           {
             /* Check if underlying type is a forward declaration */
             Dwarf_Bool is_decl = 0;
@@ -450,7 +487,7 @@ static void parse_type_info(Dwarf_Debug dbg, Dwarf_Die type_die,
         if (dwarf_global_formref(type_attr, &type_offset, &err) == DW_DLV_OK)
         {
           Dwarf_Die real_die;
-          if (dwarf_offdie(dbg, type_offset, &real_die, &err) == DW_DLV_OK)
+          if (dwarf_offdie_b(dbg, type_offset, true, &real_die, &err) == DW_DLV_OK)
           {
             parse_type_info(dbg, real_die, info);
           }
@@ -489,7 +526,7 @@ static std::string get_type_name_simple(Dwarf_Debug dbg, Dwarf_Die type_die)
       if (dwarf_global_formref(type_attr, &type_offset, &err) == DW_DLV_OK)
       {
         Dwarf_Die pointed_die;
-        if (dwarf_offdie(dbg, type_offset, &pointed_die, &err) == DW_DLV_OK)
+        if (dwarf_offdie_b(dbg, type_offset, true, &pointed_die, &err) == DW_DLV_OK)
         {
           std::string pointed_name = get_type_name_simple(dbg, pointed_die);
           if (!pointed_name.empty())
@@ -512,7 +549,7 @@ static std::string get_type_name_simple(Dwarf_Debug dbg, Dwarf_Die type_die)
       if (dwarf_global_formref(type_attr, &type_offset, &err) == DW_DLV_OK)
       {
         Dwarf_Die elem_die;
-        if (dwarf_offdie(dbg, type_offset, &elem_die, &err) == DW_DLV_OK)
+        if (dwarf_offdie_b(dbg, type_offset, true, &elem_die, &err) == DW_DLV_OK)
         {
           std::string elem_name = get_type_name_simple(dbg, elem_die);
           if (!elem_name.empty())
@@ -536,7 +573,7 @@ static std::string get_type_name_simple(Dwarf_Debug dbg, Dwarf_Die type_die)
       if (dwarf_global_formref(type_attr, &type_offset, &err) == DW_DLV_OK)
       {
         Dwarf_Die real_die;
-        if (dwarf_offdie(dbg, type_offset, &real_die, &err) == DW_DLV_OK)
+        if (dwarf_offdie_b(dbg, type_offset, true, &real_die, &err) == DW_DLV_OK)
         {
           return get_type_name_simple(dbg, real_die);
         }
@@ -558,103 +595,89 @@ static std::string get_type_name_internal(Dwarf_Debug dbg, Dwarf_Die type_die)
  * Section 3: Type Cache Building
  * ====================================================================== */
 
+static std::vector<Dwarf_Off> index_dwarf_types(Dwarf_Debug dbg)
+{
+  std::vector<Dwarf_Off> compilation_units;
+  Dwarf_Error err;
+  Dwarf_Unsigned cu_header_length, abbrev_offset, next_cu_header, type_offset;
+  Dwarf_Half version_stamp, address_size, length_size, extension_size, cu_type;
+  Dwarf_Sig8 type_signature;
+  while (dwarf_next_cu_header_d(dbg, true, &cu_header_length, &version_stamp,
+                               &abbrev_offset, &address_size, &length_size,
+                               &extension_size, &type_signature, &type_offset,
+                               &next_cu_header, &cu_type, &err) == DW_DLV_OK)
+  {
+    Dwarf_Die cu_die;
+    if (dwarf_siblingof_b(dbg, nullptr, true, &cu_die, &err) != DW_DLV_OK)
+      continue;
+    Dwarf_Off cu_offset;
+    if (dwarf_dieoffset(cu_die, &cu_offset, &err) == DW_DLV_OK)
+      compilation_units.push_back(cu_offset);
+
+    std::stack<Dwarf_Die> pending;
+    pending.push(cu_die);
+    while (!pending.empty())
+    {
+      Dwarf_Die die = pending.top();
+      pending.pop();
+      Dwarf_Half tag;
+      if (dwarf_tag(die, &tag, &err) == DW_DLV_OK &&
+          (tag == DW_TAG_structure_type || tag == DW_TAG_class_type ||
+           tag == DW_TAG_union_type ||
+           tag == DW_TAG_typedef || tag == DW_TAG_enumeration_type ||
+           tag == DW_TAG_base_type))
+      {
+        Dwarf_Bool declaration = false;
+        Dwarf_Attribute attr;
+        if (dwarf_attr(die, DW_AT_declaration, &attr, &err) == DW_DLV_OK)
+        {
+          dwarf_formflag(attr, &declaration, &err);
+          dwarf_dealloc_attribute(attr);
+        }
+        char *name = nullptr;
+        if (!declaration && dwarf_diename(die, &name, &err) == DW_DLV_OK)
+        {
+          Dwarf_Off offset;
+          if (name && dwarf_dieoffset(die, &offset, &err) == DW_DLV_OK)
+          {
+            auto [entry, inserted] =
+                type_index.emplace(name, indexed_type{offset, tag});
+            if (!inserted && entry->second.tag == DW_TAG_typedef &&
+                tag != DW_TAG_typedef)
+              entry->second = {offset, tag};
+          }
+        }
+      }
+      Dwarf_Die next;
+      if (dwarf_siblingof_b(dbg, die, true, &next, &err) == DW_DLV_OK)
+        pending.push(next);
+      if (dwarf_child(die, &next, &err) == DW_DLV_OK)
+        pending.push(next);
+      dwarf_dealloc_die(die);
+    }
+  }
+  return compilation_units;
+}
+
 static void cache_type_by_name(Dwarf_Debug dbg, const std::string &name)
 {
   if (type_cache.find(name) != type_cache.end())
-    return; /* Already cached */
+    return;
+  auto entry = type_index.find(name);
+  if (entry == type_index.end() || !resolving_types.insert(name).second)
+    return;
 
   Dwarf_Error err;
-  Dwarf_Unsigned cu_header_length, abbrev_offset, next_cu_header;
-  Dwarf_Half version_stamp, address_size;
-
-  /* Reset to start */
-  while (dwarf_next_cu_header(dbg, &cu_header_length, &version_stamp,
-                              &abbrev_offset, &address_size, &next_cu_header,
-                              &err) == DW_DLV_OK)
+  Dwarf_Die die;
+  if (dwarf_offdie_b(dbg, entry->second.offset, true, &die, &err) == DW_DLV_OK)
   {
-    /* Skip to end to reset */
+    type_info info;
+    parse_type_info(dbg, die, info);
+    mark_symbol_change();
+    type_cache[name] = info;
+    dwarf_dealloc_die(die);
   }
-
-  /* Search all CUs for type */
-  while (dwarf_next_cu_header(dbg, &cu_header_length, &version_stamp,
-                              &abbrev_offset, &address_size, &next_cu_header,
-                              &err) == DW_DLV_OK)
-  {
-    Dwarf_Die no_die = 0;
-    Dwarf_Die cu_die;
-
-    if (dwarf_siblingof(dbg, no_die, &cu_die, &err) != DW_DLV_OK)
-      continue;
-
-    /* Search all DIEs in this CU */
-    std::stack<Dwarf_Die> die_stack;
-    Dwarf_Die child_die;
-    if (dwarf_child(cu_die, &child_die, &err) == DW_DLV_OK)
-    {
-      die_stack.push(child_die);
-    }
-
-    while (!die_stack.empty())
-    {
-      Dwarf_Die current_die = die_stack.top();
-      die_stack.pop();
-
-      char *die_name = nullptr;
-      if (dwarf_diename(current_die, &die_name, &err) == DW_DLV_OK && die_name)
-      {
-        if (name == die_name)
-        {
-          /* Check if this is a forward declaration (incomplete type) */
-          Dwarf_Bool is_declaration = 0;
-          Dwarf_Attribute decl_attr;
-          if (dwarf_attr(current_die, DW_AT_declaration, &decl_attr, &err) ==
-              DW_DLV_OK)
-          {
-            dwarf_formflag(decl_attr, &is_declaration, &err);
-          }
-
-          /* Skip forward declarations - look for the actual definition */
-          if (is_declaration)
-          {
-            /* Add sibling and child before continuing */
-            Dwarf_Die sibling_die;
-            if (dwarf_siblingof(dbg, current_die, &sibling_die, &err) ==
-                DW_DLV_OK)
-            {
-              die_stack.push(sibling_die);
-            }
-
-            Dwarf_Die next_child;
-            if (dwarf_child(current_die, &next_child, &err) == DW_DLV_OK)
-            {
-              die_stack.push(next_child);
-            }
-            continue;
-          }
-
-          type_info info;
-          info.name = name;
-          parse_type_info(dbg, current_die, info);
-          type_cache[name] = info;
-          return;
-        }
-      }
-
-      /* Add sibling */
-      Dwarf_Die sibling_die;
-      if (dwarf_siblingof(dbg, current_die, &sibling_die, &err) == DW_DLV_OK)
-      {
-        die_stack.push(sibling_die);
-      }
-
-      /* Add child */
-      Dwarf_Die next_child;
-      if (dwarf_child(current_die, &next_child, &err) == DW_DLV_OK)
-      {
-        die_stack.push(next_child);
-      }
-    }
-  }
+  resolving_types.erase(name);
 }
 
 /* ======================================================================
@@ -700,10 +723,9 @@ static bool get_variable_address(Dwarf_Debug dbg, Dwarf_Die die,
 
 void dwarf_init(const char *executable)
 {
-  if (dbg != nullptr)
-  {
-    dwarf_cleanup();
-  }
+  // Invalidate the previous context even when dbg is null. Otherwise a failed or
+  // partial init can leave a negative size/type entry that outlives this load.
+  dwarf_cleanup();
 
   dwarf_fd = open(executable, O_RDONLY);
   if (dwarf_fd < 0)
@@ -713,7 +735,7 @@ void dwarf_init(const char *executable)
   }
 
   Dwarf_Error err;
-  if (dwarf_init(dwarf_fd, DW_DLC_READ, nullptr, nullptr, &dbg, &err) !=
+  if (dwarf_init_b(dwarf_fd, DW_GROUPNUMBER_ANY, nullptr, nullptr, &dbg, &err) !=
       DW_DLV_OK)
   {
     LOG_ERROR("Failed initializing libdwarf");
@@ -722,18 +744,13 @@ void dwarf_init(const char *executable)
     return;
   }
 
-  /* Parse all compilation units to cache global variables */
-  Dwarf_Unsigned cu_header_length, abbrev_offset, next_cu_header;
-  Dwarf_Half version_stamp, address_size;
-
-  while (dwarf_next_cu_header(dbg, &cu_header_length, &version_stamp,
-                              &abbrev_offset, &address_size, &next_cu_header,
-                              &err) == DW_DLV_OK)
+  // Index all definitions before parsing any type: a typedef in one CU may
+  // refer to a declaration whose definition occurs in a later CU.
+  const auto compilation_units = index_dwarf_types(dbg);
+  for (Dwarf_Off cu_offset : compilation_units)
   {
-    Dwarf_Die no_die = 0;
     Dwarf_Die cu_die;
-
-    if (dwarf_siblingof(dbg, no_die, &cu_die, &err) != DW_DLV_OK)
+    if (dwarf_offdie_b(dbg, cu_offset, true, &cu_die, &err) != DW_DLV_OK)
       continue;
 
     Dwarf_Die child_die;
@@ -772,7 +789,7 @@ void dwarf_init(const char *executable)
               continue;
 
             Dwarf_Die type_die;
-            if (dwarf_offdie(dbg, type_offset, &type_die, &err) != DW_DLV_OK)
+            if (dwarf_offdie_b(dbg, type_offset, true, &type_die, &err) != DW_DLV_OK)
               continue;
 
             var_info info;
@@ -793,91 +810,14 @@ void dwarf_init(const char *executable)
           }
         }
       }
-    } while (dwarf_siblingof(dbg, current_die, &current_die, &err) ==
+    } while (dwarf_siblingof_b(dbg, current_die, true, &current_die, &err) ==
              DW_DLV_OK);
   }
 
   LOG_INFO("DWARF: Parsed %zu global variables", global_vars.size());
 
-  {
-    while (dwarf_next_cu_header(dbg, &cu_header_length, &version_stamp,
-                                &abbrev_offset, &address_size, &next_cu_header,
-                                &err) == DW_DLV_OK)
-    {
-    }
-
-    while (dwarf_next_cu_header(dbg, &cu_header_length, &version_stamp,
-                                &abbrev_offset, &address_size, &next_cu_header,
-                                &err) == DW_DLV_OK)
-    {
-      Dwarf_Die no_die = 0;
-      Dwarf_Die cu_die;
-
-      if (dwarf_siblingof(dbg, no_die, &cu_die, &err) != DW_DLV_OK)
-        continue;
-
-      std::stack<Dwarf_Die> die_stack;
-      Dwarf_Die child_die;
-      if (dwarf_child(cu_die, &child_die, &err) == DW_DLV_OK)
-      {
-        die_stack.push(child_die);
-      }
-
-      while (!die_stack.empty())
-      {
-        Dwarf_Die current_die = die_stack.top();
-        die_stack.pop();
-
-        Dwarf_Half tag;
-        if (dwarf_tag(current_die, &tag, &err) != DW_DLV_OK)
-          goto next_die;
-
-        if (tag == DW_TAG_structure_type || tag == DW_TAG_union_type ||
-            tag == DW_TAG_typedef || tag == DW_TAG_enumeration_type)
-        {
-          char *type_name = nullptr;
-          if (dwarf_diename(current_die, &type_name, &err) == DW_DLV_OK &&
-              type_name)
-          {
-            if (type_cache.find(type_name) == type_cache.end())
-            {
-              Dwarf_Bool is_declaration = 0;
-              Dwarf_Attribute decl_attr;
-              if (dwarf_attr(current_die, DW_AT_declaration, &decl_attr,
-                             &err) == DW_DLV_OK)
-              {
-                dwarf_formflag(decl_attr, &is_declaration, &err);
-              }
-
-              if (!is_declaration)
-              {
-                type_info info;
-                info.name = type_name;
-                parse_type_info(dbg, current_die, info);
-                if (!info.name.empty())
-                {
-                  type_cache[info.name] = info;
-                }
-              }
-            }
-          }
-        }
-
-      next_die:
-        Dwarf_Die sibling_die;
-        if (dwarf_siblingof(dbg, current_die, &sibling_die, &err) == DW_DLV_OK)
-        {
-          die_stack.push(sibling_die);
-        }
-
-        Dwarf_Die next_child;
-        if (dwarf_child(current_die, &next_child, &err) == DW_DLV_OK)
-        {
-          die_stack.push(next_child);
-        }
-      }
-    }
-  }
+  for (const auto &[name, entry] : type_index)
+    cache_type_by_name(dbg, name);
 
   LOG_INFO("DWARF: Cached %zu types", type_cache.size());
 
@@ -887,10 +827,11 @@ void dwarf_init(const char *executable)
 
 void dwarf_cleanup(void)
 {
+  mark_symbol_change();
+  ExprCache::instance().clear();
   if (dbg != nullptr)
   {
-    Dwarf_Error err;
-    dwarf_finish(dbg, &err);
+    dwarf_finish(dbg);
     dbg = nullptr;
   }
   if (dwarf_fd >= 0)
@@ -900,11 +841,18 @@ void dwarf_cleanup(void)
   }
   global_vars.clear();
   type_cache.clear();
+  type_index.clear();
+  resolving_types.clear();
   type_size_cache.clear();
   member_offset_cache.clear();
   elf_library_cache.clear();
   current_elf_path.clear();
+  current_elf_fixed = false;
+  current_elf_ranges.clear();
   elf_symbols_loaded_for_pid = -1;
+  DwarfLocalCache::instance().clear();
+  current_frame_id = 0;
+  current_stack_trace.clear();
 }
 
 /* Legacy compatibility wrapper */
@@ -922,27 +870,8 @@ void init_dwarf(void)
 
 void cleanup_dwarf(void)
 {
-  /* Close dwarf debug handle */
-  if (dbg)
-  {
-    Dwarf_Error err;
-    dwarf_finish(dbg, &err);
-    dbg = nullptr;
-  }
-
-  /* Close file descriptor */
-  if (dwarf_fd >= 0)
-  {
-    close(dwarf_fd);
-    dwarf_fd = -1;
-  }
-
-  /* Clear all caches */
-  global_vars.clear();
-  type_cache.clear();
-  type_size_cache.clear();
-  member_offset_cache.clear();
-  elf_library_cache.clear();
+  // One cleanup path: also clears ELF identity and local/frame caches.
+  dwarf_cleanup();
 }
 
 /* ==================================================================
@@ -1123,6 +1052,7 @@ static void load_symbols_from_file(const char *path, uintptr_t base_addr)
   /* Store in global cache */
   if (!lib_syms.symbols.empty())
   {
+    mark_symbol_change();
     elf_library_cache[path] = std::move(lib_syms);
     LOG_INFO("ELF: Loaded %zu symbols from %s (base=0x%lx)",
              elf_library_cache[path].symbols.size(), path, base_addr);
@@ -1130,8 +1060,41 @@ static void load_symbols_from_file(const char *path, uintptr_t base_addr)
 }
 
 /* Load symbols from main executable */
+static std::string real_path(const char *path)
+{
+  char resolved[PATH_MAX];
+  if (realpath(path, resolved)) return resolved;
+  return path ? path : "";
+}
+
+/* Runtime base of the tracee's main executable image: the first mapping of the
+ * same file in /proc/<pid>/maps. Non-PIE images retain base 0. */
+static uintptr_t tracee_image_base(const char *executable, bool fixed)
+{
+  if (fixed || !executable || !*executable) return 0;
+  const std::string wanted = real_path(executable);
+  for (int node = 0; node < NP; ++node) {
+    const pid_t pid = ptmc_state.pids[node];
+    if (pid <= 0) continue;
+    const std::string maps = "/proc/" + std::to_string(pid) + "/maps";
+    FILE *fp = fopen(maps.c_str(), "r");
+    if (!fp) continue;
+    char line[1024];
+    uintptr_t base = 0;
+    while (fgets(line, sizeof(line), fp)) {
+      uintptr_t start = 0; char path[512] = {0};
+      if (sscanf(line, "%lx-%*x %*s %*s %*s %*s %511s", &start, path) >= 1 && path[0] == '/' &&
+          real_path(path) == wanted) { base = start; break; }
+    }
+    fclose(fp);
+    if (base) return base;
+  }
+  return 0;
+}
+
 static void load_elf_symbols(const char *executable)
 {
+  mark_symbol_change();
   if (elf_version(EV_CURRENT) == EV_NONE)
   {
     LOG_ERROR("ELF library initialization failed");
@@ -1141,15 +1104,37 @@ static void load_elf_symbols(const char *executable)
   /* Clear existing cache */
   elf_library_cache.clear();
   current_elf_path = executable;
+  current_elf_fixed = false;
+  current_elf_ranges.clear();
+  const int image_fd = open(executable, O_RDONLY);
+  if (image_fd >= 0) {
+    Elf* image = elf_begin(image_fd, ELF_C_READ, nullptr);
+    GElf_Ehdr header{};
+    if (image && gelf_getehdr(image, &header)) {
+      current_elf_fixed = header.e_type == ET_EXEC;
+      size_t count = 0;
+      if (elf_getphdrnum(image, &count) == 0) {
+        for (size_t i = 0; i < count; ++i) {
+          GElf_Phdr segment{};
+          if (gelf_getphdr(image, i, &segment) && segment.p_type == PT_LOAD &&
+              segment.p_memsz <= UINT64_MAX - segment.p_vaddr)
+            current_elf_ranges.emplace_back(segment.p_vaddr, segment.p_vaddr + segment.p_memsz);
+        }
+      }
+    }
+    if (image) elf_end(image);
+    close(image_fd);
+  }
 
-  /* Load main executable with base=0 (we'll fix this when we know runtime base)
-   */
-  load_symbols_from_file(executable, 0);
+  /* A PIE image needs its actual runtime base for symbol addresses. */
+  const uintptr_t base = tracee_image_base(executable, current_elf_fixed);
+  load_symbols_from_file(executable, base);
 }
 
 /* Load symbols from all shared libraries mapped in process */
 static void load_shared_library_symbols(int pid)
 {
+  mark_symbol_change();
   auto libraries = parse_proc_maps(pid);
 
   for (const auto &[path, base_addr] : libraries)
@@ -1405,6 +1390,7 @@ const type_info &dwarf_get_type_info(const char *type_name)
     ptr_info.size = 8;
     ptr_info.is_struct = false;
     ptr_info.is_array = false;
+    mark_symbol_change();
     type_cache[type_name] = std::move(ptr_info);
     return type_cache.find(type_name)->second;
   }
@@ -1462,6 +1448,7 @@ size_t dwarf_type_size(const char *type_name)
   }
 
   type_info info = dwarf_get_type_info(type_name);
+  mark_symbol_change();
   type_size_cache[key] = info.size;
   return info.size;
 }
@@ -1496,6 +1483,7 @@ ptrdiff_t dwarf_member_offset(const char *struct_type, const char *member)
   {
     if (m.name == member)
     {
+      mark_symbol_change();
       member_offset_cache[struct_key][member_key] = m.offset;
       return m.offset;
     }
@@ -2011,7 +1999,7 @@ static void parse_function_params(Dwarf_Debug dbg, Dwarf_Die func_die,
         if (dwarf_global_formref(type_attr, &type_offset, &err) == DW_DLV_OK)
         {
           Dwarf_Die type_die;
-          if (dwarf_offdie(dbg, type_offset, &type_die, &err) == DW_DLV_OK)
+          if (dwarf_offdie_b(dbg, type_offset, true, &type_die, &err) == DW_DLV_OK)
           {
             type_info tinfo;
             parse_type_info(dbg, type_die, tinfo);
@@ -2067,7 +2055,7 @@ static void parse_function_params(Dwarf_Debug dbg, Dwarf_Die func_die,
         info.local_vars.push_back(v);
       }
     }
-  } while (dwarf_siblingof(dbg, child_die, &child_die, &err) == DW_DLV_OK);
+  } while (dwarf_siblingof_b(dbg, child_die, true, &child_die, &err) == DW_DLV_OK);
 }
 
 /* Find function info by PC */
@@ -2078,24 +2066,28 @@ static bool find_function_by_pc(uintptr_t pc, func_info &out_info)
 
   Dwarf_Error err;
   Dwarf_Unsigned cu_header_length, abbrev_offset, next_cu_header;
-  Dwarf_Half version_stamp, address_size;
+  Dwarf_Half version_stamp, address_size, length_size, extension_size, cu_type;
+  Dwarf_Sig8 type_signature;
+  Dwarf_Unsigned type_offset;
 
   /* Reset CU iteration */
-  while (dwarf_next_cu_header(dbg, &cu_header_length, &version_stamp,
-                              &abbrev_offset, &address_size, &next_cu_header,
-                              &err) == DW_DLV_OK)
+  while (dwarf_next_cu_header_d(dbg, true, &cu_header_length, &version_stamp,
+                              &abbrev_offset, &address_size, &length_size,
+                              &extension_size, &type_signature, &type_offset,
+                              &next_cu_header, &cu_type, &err) == DW_DLV_OK)
   {
   }
 
   /* Search all CUs */
-  while (dwarf_next_cu_header(dbg, &cu_header_length, &version_stamp,
-                              &abbrev_offset, &address_size, &next_cu_header,
-                              &err) == DW_DLV_OK)
+  while (dwarf_next_cu_header_d(dbg, true, &cu_header_length, &version_stamp,
+                              &abbrev_offset, &address_size, &length_size,
+                              &extension_size, &type_signature, &type_offset,
+                              &next_cu_header, &cu_type, &err) == DW_DLV_OK)
   {
     Dwarf_Die no_die = 0;
     Dwarf_Die cu_die;
 
-    if (dwarf_siblingof(dbg, no_die, &cu_die, &err) != DW_DLV_OK)
+    if (dwarf_siblingof_b(dbg, no_die, true, &cu_die, &err) != DW_DLV_OK)
       continue;
 
     /* Search for subprogram DIEs */
@@ -2157,7 +2149,7 @@ static bool find_function_by_pc(uintptr_t pc, func_info &out_info)
 
       /* Add sibling and child to stack */
       Dwarf_Die sibling_die;
-      if (dwarf_siblingof(dbg, current_die, &sibling_die, &err) == DW_DLV_OK)
+      if (dwarf_siblingof_b(dbg, current_die, true, &sibling_die, &err) == DW_DLV_OK)
       {
         die_stack.push(sibling_die);
       }
