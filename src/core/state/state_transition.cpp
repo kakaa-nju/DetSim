@@ -184,14 +184,25 @@ int exec_once(const sys_state &s, syscall_info &info)
 
 static bool check_assertions(const sys_state& state, unsigned actor)
 {
-  if (ptmc_state.assertions.empty()) return false;
-  const detsim::StateView view(state);
+  /* Both property surfaces are optional, and either may be configured alone:
+   * the config's "Assertions" list and the "UserCheck" plugin.  Skipping the
+   * whole function when no assertion string is configured used to silently
+   * disable a loaded UserCheck plugin, which is exactly the shape this agent
+   * produces (a check.c and no hand-written assertion strings).  So bail out
+   * only when neither surface exists. */
+  if (ptmc_state.assertions.empty() && !detsim::user_plugin::has_check())
+    return false;
+
   bool violated = false;
-  for (const auto& assertion : ptmc_state.assertions) {
-    if (!view.evaluate(actor, assertion)) {
-      detsim::ui::ui_printf("Assertion \"%s\" fail at sys_state " HASH_FORMAT "!\n",
-                            assertion.c_str(), state.ss_hash);
-      violated = true;
+  if (!ptmc_state.assertions.empty())
+  {
+    const detsim::StateView view(state);
+    for (const auto& assertion : ptmc_state.assertions) {
+      if (!view.evaluate(actor, assertion)) {
+        detsim::ui::ui_printf("Assertion \"%s\" fail at sys_state " HASH_FORMAT "!\n",
+                              assertion.c_str(), state.ss_hash);
+        violated = true;
+      }
     }
   }
   if (violated) return true;
