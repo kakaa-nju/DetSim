@@ -28,6 +28,7 @@
 #include "proc_status.h"
 #include "state_store.h"
 #include "syscall_fmt.h"
+#include "../user_plugin.h"
 #include "sysstate_store.h"
 #include "utils.h"
 #include <assert.h>
@@ -237,6 +238,12 @@ sys_state::sys_state(const struct syscall_info info[][MAX_THREADS_PER_PROCESS],
     ts_hash[j] = child[j].save_stopped(ptmc_state.pids[j], comparison_hash);
     if (!ts_hash[j]) throw std::runtime_error("Failed to capture tracee state");
   }
+  /* The plugin shadow of a new state belongs to the live tracees, not to the
+   * predecessor it branched from: inheriting context.user_state would stamp an
+   * older blob onto a newer program state. */
+  if (detsim::user_plugin::user_state_enabled_inline())
+    for (int j = 0; j < NP; ++j)
+      detsim::user_plugin::user_state_capture(j, user_state[j]);
   if (persist) commit_metadata();
   else ss_hash = identity_hash();
   LOG_DEBUG("Create sstate " HASH_FORMAT, ss_hash);
@@ -2138,6 +2145,11 @@ void sys_state::recover_running_state() const try
     resolved.child[i].restore_resources(i);
   }
   ptmc_state.running_state = std::move(resolved);
+  /* Hand the loaded shadow back to the plugin: the restored blob is the state
+   * the check hook must observe on this branch, never the pre-restore one. */
+  if (detsim::user_plugin::user_state_enabled_inline())
+    for (int i = 0; i < NP; ++i)
+      detsim::user_plugin::user_state_restore(i, user_state[i]);
   for (int i = 0; i < NP; ++i)
     detsim::resident::publish(ptmc_state.pids[i], ts_hash[i], child[i].brk);
   for (int i = 0; i < NP; ++i) ptmc_state.tracee_image_dirty[i] = false;

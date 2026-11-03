@@ -1,6 +1,8 @@
 # DetSim build.
 #
 #   make NP=N [debug|release]   build ./tracer for N modelled processes
+#   make NP=N PROFILER=1        build ./tracer with the per-transition phase
+#                               profiler (see perf/raft/)
 #   make NP=N benchmark         build the storage/hash benchmarks
 #   make NP=N tools             build the sstate query/verify utilities
 #   make clean | clear | format | wc | help
@@ -13,7 +15,7 @@
 .DELETE_ON_ERROR:
 
 .PHONY: all release debug tracer benchmark tools help wc format clear clean \
-        pgo-generate pgo-use pgo-clean ss_bench sys_bench xxh_bench FORCE
+        pgo-generate pgo-use pgo-clean ss_bench sys_bench xxh_bench probe_enc FORCE
 
 # --- toolchain ---------------------------------------------------------------
 # Standard CC/CXX overrides are honored; ccache stays optional
@@ -35,6 +37,12 @@ INCLUDES = -I. -Isrc -Isrc/core -Isrc/core/engine -Isrc/core/syscall \
            -Isrc/subsys/net -Isrc/subsys/sync -Isrc/utils -Isrc/ui \
            -Isrc/ui/cli -Ithird_party -Ithird_party/cereal/include
 PROJECT_CPPFLAGS = $(INCLUDES) -DNP=$(NP)
+# Opt-in per-transition phase profiler. Off by default: without PROFILER=1 the
+# instrumentation compiles to nothing. It is part of the config stamp below, so
+# switching it rebuilds.
+ifeq ($(PROFILER),1)
+PROJECT_CPPFLAGS += -DDETSIM_ENABLE_TRANSITION_PROFILE=1
+endif
 CXXFLAGS ?= -std=gnu++20 -fno-stack-protector -O3 -msse4.2 -mavx2 -mbmi -mbmi2 \
             $(if $(filter debug,$(MODE)),-g,)
 CFLAGS ?= -O3 -g
@@ -114,25 +122,33 @@ $(YACC_SRC) $(YACC_HDR) &: src/utils/expr_parser.y
 	bison -d -o $(YACC_SRC) $<
 
 # --- benchmarks --------------------------------------------------------------
-benchmark: ss_bench sys_bench xxh_bench
+benchmark: ss_bench sys_bench xxh_bench probe_enc
 ss_bench: $(BIN_DIR)/ss_bench
 sys_bench: $(BIN_DIR)/sys_bench
 xxh_bench: $(BIN_DIR)/xxh_bench
+probe_enc: $(BIN_DIR)/probe_enc
 
 .PHONY: $(BIN_DIR)/ss_bench $(BIN_DIR)/sys_bench $(BIN_DIR)/xxh_bench
-$(BIN_DIR)/ss_bench: $(BUILD_DIR)/perf/state_store_benchmark.o \
+$(BIN_DIR)/ss_bench: $(BUILD_DIR)/perf/state_store/state_store_benchmark.o \
                      $(TRACER_OBJS_NO_MAIN) $(BUILD_DIR)/nr2call.o
 	@mkdir -p $(@D)
 	$(LD) $^ $(LDFLAGS) $(LDLIBS) -o $@
 
-$(BIN_DIR)/sys_bench: $(BUILD_DIR)/perf/sysstate_store_benchmark.o \
+$(BIN_DIR)/sys_bench: $(BUILD_DIR)/perf/sysstate_store/sysstate_store_benchmark.o \
                       $(TRACER_OBJS_NO_MAIN) $(BUILD_DIR)/nr2call.o
 	@mkdir -p $(@D)
 	$(LD) $^ $(LDFLAGS) $(LDLIBS) -o $@
 
-$(BIN_DIR)/xxh_bench: $(BUILD_DIR)/perf/xxhash_benchmark.o $(BUILD_DIR)/nr2call.o
+$(BIN_DIR)/xxh_bench: $(BUILD_DIR)/perf/xxhash/xxhash_benchmark.o $(BUILD_DIR)/nr2call.o
 	@mkdir -p $(@D)
 	$(LD) $^ $(LDFLAGS) -lxxhash -o $@
+
+# Metadata cost probe: cereal encode of one tracee_state plus xxh3 over one
+# captured tracee snapshot. Links the tracer objects without main.cpp.
+$(BIN_DIR)/probe_enc: $(BUILD_DIR)/perf/encoding/probe_encoding_cost.o \
+                      $(TRACER_OBJS_NO_MAIN) $(BUILD_DIR)/nr2call.o
+	@mkdir -p $(@D)
+	$(LD) $^ $(LDFLAGS) $(LDLIBS) -o $@
 
 # --- storage tools -----------------------------------------------------------
 tools: tools/sstate_query tools/verify_sstate
@@ -146,7 +162,7 @@ tools/verify_sstate: $(BUILD_DIR)/tools/storage/verify_sstate.o \
 	$(LD) $^ $(LDFLAGS) $(LDLIBS) -o $@
 
 -include $(OBJS:.o=.d) $(BUILD_DIR)/nr2call.d \
-         $(wildcard $(BUILD_DIR)/perf/*.d $(BUILD_DIR)/tools/storage/*.d)
+         $(wildcard $(BUILD_DIR)/perf/*/*.d $(BUILD_DIR)/tools/storage/*.d)
 
 # --- housekeeping ------------------------------------------------------------
 help:

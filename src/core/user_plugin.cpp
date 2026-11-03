@@ -38,8 +38,13 @@ namespace detsim
 {
 namespace user_plugin
 {
-namespace
-{
+/* Definitions of the hook mirrors declared in user_plugin.h. They live outside
+ * the anonymous namespace so the header's inline queries resolve to one object
+ * in every translation unit. */
+int (*g_check_fn)(void) = nullptr;
+int (*g_state_size_fn)(int) = nullptr;
+void (*g_state_save_fn)(int, void *) = nullptr;
+void (*g_state_load_fn)(int, const void *, int) = nullptr;
 
 struct Module
 {
@@ -55,12 +60,10 @@ struct Module
   Module &operator=(const Module &) = delete;
 };
 
-std::vector<std::unique_ptr<Module>> modules;
+namespace
+{
 
-int (*g_check_fn)(void) = nullptr;
-int (*g_state_size_fn)(int) = nullptr;
-void (*g_state_save_fn)(int, void *) = nullptr;
-void (*g_state_load_fn)(int, const void *, int) = nullptr;
+std::vector<std::unique_ptr<Module>> modules;
 choose_func g_choose[450] = {};
 
 /* Maximum size of one tracee's opaque user state blob. */

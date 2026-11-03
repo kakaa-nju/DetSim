@@ -14,6 +14,7 @@
 #include "state/state_store.h"
 #include "state/state_store_packed.h"
 #include "state/state_transition.h"
+#include "state/transition_profile.h"
 #include "state/sysstate_store.h"
 #include "utils.h"
 #include "state/soft_dirty_experiment.h"
@@ -600,6 +601,7 @@ static void start_status_monitor()
   g_start_time = gettime();
   g_next_status_update = g_start_time.load() + 0.5;
   g_max_depth_recorded = 0;
+  detsim::profile::reset();
 }
 
 static void stop_status_monitor()
@@ -829,6 +831,7 @@ int exec_bfs()
         "SEARCH_WORK {\"transitions\":%zu,\"restore_us\":%llu,\"capture_check_commit_us\":%llu}\n",
         g_save_count.load(), static_cast<unsigned long long>(g_restore_time_us.load()),
         static_cast<unsigned long long>(g_save_time_us.load()));
+    detsim::profile::report("TRANSITION_PROFILE");
   };
 
   auto stop_for_violation = [&]() {
@@ -1277,6 +1280,7 @@ int exec_dfs(int depth)
   if (page_capture_enabled()) report_page_capture_stats();
   detsim::page_restore::report();
   detsim::ui::ui_printf("SEARCH_WORK {\"transitions\":%zu}\n", g_save_count.load());
+  detsim::profile::report("TRANSITION_PROFILE");
   report_search_exited(exited_receipt);
 
   return 0;

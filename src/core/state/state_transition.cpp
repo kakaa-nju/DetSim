@@ -2,6 +2,7 @@
 #include "config.h"
 #include <algorithm>
 #include "state_view.h"
+#include "transition_profile.h"
 #include <array>
 #include "user_plugin.h"
 #include "search/compatibility.h"
@@ -190,7 +191,7 @@ static bool check_assertions(const sys_state& state, unsigned actor)
    * disable a loaded UserCheck plugin, which is exactly the shape this agent
    * produces (a check.c and no hand-written assertion strings).  So bail out
    * only when neither surface exists. */
-  if (ptmc_state.assertions.empty() && !detsim::user_plugin::has_check())
+  if (ptmc_state.assertions.empty() && !detsim::user_plugin::has_check_inline())
     return false;
 
   bool violated = false;
@@ -206,9 +207,13 @@ static bool check_assertions(const sys_state& state, unsigned actor)
     }
   }
   if (violated) return true;
-  if (detsim::user_plugin::check_state(state, actor)) {
-    detsim::ui::ui_printf("User check failed at sys_state " HASH_FORMAT "!\n", state.ss_hash);
-    return true;
+  {
+    /* Timed only in a PROFILER=1 build; otherwise the scope is empty. */
+    const detsim::profile::Scope check_scope(detsim::profile::kCheck);
+    if (detsim::user_plugin::check_state(state, actor)) {
+      detsim::ui::ui_printf("User check failed at sys_state " HASH_FORMAT "!\n", state.ss_hash);
+      return true;
+    }
   }
   return false;
 }
@@ -282,10 +287,17 @@ TransitionResult state_transition(const sys_state &source_state,
   }
   TransitionResult result;
   ptmc_state.cursor = process_index;
+#if DETSIM_ENABLE_TRANSITION_PROFILE
+  if (detsim::profile::enabled())
+    ++detsim::profile::totals().transitions;
+#endif
 
   // restore state to tracees with timing
   auto t1 = std::chrono::high_resolution_clock::now();
-  source_state.recover_running_state();
+  {
+    detsim::profile::Scope restore_scope(detsim::profile::kRestore);
+    source_state.recover_running_state();
+  }
   auto t2 = std::chrono::high_resolution_clock::now();
   result.restore_time =
       std::chrono::duration_cast<std::chrono::microseconds>(t2 - t1);
@@ -324,6 +336,7 @@ TransitionResult state_transition(const sys_state &source_state,
       throw std::runtime_error("Admitted timeout failed to complete");
     ckpt = CKPT_YES;
   } else {
+    detsim::profile::Scope syscall_scope(detsim::profile::kSyscall);
     ckpt = exec_once(source_state, executed);
   }
   const int transition_choice = action == TransitionAction::Timeout ? DETSIM_CHOICE_TIMEOUT :
@@ -352,7 +365,10 @@ TransitionResult state_transition(const sys_state &source_state,
   result.property_violation = check_assertions(result.new_state, process_index);
   // Property result and user state are committed with the product-state identity.
   result.new_state.property_failed = result.property_violation;
-  result.new_state.commit_metadata();
+  {
+    detsim::profile::Scope commit_scope(detsim::profile::kCheckpoint);
+    result.new_state.commit_metadata();
+  }
   auto t4 = std::chrono::high_resolution_clock::now();
   result.save_time =
       std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3);

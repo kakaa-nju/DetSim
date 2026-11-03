@@ -59,6 +59,13 @@ namespace detsim
 namespace user_plugin
 {
 
+/* Mirrors of the resolved hooks, exposed so the header's inline queries below
+ * compile in every translation unit without a function call. */
+extern int (*g_check_fn)(void);
+extern int (*g_state_size_fn)(int);
+extern void (*g_state_save_fn)(int, void *);
+extern void (*g_state_load_fn)(int, const void *, int);
+
 /* Load the plugins named by the configuration. Replaces any previous state. */
 void configure(const char *check_source, const char *state_source,
                const char *choose_source, const char *configuration_directory);
@@ -74,6 +81,16 @@ bool check_state(const sys_state &state, int process);
 
 /* Description of loaded modules for the CLI. */
 std::string describe();
+
+/* Inline hot-path queries. These return the same values as has_check() and
+ * user_state_enabled() but read a global instead of calling into this
+ * translation unit: the capture path asks once per node and the restore path
+ * once more per node, so the call itself was measurable at 200+ states/s. */
+inline bool has_check_inline() { return g_check_fn != nullptr; }
+inline bool user_state_enabled_inline()
+{
+  return g_state_size_fn != nullptr && g_state_save_fn != nullptr;
+}
 
 /* True when the UserState plugin supplies capture hooks. */
 bool user_state_enabled();
