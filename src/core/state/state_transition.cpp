@@ -12,6 +12,8 @@
 #include "engine/pending_syscall.h"
 #include "pending_io.h"
 #include <stdexcept>
+#include <string>
+#include <vector>
 #include <algorithm>
 #include "emu.h"
 #include "fsstate.h"
@@ -183,7 +185,11 @@ int exec_once(const sys_state &s, syscall_info &info)
   return result.checkpoint_decision;
 }
 
-static bool check_assertions(const sys_state& state, unsigned actor)
+/* Returns one line per violated property, without the state identity: the
+ * caller prints them once the state has been committed. The hash a diagnostic
+ * names has to be the hash the state is stored under, and that identity only
+ * exists after the post-check UserState capture has been folded in. */
+static std::vector<std::string> check_assertions(const sys_state& state, unsigned actor)
 {
   /* Both property surfaces are optional, and either may be configured alone:
    * the config's "Assertions" list and the "UserCheck" plugin.  Skipping the
@@ -191,31 +197,37 @@ static bool check_assertions(const sys_state& state, unsigned actor)
    * disable a loaded UserCheck plugin, which is exactly the shape this agent
    * produces (a check.c and no hand-written assertion strings).  So bail out
    * only when neither surface exists. */
+  std::vector<std::string> failures;
   if (ptmc_state.assertions.empty() && !detsim::user_plugin::has_check_inline())
-    return false;
+    return failures;
 
-  bool violated = false;
   if (!ptmc_state.assertions.empty())
   {
     const detsim::StateView view(state);
     for (const auto& assertion : ptmc_state.assertions) {
-      if (!view.evaluate(actor, assertion)) {
-        detsim::ui::ui_printf("Assertion \"%s\" fail at sys_state " HASH_FORMAT "!\n",
-                              assertion.c_str(), state.ss_hash);
-        violated = true;
-      }
+      if (!view.evaluate(actor, assertion))
+        failures.push_back("Assertion \"" + assertion + "\" fail");
     }
   }
-  if (violated) return true;
+  /* A failing assertion already decides the state and the plugin is not
+   * consulted then, exactly as before. */
+  if (!failures.empty()) return failures;
   {
     /* Timed only in a PROFILER=1 build; otherwise the scope is empty. */
     const detsim::profile::Scope check_scope(detsim::profile::kCheck);
-    if (detsim::user_plugin::check_state(state, actor)) {
-      detsim::ui::ui_printf("User check failed at sys_state " HASH_FORMAT "!\n", state.ss_hash);
-      return true;
-    }
+    if (detsim::user_plugin::check_state(state, actor))
+      failures.emplace_back("User check failed");
   }
-  return false;
+  return failures;
+}
+
+/* Name the committed state in the property diagnostics. */
+static void report_property_failures(const sys_state& state,
+                                     const std::vector<std::string>& failures)
+{
+  for (const auto& failure : failures)
+    detsim::ui::ui_printf("%s at sys_state " HASH_FORMAT "!\n",
+                          failure.c_str(), state.ss_hash);
 }
 
 timeval timeout_action_clock(const sys_state& source,int process,int thread) {
@@ -362,13 +374,23 @@ TransitionResult state_transition(const sys_state &source_state,
   /* User-visible property surface: the state assertions and the UserCheck
    * hook observe every newly captured state (including discarded steps, as
    * the historical tracer did) without changing branch ownership. */
-  result.property_violation = check_assertions(result.new_state, process_index);
+  auto failures = check_assertions(result.new_state, process_index);
+  result.property_violation = !failures.empty();
+  /* The check may record observations in its shadow (for example the leader of
+   * each term). Re-read it so those observations belong to this state and are
+   * restored with it, then let them enter the identity. This is the only
+   * capture point for a transition: the constructor deliberately inherits the
+   * predecessor's blob, because a shadow read before the check has run could
+   * only repeat what the predecessor already said. */
+  result.new_state.capture_user_state();
   // Property result and user state are committed with the product-state identity.
   result.new_state.property_failed = result.property_violation;
   {
     detsim::profile::Scope commit_scope(detsim::profile::kCheckpoint);
     result.new_state.commit_metadata();
   }
+  /* The identity is final now, so the diagnostics can name the stored state. */
+  report_property_failures(result.new_state, failures);
   auto t4 = std::chrono::high_resolution_clock::now();
   result.save_time =
       std::chrono::duration_cast<std::chrono::microseconds>(t4 - t3);
@@ -739,12 +761,13 @@ int state_initialization()
   sys_state first_state(syscall_info, nullptr, false);
   first_state.model_identity = ptmc_state.model_identity;
   detsim::search::initialize_compatibility_manifest(first_state);
-  first_state.ss_hash = first_state.identity_hash();
-  bool violation = check_assertions(first_state, 0);
-  first_state.property_failed = violation;
+  auto failures = check_assertions(first_state, 0);
+  first_state.capture_user_state();
+  first_state.property_failed = !failures.empty();
   first_state.commit_metadata();
+  report_property_failures(first_state, failures);
   ptmc_state.running_state = first_state;
   for (int node=0; node<NP; ++node) ptmc_state.tracee_image_dirty[node]=false;
-  if (violation) throw std::runtime_error("Initial state violates configured properties");
+  if (!failures.empty()) throw std::runtime_error("Initial state violates configured properties");
   return 0;
 }

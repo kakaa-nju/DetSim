@@ -395,6 +395,13 @@ typedef struct sys_state
   void commit_metadata();
   hash_type identity_hash() const;
 
+  /* Re-read the UserState plugin shadow into this state. The constructor
+   * inherits the predecessor's blob instead of capturing, so the engine calls
+   * this once, after the property check ran, to publish the observations the
+   * check recorded (for example the leader of each term) before the identity
+   * is committed. */
+  void capture_user_state();
+
   /* ---------------------------------------------------------
    * Recovery
    * --------------------------------------------------------- */

@@ -238,15 +238,23 @@ sys_state::sys_state(const struct syscall_info info[][MAX_THREADS_PER_PROCESS],
     ts_hash[j] = child[j].save_stopped(ptmc_state.pids[j], comparison_hash);
     if (!ts_hash[j]) throw std::runtime_error("Failed to capture tracee state");
   }
-  /* The plugin shadow of a new state belongs to the live tracees, not to the
-   * predecessor it branched from: inheriting context.user_state would stamp an
-   * older blob onto a newer program state. */
-  if (detsim::user_plugin::user_state_enabled_inline())
-    for (int j = 0; j < NP; ++j)
-      detsim::user_plugin::user_state_capture(j, user_state[j]);
+  /* `user_state` starts as the predecessor's blob and is refreshed by the
+   * engine once the property check has run (see state_transition.cpp). That
+   * single late capture is the one a state is stored with: a shadow read here,
+   * before the check, could only repeat what the predecessor already said.
+   * A caller that commits a state without going through that path must capture
+   * first. */
   if (persist) commit_metadata();
   else ss_hash = identity_hash();
   LOG_DEBUG("Create sstate " HASH_FORMAT, ss_hash);
+}
+
+void sys_state::capture_user_state()
+{
+  if (!detsim::user_plugin::user_state_enabled_inline())
+    return;
+  for (int j = 0; j < NP; ++j)
+    detsim::user_plugin::user_state_capture(j, user_state[j]);
 }
 
 /* ======================================================================
