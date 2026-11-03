@@ -1,0 +1,18 @@
+{
+  "Loglevel": 1,
+  "Nodes": 3,
+  "Tracee": [
+    ["./rewind", "0"],
+    ["./rewind", "1"],
+    ["./rewind", "2"]
+  ],
+  "Addr": ["192.168.0.1", "192.168.0.2", "192.168.0.3"],
+  "UserCheck": "./rewind_check.so",
+  "UserState": "./rewind_check.so",
+  "ChoosePoint": [
+    { "syscall": 96, "choose": 1 }
+  ],
+  "RuntimeProfile": {
+    "startup_syscall": 10
+  }
+}

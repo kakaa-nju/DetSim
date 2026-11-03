@@ -24,3 +24,5 @@ simple_complex/simple_complex
 write/write
 userstate/userstate
 userstate/check.so
+userstate/rewind
+userstate/rewind_check.so
