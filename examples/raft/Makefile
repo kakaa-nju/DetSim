@@ -3,7 +3,11 @@
 
 NP ?= 3
 CFLAGS = -gdwarf-4 -g -D_FORTIFY_SOURCE=0 -static
-CXXFLAGS = -gdwarf-4 -g -I . -I ../../src -I ../../src/core -I ../../src/utils -I ../../src/subsys -D_FORTIFY_SOURCE=0 -static
+# Plugins are shared objects loaded into the tracer: no -static, and NP must
+# match the tracer build because the plugin sizes its per-node arrays from it.
+PLUGIN_CXXFLAGS = -std=gnu++20 -O2 -gdwarf-4 -g -shared -fPIC -DNP=$(NP) \
+                  -I . -I ../../src -I ../../src/core -I ../../src/utils \
+                  -I ../../src/subsys -D_FORTIFY_SOURCE=0
 
 .PHONY: all clean raft raft_dynamic plugins
 
@@ -21,10 +25,10 @@ raft_dynamic:
 plugins: plugins/check.so plugins/choose.so
 
 plugins/check.so: plugins/check.cpp
-	$(CXX) -shared -fPIC $(CXXFLAGS) $< -o $@
+	$(CXX) $(PLUGIN_CXXFLAGS) $< -o $@
 
 plugins/choose.so: plugins/choose.cpp
-	$(CXX) -shared -fPIC $(CXXFLAGS) $< -o $@
+	$(CXX) $(PLUGIN_CXXFLAGS) $< -o $@
 
 clean:
 	$(MAKE) -C raft clean
