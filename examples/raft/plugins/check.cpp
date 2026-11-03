@@ -3,7 +3,8 @@
  *
  * Checks:
  * 1. Term monotonicity: term should never decrease
- * 2. Leader uniqueness: only one leader per term
+ * 2. Leader uniqueness: at most one leader per term, both within a state and
+ *    across the branch (the per-term leader history lives in UserState)
  * 3. Snapshot term consistency: snapshot term <= current term
  * 4. Vote integrity: one vote per term per node
  * 5. Leader completeness: committed entries exist on future leaders
@@ -37,6 +38,13 @@ struct raft_shadow_state
   long applied_idx = 0;
   long last_idx = 0;
   long voted_for = -1;
+  /* Leader observed for each term, encoded as node id + 1 (0 = unknown, so a
+     zero-initialised plugin starts with an empty table). This is the raft "who
+     led term T" history: it lives in the UserState blob, so it is
+     checkpointed, restored on every load and rewinds with the branch. Slot 0
+     of g_raft_shadow carries the table because one sys_state covers all
+     tracees. */
+  long term_leader[100] = {};
   long match_idx[3] = {0, 0, 0};
   long next_idx[3] = {0, 0, 0};
 };
@@ -276,31 +284,68 @@ extern "C"
     return 0;
   }
 
-  int check_leader_uniqueness()
+  /* Leader uniqueness: at most one leader per term, over the whole branch.
+   *
+   * The property has two faces, but they are one check. Two tracees claiming
+   * the same term in the same state is the local face; a tracee claiming a
+   * term that another tracee already led on an earlier state of this branch is
+   * the cross-state (historical) face -- a node cannot take over a term that
+   * is already someone else's.
+   *
+   * Both are decided in a single pass over the current tracees:
+   *  - `claimed` is stack scratch, rebuilt on every call. It only answers "did
+   *    another tracee already claim this term during *this* scan", so it is
+   *    never persisted and never participates in state identity.
+   *  - g_raft_shadow[0].term_leader lives in the UserState blob, so a successor
+   *    state inherits the history of its branch and a rewind drops the
+   *    knowledge of branches that were not taken.
+   *
+   * Keeping the same-state scratch separate from the historical table matters:
+   * if the scan wrote straight into the historical table, the second claimant
+   * of a concurrent split brain would find its own write and agree with it, so
+   * the violation would only surface as a cross-state takeover and the "both
+   * are leaders at this instant" diagnostic would be lost. */
+  int check_term_leader_history()
   {
-    long term_leaders[100] = {0};
-    long term_leader_count[100] = {0};
+    int claimed[100] = {0}; /* node id + 1, this state only */
 
     for (int i = 0; i < NP; i++)
     {
       bool success = false;
-      if (is_node_leader(i, &success))
+      if (!is_node_leader(i, &success))
+        continue;
+
+      long term = get_node_term(i, &success);
+      if (!success || term < 0 || term >= 100)
+        continue;
+
+      if (claimed[term] == 0)
+        claimed[term] = i + 1;
+
+      /* Local face: a different tracee claimed this term above. */
+      if (claimed[term] != i + 1)
       {
-        int term = get_node_term(i, &success);
-        if (success && term >= 0 && term < 100)
-        {
-          term_leader_count[term]++;
-          term_leaders[term] = i;
-          if (term_leader_count[term] > 1)
-          {
-            detsim::ui::ui_printf(
-                "\n[CHECK FAILED] Multiple leaders in term %d!\n", term);
-            detsim::ui::ui_printf("  Nodes %d and %d both claim leadership\n",
-                                  term_leaders[term], i);
-            return 1;
-          }
-        }
+        detsim::ui::ui_printf(
+            "\n[CHECK FAILED] Multiple leaders in term %ld!\n", term);
+        detsim::ui::ui_printf("  Nodes %ld and %d both claim leadership\n",
+                              (long)(claimed[term] - 1), i);
+        return 1;
       }
+
+      /* Cross-state face: this term already has a leader earlier in the
+       * branch. */
+      const long recorded = g_raft_shadow[0].term_leader[term];
+      if (recorded != 0 && recorded != i + 1)
+      {
+        detsim::ui::ui_printf(
+            "\n[CHECK FAILED] Term %ld was led by node %ld, now node %d "
+            "claims it!\n", term, recorded - 1, i);
+        detsim::ui::ui_printf(
+            "  This violates Raft's one-leader-per-term property!\n");
+        return 1;
+      }
+
+      g_raft_shadow[0].term_leader[term] = i + 1;
     }
     return 0;
   }
@@ -817,7 +862,7 @@ extern "C"
       result |= check_match_idx_monotonicity(i);
     }
 
-    result |= check_leader_uniqueness();
+    result |= check_term_leader_history();
     result |= check_leader_completeness();
     result |= check_snapshot_term_consistency();
     result |= check_next_match_idx_relationship();
