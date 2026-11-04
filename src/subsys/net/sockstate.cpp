@@ -13,6 +13,8 @@
 #include "monitor.h"
 #include "guest.h"
 #include <stdexcept>
+#include <algorithm>
+#include <iterator>
 #include <arpa/inet.h>
 #include <cstdlib>
 #include <cstring>
@@ -750,8 +752,11 @@ ssize_t SockState::do_recvfrom(int fd, void *buf, size_t len, int flags,
 
 ssize_t SockState::do_recvfrom_with_choice(int fd, void *buf, size_t len,
                                            int flags, struct sockaddr *src_addr,
-                                           socklen_t *addrlen, int choice)
+                                           socklen_t *addrlen, int choice,
+                                           bool *timeout)
 {
+  if (timeout)
+    *timeout = false;
   if (flags & ~(MSG_DONTWAIT | MSG_PEEK | MSG_TRUNC))
     throw std::runtime_error("Unsupported UDP receive flags");
   Socket *sock = get_socket_mutable(fd);
@@ -776,26 +781,25 @@ ssize_t SockState::do_recvfrom_with_choice(int fd, void *buf, size_t len,
     return -EAGAIN;
   }
 
-  // Validate choice
-  if (choice < 0 || choice > 1)
+  /* The last enabled branch is the timeout. It keeps the queued datagrams in
+   * place and lets the caller suspend it as a timer, so virtual time can advance
+   * and other actors can run before the receive reports its timeout. */
+  const size_t messages =
+      std::min(it->second.size(), static_cast<size_t>(kMaxRecvfromChoices - 1));
+  if (choice < 0 || choice > static_cast<int>(messages))
   {
     return -EAGAIN;
   }
-
-  // Have only one datagram but postpone
-  if (choice == 1 && static_cast<int>(it->second.size()) == 1)
+  if (choice == static_cast<int>(messages))
   {
+    if (timeout)
+      *timeout = true;
     consume_model_budget(1);
     return -EAGAIN;
   }
 
-  // Get iterator to chosen datagram
-  auto dg_it = it->second.begin();
-  if (choice == 1 && it->second.size() >= 2)
-  {
-    // Choice 1: receive second message (for message reordering)
-    ++dg_it;
-  }
+  // Select the chosen datagram instead of always taking the FIFO head.
+  auto dg_it = std::next(it->second.begin(), choice);
 
   UdpDatagram &dg = *dg_it;
 
@@ -828,7 +832,7 @@ ssize_t SockState::do_recvfrom_with_choice(int fd, void *buf, size_t len,
 
   size_t result_len = (flags & MSG_TRUNC) ? dg.content.size() : copy_len;
   std::string source = format_sockaddr(dg.from);
-  if (choice == 1) consume_model_budget(1);
+  if (choice != 0) consume_model_budget(1);
   if (!(flags & MSG_PEEK)) it->second.erase(dg_it);
 
   LOG_TRACE("recvfrom(fd=%d, choice=%d) -> len=%zu from %s", fd, choice,
@@ -839,18 +843,19 @@ ssize_t SockState::do_recvfrom_with_choice(int fd, void *buf, size_t len,
 
 int SockState::get_recvfrom_choices(int fd) const
 {
+  const Socket *sock = get_socket(fd);
+  if (!sock || sock->type != SOCK_DGRAM)
+    return 0;
+
   auto it = udp_recv_buffers_.find(fd);
   if (it == udp_recv_buffers_.end() || it->second.empty())
-  {
-    return 0; // No messages available
-  }
+    return 0; // No messages: the blocking path owns the timeout.
 
-  if (it->second.size() >= 1)
-  {
-    return 2; // 2 choices: receive first or second message
-  }
-
-  return 2; // Only 1 choice: receive the only message or lag
+  /* One branch per queued datagram plus one timeout branch. Cap the message
+   * candidates so the timeout index always stays inside the choice limit. */
+  const size_t messages =
+      std::min(it->second.size(), static_cast<size_t>(kMaxRecvfromChoices - 1));
+  return static_cast<int>(messages) + 1;
 }
 
 /* ==============================================================================
@@ -1138,13 +1143,14 @@ int emu_connect(int sockfd, const struct sockaddr *addr, socklen_t addrlen)
 }
 
 ssize_t emu_recvfrom(int sockfd, void *buf, size_t len, int flags,
-                     struct sockaddr *src_addr, socklen_t *addrlen)
+                     struct sockaddr *src_addr, socklen_t *addrlen,
+                     bool *timeout)
 {
   int cur = ptmc_state.cursor;
   // Use choice from ptmc_state if available, otherwise default to 0
   int choice = (ptmc_state.n_choose > 0) ? ptmc_state.choose : 0;
   return ptmc_state.sock_states[cur].do_recvfrom_with_choice(
-      sockfd, buf, len, flags, src_addr, addrlen, choice);
+      sockfd, buf, len, flags, src_addr, addrlen, choice, timeout);
 }
 
 // Get number of recvfrom choices for current process and fd

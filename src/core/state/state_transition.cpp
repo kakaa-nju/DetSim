@@ -61,29 +61,21 @@ static constexpr int kMaxSyscallChoices = 1024;
 
 int analyze_choose(struct syscall_info &info)
 {
-  // Check if syscall has predefined choose count
-  int predefined = choose_many[info.nr];
-  if (predefined > 0)
+  const int nr = info.nr;
+  if (nr < 0 || nr >= 450)
+    return 0;
+
+  /* recvfrom owns its candidate enumeration: one branch per queued datagram
+   * plus one timeout branch. A ChooseFunc cannot change this count. */
+  if (nr == SYS_recvfrom)
   {
-    if (predefined > kMaxSyscallChoices)
-      throw std::runtime_error("ChoosePoint exceeds the supported choice count");
-    return predefined;
+    const int choices = emu_recvfrom_get_choices(static_cast<int>(info.args[0]));
+    if (choices > kMaxSyscallChoices)
+      throw std::runtime_error("recvfrom choice count exceeds the supported limit");
+    return choices;
   }
 
-  // For recvfrom, check number of available messages for message reordering
-  if (info.nr == SYS_recvfrom)
-  {
-    int fd = info.args[0];
-    int choices = emu_recvfrom_get_choices(fd);
-    // Only provide choice when there are 2+ messages (allow reordering)
-    if (choices >= 2)
-    {
-      return 2; // 0=receive first message, 1=receive second message
-    }
-    return 0; // No choice when < 2 messages
-  }
-
-  return 0;
+  return choose_many[nr] > 0 ? choose_many[nr] : 0;
 }
 
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui();

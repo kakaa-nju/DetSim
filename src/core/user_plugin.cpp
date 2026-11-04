@@ -30,6 +30,7 @@
 #include <cstdlib>
 #include <cerrno>
 #include <unistd.h>
+#include <sys/syscall.h>
 #include <sys/wait.h>
 
 namespace fs = std::filesystem;
@@ -249,6 +250,8 @@ void configure(const char *check_source, const char *state_source,
         std::string symbol = std::string("choose_") + name;
         g_choose[nr] = reinterpret_cast<choose_func>(dlsym(module->handle, symbol.c_str()));
         choose_syswhat[nr] = g_choose[nr];
+        if (nr == SYS_recvfrom && g_choose[nr])
+          LOG_WARN("choose_recvfrom is ignored; recvfrom uses detsim's base candidate selection");
       }
       LOG_INFO("Choose function plugin loaded");
     }

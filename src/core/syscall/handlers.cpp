@@ -29,9 +29,13 @@
 #include <sys/uio.h>
 #include <stdexcept>
 
-static int finish_io_call(pid_t pid, syscall_info& info, long result) {
+static int finish_io_call(pid_t pid, syscall_info& info, long result,
+                          bool timeout_choice = false) {
+    /* A recvfrom timeout branch suspends as a timer, so I/O readiness cannot
+     * turn it into an immediate retry. */
     if (io_should_suspend(ptmc_state.cursor, info, result)) {
-        suspend_syscall(ptmc_state.cursor,pid,info,PendingReason::Io);
+        suspend_syscall(ptmc_state.cursor,pid,info,
+                        timeout_choice ? PendingReason::Timer : PendingReason::Io);
         configure_pending_io(ptmc_state.cursor,pid,info);
     } else {
         tracee_set_rax(pid,result);
@@ -82,10 +86,11 @@ int handle_sendto(pid_t pid, syscall_info &info) {
 }
 
 int handle_recvfrom(pid_t pid, syscall_info &info) {
+    bool timeout_choice = false;
     long ret = emu_recvfrom(info.args[0], (void *)info.args[1], info.args[2],
                             info.args[3], (struct sockaddr *)info.args[4],
-                            (socklen_t *)info.args[5]);
-    return finish_io_call(pid,info,ret);
+                            (socklen_t *)info.args[5], &timeout_choice);
+    return finish_io_call(pid,info,ret,timeout_choice);
 }
 
 int handle_socket(pid_t pid, syscall_info &info) {

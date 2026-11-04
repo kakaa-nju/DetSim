@@ -39,6 +39,10 @@ void validate_timed_pending(const PendingSyscall& pending)
         else if (pending.nr == SYS_clock_nanosleep)
             allowed &= pending.args[2] && (static_cast<int>(pending.args[1]) & ~TIMER_ABSTIME) == 0 &&
                 deadline.clock_id == static_cast<int>(pending.args[0]);
+        else if (pending.nr == SYS_recvfrom)
+            /* A timeout-class recvfrom branch waits out its own deadline even
+             * when datagrams are already queued, modeling receive-side delay. */
+            allowed &= deadline.clock_id == CLOCK_MONOTONIC;
         else allowed &= pending.nr == SYS_pselect6 && pending.args[4] && deadline.clock_id == CLOCK_MONOTONIC;
     } else if (pending.reason == PendingReason::Io) {
         allowed = deadline.timeout_result == 0 && deadline.clock_id == CLOCK_MONOTONIC &&
@@ -304,7 +308,8 @@ void validate_pending_syscalls(const tracee_state& state)
             (pending.nr != SYS_futex || pending.phase == PendingPhase::Retry))
             throw std::runtime_error("Invalid unfinished futex syscall");
         if (pending.reason == PendingReason::Timer &&
-            ((pending.nr != SYS_nanosleep && pending.nr != SYS_clock_nanosleep && pending.nr != SYS_pselect6) ||
+            ((pending.nr != SYS_nanosleep && pending.nr != SYS_clock_nanosleep &&
+              pending.nr != SYS_pselect6 && pending.nr != SYS_recvfrom) ||
              pending.phase == PendingPhase::Retry ||
              (!pending.deadline && pending.nr != SYS_pselect6)))
             throw std::runtime_error("Invalid pending timer syscall");

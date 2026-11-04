@@ -23,6 +23,10 @@ class FileSystemState;
 extern void *memcpy_host2guest(void *dest, const void *src, size_t n);
 extern void *memcpy_guest2host(void *dest, const void *src, size_t n);
 
+/* Upper bound on recvfrom candidates: kMaxRecvfromChoices-1 datagrams plus one
+ * timeout branch. Kept in sync with the dispatcher's per-syscall choice limit. */
+inline constexpr int kMaxRecvfromChoices = 1024;
+
 /* ==============================================================================
  * Socket Address Utilities
  * ==============================================================================
@@ -180,11 +184,13 @@ class SockState
   ssize_t do_recvfrom(int fd, void *buf, size_t len, int flags,
                       struct sockaddr *src_addr, socklen_t *addrlen);
 
-  /* recvfrom with choice: 0=first message, 1=second message (for message
-   * reordering) */
+  /* recvfrom with choice: 0..messages-1 select one queued datagram (instead of
+   * FIFO), messages selects the timeout branch. `messages` is the queue length
+   * capped at kMaxRecvfromChoices-1. `timeout`, when non-null, reports whether
+   * the timeout branch was selected so the caller can suspend it as a timer. */
   ssize_t do_recvfrom_with_choice(int fd, void *buf, size_t len, int flags,
                                   struct sockaddr *src_addr, socklen_t *addrlen,
-                                  int choice);
+                                  int choice, bool *timeout = nullptr);
 
   /* send(fd, buf, len, flags) -> bytes_sent or -errno (TCP only) */
   ssize_t do_send(int fd, const void *buf, size_t len, int flags);
@@ -196,7 +202,8 @@ class SockState
   /* recv(fd, buf, len, flags) -> bytes_recv or -errno (TCP only) */
   ssize_t do_recv(int fd, void *buf, size_t len, int flags);
 
-  /* Get number of available choices for recvfrom (0, 1, or 2) */
+  /* Number of recvfrom choices: queued datagrams plus one timeout branch,
+   * or 0 when the queue is empty or the fd is not a datagram socket. */
   int get_recvfrom_choices(int fd) const;
 
   /* close(fd) -> 0 or -errno */
@@ -327,7 +334,8 @@ int emu_bind(int sockfd, const struct sockaddr *addr, socklen_t addrlen);
 int emu_getsockname(int fd, struct sockaddr *addr, socklen_t *addrlen);
 int emu_getpeername(int fd, struct sockaddr *addr, socklen_t *addrlen);
 ssize_t emu_recvfrom(int sockfd, void *buf, size_t len, int flags,
-                     struct sockaddr *src_addr, socklen_t *addrlen);
+                     struct sockaddr *src_addr, socklen_t *addrlen,
+                     bool *timeout = nullptr);
 int emu_recvfrom_get_choices(int sockfd);
 ssize_t emu_sendto(int sockfd, const void *buf, size_t len, int flags,
                    struct sockaddr *dest_addr, socklen_t addrlen);
