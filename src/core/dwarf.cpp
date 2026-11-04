@@ -2520,12 +2520,6 @@ bool dwarf_resolve_pc(uintptr_t pc, std::string &func_name,
   return false;
 }
 
-void *dwarf_lookup_die(uintptr_t pc)
-{
-  LOG_WARN("dwarf_lookup_die: not implemented yet");
-  return nullptr;
-}
-
 /* Template instantiations */
 template bool dwarf_read_var<int>(int pid, const char *varname, int *out);
 template bool dwarf_read_var<long>(int pid, const char *varname, long *out);

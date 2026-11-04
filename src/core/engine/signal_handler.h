@@ -120,15 +120,6 @@ bool should_continue(const SignalResult& result);
 // Check if we should stop simulation
 bool should_stop(const SignalResult& result);
 
-// Global SIGINT flag
-extern volatile sig_atomic_t sigint_received;
-
-// SIGINT handler
-void on_sigint(int sig);
-
-// Setup signal handlers
-void setup_handlers();
-
 } // namespace sig
 
 #endif /* __SIGNAL_HANDLER_H */

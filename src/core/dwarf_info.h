@@ -178,9 +178,6 @@ std::string dwarf_get_element_type(const char *type_name);
  * Raw Access (for advanced use)
  * ====================================================================== */
 
-/* Direct DWARF die lookup */
-void *dwarf_lookup_die(uintptr_t pc);
-
 /* Per-frame local variable cache */
 class DwarfLocalCache
 {

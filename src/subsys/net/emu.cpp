@@ -11,7 +11,7 @@ choose_func choose_syswhat[450] = {};
 
 /* Syscalls whose outcome detsim can materialize today. Candidate-class calls
  * (recvfrom) and the special gettimeofday path are listed separately from the
- * generic emu_process_syscall() group. */
+ * value-class models in emu_process_syscall(). */
 bool emu_syscall_choice_supported(int nr)
 {
   switch (nr)
@@ -29,6 +29,9 @@ bool emu_syscall_choice_supported(int nr)
   }
 }
 
+/* Value-class syscalls whose default result is produced by their own emulation
+ * in emu_process_syscall(), so a ChooseFunc branch may replace it whole.
+ * analyze_choose() uses this to demand a choose_ handler for a choice point. */
 bool emu_syscall_uses_generic_choice(int nr)
 {
   switch (nr)

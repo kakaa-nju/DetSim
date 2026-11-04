@@ -1449,13 +1449,6 @@ void adopt_snapshot_threads(int index, hash_type hash, const tracee_state& targe
   snapshot_thread_bindings.emplace(key, SnapshotThreadBinding{owner, std::move(layout)});
 }
 
-tracee_state tracee_state::resolve_thread_bindings(int index, hash_type hash) const
-{
-  tracee_state resolved = *this;
-  resolved.bind_threads_for_restore(index, hash);
-  return resolved;
-}
-
 void tracee_state::bind_threads_for_restore(int index, hash_type hash)
 {
   const auto found = snapshot_thread_bindings.find({index, hash});
@@ -1486,17 +1479,6 @@ void tracee_state::bind_threads_for_restore(int index, hash_type hash)
   validate_io_state();
 }
 
-void tracee_state::recover_running_state(int index, hash_type ts_hash) const
-{
-  (void)discard_zero_guards();
-  const auto resolved = resolve_thread_bindings(index, ts_hash);
-  ptmc_state.tracee_image_dirty[index] = true;
-  restore_thread_signal_masks(index, resolved);
-  normalize_thread_pool_for_restore(index);
-  resolved.recover_stopped(index, ts_hash);
-  resolved.restore_runtime_state(index);
-}
-
 void tracee_state::recover_stopped(int index, hash_type ts_hash) const
 {
   (void)discard_zero_guards();
@@ -1519,19 +1501,6 @@ void tracee_state::recover_stopped(int index, hash_type ts_hash) const
   recover_mem_reg_snapshot_unchecked(maps, ts_hash, main_pid);
 
   restore_thread_registers(main_pid);
-}
-
-void tracee_state::restore_runtime_state(int index) const
-{
-  validate_io_state();
-  auto& runtime = ptmc_state.running_state.child[index];
-  runtime.threads = threads;
-  runtime.thread_create_records = thread_create_records;
-  runtime.main_tid = main_tid;
-  runtime.current_thread_idx = current_thread_idx;
-  memmove(runtime.si, si, sizeof(si));
-  runtime.futex_state = futex_state;
-  restore_resources(index);
 }
 
 void tracee_state::restore_resources(int index) const
@@ -1614,17 +1583,6 @@ void sys_state::clear()
 /* ======================================================================
  * Section 7: Memory Capture
  * ====================================================================== */
-
-
-/*
- * Capture memory, registers, and tracee_state, store via StateStore
- * Optimized with batched process_vm_readv
- */
-hash_type tracee_state::save_full_state_to_state_store(int pid, hash_type comparison_hash)
-{
-  prepare_capture(pid);
-  return capture_stopped(pid, comparison_hash);
-}
 
 hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
 {
@@ -1924,12 +1882,6 @@ void tracee_state::prepare_capture(pid_t pid)
   }
 }
 
-hash_type tracee_state::save(int pid, hash_type comparison_hash)
-{
-  prepare_capture(pid);
-  return save_stopped(pid, comparison_hash);
-}
-
 hash_type tracee_state::save_stopped(pid_t pid, hash_type comparison_hash)
 {
   /* Record brk. The independent heap proof is the only cached authority;
@@ -1940,27 +1892,6 @@ hash_type tracee_state::save_stopped(pid_t pid, hash_type comparison_hash)
 
   /* Capture memory state (includes tstate) */
   return capture_stopped(pid, comparison_hash);
-}
-
-/* Equality comparison for incremental save optimization
- * Uses serialization to compare complex nested state structures.
- * This is slower than direct field comparison but doesn't require
- * defining operator== for all nested types.
- */
-bool tracee_state::metadata_equal(const tracee_state &other) const
-{
-  // Compare complex state using serialization
-  auto serialize_to_string = [](const tracee_state &ts) -> std::string
-  {
-    std::ostringstream oss;
-    {
-      cereal::BinaryOutputArchive ar(oss);
-      ar(ts);
-    }
-    return oss.str();
-  };
-
-  return serialize_to_string(*this) == serialize_to_string(other);
 }
 
 /* ======================================================================

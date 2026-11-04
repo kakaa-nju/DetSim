@@ -150,11 +150,9 @@ static SignalHandler g_signal_handler;
 
 namespace sig {
 
-volatile sig_atomic_t sigint_received = 0;
-
 void init()
 {
-    sigint_received = 0;
+    /* SIGINT itself is owned by monitor.cpp's ctrl_c handler. */
     LOG_INFO("Signal handling subsystem initialized");
 }
 
@@ -194,25 +192,6 @@ bool should_continue(const SignalResult& result)
 bool should_stop(const SignalResult& result)
 {
     return result.action == SignalAction::CRASH;
-}
-
-void on_sigint(int sig)
-{
-    (void)sig;
-    sigint_received = 1;
-}
-
-void setup_handlers()
-{
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = on_sigint;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESTART;
-
-    if (::sigaction(SIGINT, &sa, nullptr) < 0) {
-        LOG_WARN("Failed to set up SIGINT handler");
-    }
 }
 
 } // namespace sig

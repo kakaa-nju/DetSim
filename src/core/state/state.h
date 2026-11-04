@@ -267,28 +267,13 @@ typedef struct tracee_state
   // Reject inconsistent captured descriptor/resource graphs before use.
   void validate_io_state() const;
 
-  // Equality comparison (for incremental save optimization)
-  // Compares all metadata fields to detect state changes
-  bool metadata_equal(const tracee_state &other) const;
-
   /* ---------------------------------------------------------
    * State Capture (running -> struct -> disk)
    * --------------------------------------------------------- */
 
-  /* Full state save: memory, mappings, serialization */
-  hash_type save(int pid, hash_type comparison_hash = 0);
-
-  /* Capture memory and registers */
-  hash_type save_full_state_to_state_store(int pid, hash_type comparison_hash = 0);
-
   /* ---------------------------------------------------------
    * State Recovery (disk -> struct -> running)
    * --------------------------------------------------------- */
-
-  /* Main recovery entry */
-  tracee_state resolve_thread_bindings(int index, hash_type ts_hash) const;
-  void recover_running_state(int index, hash_type ts_hash) const;
-  void restore_runtime_state(int index) const;
 
   /* Restore memory mappings for brk */
   void restore_memory_mappings(hash_type ts_hash, int pid, std::vector<maps_item> &maps_out) const;

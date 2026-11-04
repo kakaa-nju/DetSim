@@ -20,39 +20,74 @@ void validate_deadline(const PendingDeadline& deadline)
         throw std::runtime_error("Invalid pending syscall deadline");
 }
 
+/* The deadline contract differs per suspension reason, and within a reason it
+ * depends on the syscall that armed the wait, so both levels are switches. */
 void validate_timed_pending(const PendingSyscall& pending)
 {
     const auto& deadline = *pending.deadline;
     bool allowed = false;
-    if (pending.reason == PendingReason::Futex) {
+    switch (pending.reason) {
+    case PendingReason::Futex: {
         const int operation = static_cast<int>(pending.args[1]);
         const int command = operation & FUTEX_CMD_MASK;
+        const bool realtime = (operation & FUTEX_CLOCK_REALTIME) != 0;
         allowed = (command == FUTEX_WAIT || command == FUTEX_WAIT_BITSET) &&
-            (!(operation & FUTEX_CLOCK_REALTIME) || command == FUTEX_WAIT_BITSET) &&
-            (command != FUTEX_WAIT_BITSET || static_cast<uint32_t>(pending.args[5]) != 0) && pending.args[3] &&
+            (!realtime || command == FUTEX_WAIT_BITSET) &&
+            (command != FUTEX_WAIT_BITSET || static_cast<uint32_t>(pending.args[5]) != 0) &&
+            pending.args[3] &&
             deadline.timeout_result == -ETIMEDOUT &&
-            deadline.clock_id == ((operation & FUTEX_CLOCK_REALTIME) ? CLOCK_REALTIME : CLOCK_MONOTONIC);
-    } else if (pending.reason == PendingReason::Timer) {
+            deadline.clock_id == (realtime ? CLOCK_REALTIME : CLOCK_MONOTONIC);
+        break;
+    }
+    case PendingReason::Timer:
         allowed = deadline.timeout_result == 0;
-        if (pending.nr == SYS_nanosleep)
+        switch (pending.nr) {
+        case SYS_nanosleep:
             allowed &= pending.args[0] && deadline.clock_id == CLOCK_MONOTONIC;
-        else if (pending.nr == SYS_clock_nanosleep)
+            break;
+        case SYS_clock_nanosleep:
             allowed &= pending.args[2] && (static_cast<int>(pending.args[1]) & ~TIMER_ABSTIME) == 0 &&
                 deadline.clock_id == static_cast<int>(pending.args[0]);
-        else if (pending.nr == SYS_recvfrom)
+            break;
+        case SYS_recvfrom:
             /* A timeout-class recvfrom branch waits out its own deadline even
              * when datagrams are already queued, modeling receive-side delay. */
             allowed &= deadline.clock_id == CLOCK_MONOTONIC;
-        else allowed &= pending.nr == SYS_pselect6 && pending.args[4] && deadline.clock_id == CLOCK_MONOTONIC;
-    } else if (pending.reason == PendingReason::Io) {
-        allowed = deadline.timeout_result == 0 && deadline.clock_id == CLOCK_MONOTONIC &&
-            ((pending.nr == SYS_epoll_pwait2 && pending.args[3]) ||
-             ((pending.nr == SYS_epoll_wait || pending.nr == SYS_epoll_pwait) && static_cast<int>(pending.args[3]) > 0) ||
-             (pending.nr == SYS_poll && static_cast<int>(pending.args[2]) > 0) ||
-             /* Blocking data/socket calls without an explicit timeout: the
-              * finite default wait deadline is the only way to complete them. */
-             (pending.nr == SYS_read || pending.nr == SYS_write || pending.nr == SYS_recvfrom ||
-              pending.nr == SYS_accept || pending.nr == SYS_accept4));
+            break;
+        case SYS_pselect6:
+            allowed &= pending.args[4] && deadline.clock_id == CLOCK_MONOTONIC;
+            break;
+        default:
+            allowed = false;
+            break;
+        }
+        break;
+    case PendingReason::Io:
+        allowed = deadline.timeout_result == 0 && deadline.clock_id == CLOCK_MONOTONIC;
+        switch (pending.nr) {
+        case SYS_epoll_pwait2:
+            allowed &= pending.args[3];
+            break;
+        case SYS_epoll_wait:
+        case SYS_epoll_pwait:
+            allowed &= static_cast<int>(pending.args[3]) > 0;
+            break;
+        case SYS_poll:
+            allowed &= static_cast<int>(pending.args[2]) > 0;
+            break;
+        /* Blocking data/socket calls without an explicit timeout: the finite
+         * default wait deadline is the only way to complete them. */
+        case SYS_read:
+        case SYS_write:
+        case SYS_recvfrom:
+        case SYS_accept:
+        case SYS_accept4:
+            break;
+        default:
+            allowed = false;
+            break;
+        }
+        break;
     }
     if (!allowed) throw std::runtime_error("Unsupported pending deadline combination");
     validate_deadline(*pending.deadline);
