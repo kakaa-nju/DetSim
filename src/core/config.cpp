@@ -257,11 +257,21 @@ static void parse_choose_points(const json &cfg)
       }
     }
 
+    if (nr >= 450)
+    {
+      LOG_ERROR("Unknown syscall number: %d", nr);
+      continue;
+    }
+
     if (nr >= 0 && cp.contains("choose"))
     {
       int count = cp["choose"].get<int>();
-      if (nr != SYS_gettimeofday || count < 0 || count > 1024)
-        throw std::runtime_error("ChoosePoint supports only gettimeofday with 0..1024 choices");
+      if (count < 0 || count > 1024)
+        throw std::runtime_error("ChoosePoint count must be in 0..1024");
+      if (nr == SYS_recvfrom && count > 0)
+        LOG_WARN("ChoosePoint recvfrom count is ignored; recvfrom choices are derived from the queue");
+      /* Any syscall may be named here; analyze_choose rejects a choice point
+       * that detsim cannot materialize, with the syscall name in the error. */
       choose_many[nr] = count;
     }
   }

@@ -22,9 +22,10 @@
  *       Optional shadow state of tracee `index`; captured into every checkpoint
  *       and restored on load. A missing hook is a no-op.
  *
- *   choose_func choose_<syscall>(struct syscall_info *info)
- *       Resolved for every syscall mnemonic. It decides how many outcomes are
- *       enumerated for that syscall (0 = no choice point).
+ *   choose_func choose_<syscall>(int pid, int choice, const choose_in &in)
+ *       Resolved for every syscall mnemonic. It materializes outcome `choice`
+ *       (or returns nullptr to keep detsim's default value). The number of
+ *       outcomes is configured by ChoosePoint.
  */
 
 #ifndef __USER_PLUGIN_H

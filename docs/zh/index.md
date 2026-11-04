@@ -549,17 +549,15 @@ struct {
 } ptmc_state;
 ```
 
-根据配置文件所指定的 `ChoosePoint` 数组，我们可以得到特定的系统调用可能产生的结果类型数量。于是此时可以设置 `n_choose` 变量以标志进入分支模式，并使用 `choose` 进行分支的计数。在系统调用的模拟函数中，可以根据分支的计数来产生不同类型的结果：
+分支数量由配置文件 `ChoosePoint` 中的 `choose` 计数决定。`choose_<syscall>` 插件负责按分支编号物化具体结果（写回 guest 缓冲区并给出返回值），但不决定分支数量。
+
+`recvfrom` 由框架提供基础候选枚举：接收队列中有 k 条消息时提供 k+1 个分支，前 k 个分别选择其中一条消息（而不是固定先进先出），最后一个分支是超时。超时分支会保留队列并进入带 deadline 的 pending timer，等虚拟时间推进后返回超时结果，因此网络延迟可以直接通过 `recvfrom` 的选择来建模。
 
 ```c
-long emu_recvfrom(...) {
-  ...
-  assert(ChooseNO >= 0 && ChooseNO < Choose);
-  if (ChooseNO == 0)
-    return len;
-  else
-    return 0; // 没收到
-}
+/* 分支选择后，由 emu_* 或插件的 choose_<syscall> 产生对应结果：
+ *   choice < k   -> 取出第 choice 条消息
+ *   choice == k  -> 超时
+ */
 ```
 
 #### 自动模式

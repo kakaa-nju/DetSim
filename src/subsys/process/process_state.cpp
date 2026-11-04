@@ -1,6 +1,7 @@
 #include "process_state.h"
 #include "monitor.h"
 #include "guest.h"
+#include "net/emu.h"
 #include "engine/thread_pool.h"
 #include "engine/thread_control.h"
 #include "cereal/archives/binary.hpp"
@@ -200,6 +201,22 @@ long emu_process_syscall(const syscall_info& info) {
     auto read=[&](uint64_t address,auto& value) {
         return guest_read_exact(pid,reinterpret_cast<const void*>(address),&value,sizeof(value));
     };
+    /* Value-class syscalls either run their default model or, when a choice
+     * point is active, the branch supplied by the user plugin. The user branch
+     * fully materializes the result, so the default path is skipped. */
+    if (ptmc_state.n_choose > 0 && choose_syswhat[info.nr] &&
+        emu_syscall_uses_generic_choice(info.nr)) {
+        uint64_t args[6];
+        for (int i = 0; i < 6; ++i)
+            args[i] = static_cast<uint64_t>(info.args[i]);
+        choose_in in(info.nr, pid, node, args, now);
+        choose_out *out = choose_syswhat[info.nr](pid, ptmc_state.choose, in);
+        if (out) {
+            const long result = emu_apply_choose_out(pid, info, *out);
+            delete out;
+            return result;
+        }
+    }
     switch(info.nr) {
     case SYS_prctl: {
         const uint32_t option=info.args[0];

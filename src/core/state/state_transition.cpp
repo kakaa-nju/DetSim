@@ -59,6 +59,12 @@ static VfsMmapState g_vfs_mmap = {false, -1, 0, 0};
 /* Upper bound on enumerated outcomes of a single syscall choice point. */
 static constexpr int kMaxSyscallChoices = 1024;
 
+/* Name a syscall in a configuration error without assuming a valid index. */
+static const char *choice_syscall_name(int nr)
+{
+  return nr >= 0 && nr < 450 && syscalls[nr] ? syscalls[nr] : "unknown";
+}
+
 int analyze_choose(struct syscall_info &info)
 {
   const int nr = info.nr;
@@ -75,7 +81,17 @@ int analyze_choose(struct syscall_info &info)
     return choices;
   }
 
-  return choose_many[nr] > 0 ? choose_many[nr] : 0;
+  const int count = choose_many[nr];
+  if (count <= 0)
+    return 0;
+
+  if (!emu_syscall_choice_supported(nr))
+    throw std::runtime_error("Choice points are not supported for syscall " +
+                             std::string(choice_syscall_name(nr)));
+  if (emu_syscall_uses_generic_choice(nr) && !choose_syswhat[nr])
+    throw std::runtime_error("Syscall " + std::string(choice_syscall_name(nr)) +
+                             " requires a ChooseFunc choose_ handler");
+  return count;
 }
 
 extern "C" detsim::ui::NCursesUI *get_ncurses_ui();

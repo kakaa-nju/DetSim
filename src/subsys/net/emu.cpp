@@ -4,11 +4,60 @@
 #include "state/state.h"
 #include "user_plugin.h"
 #include <cerrno>
-#include <stdexcept>
 #include <sys/syscall.h>
 
 int choose_many[450] = {};
 choose_func choose_syswhat[450] = {};
+
+/* Syscalls whose outcome detsim can materialize today. Candidate-class calls
+ * (recvfrom) and the special gettimeofday path are listed separately from the
+ * generic emu_process_syscall() group. */
+bool emu_syscall_choice_supported(int nr)
+{
+  switch (nr)
+  {
+    case SYS_gettimeofday:
+    case SYS_recvfrom:
+    case SYS_clock_gettime:
+    case SYS_clock_getres:
+    case SYS_getrandom:
+    case SYS_sysinfo:
+    case SYS_sched_getaffinity:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool emu_syscall_uses_generic_choice(int nr)
+{
+  switch (nr)
+  {
+    case SYS_clock_gettime:
+    case SYS_clock_getres:
+    case SYS_getrandom:
+    case SYS_sysinfo:
+    case SYS_sched_getaffinity:
+      return true;
+    default:
+      return false;
+  }
+}
+
+long emu_apply_choose_out(int pid, const syscall_info &info, const choose_out &out)
+{
+  for (int i = 0; i < 6; ++i)
+  {
+    if (!out.len[i])
+      continue;
+    if (!out.args[i])
+      return -EFAULT;
+    if (!guest_write_exact(pid, reinterpret_cast<void *>(info.args[i]),
+                           out.args[i], static_cast<size_t>(out.len[i])))
+      return -EFAULT;
+  }
+  return out.rval;
+}
 
 /* Default time advance per enumerated outcome when a ChoosePoint enables a
  * gettimeofday choice but no ChooseFunc plugin supplies values. */
@@ -45,19 +94,24 @@ int emu_gettimeofday(struct timeval *tv, struct timezone *tz)
   /* A configured ChooseFunc plugin owns the value of each enumerated outcome. */
   if (ptmc_state.n_choose != 0 && choose_syswhat[SYS_gettimeofday])
   {
-    choose_in in(current);
+    uint64_t args[6] = {
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(tv)),
+        static_cast<uint64_t>(reinterpret_cast<uintptr_t>(tz)), 0, 0, 0, 0};
+    choose_in in(SYS_gettimeofday, ptmc_state.pids[node], node, args, current);
     choose_out *out = choose_syswhat[SYS_gettimeofday](ptmc_state.pids[node],
                                                        ptmc_state.choose, in);
-    if (!out)
-      throw std::runtime_error("choose_gettimeofday returned no outcome");
-    timeval result = current;
-    if (out->args[0] && out->len[0] >= static_cast<int>(sizeof(result)))
-      result = *static_cast<const timeval *>(out->args[0]);
-    else if (ptmc_state.choose > 0)
-      result = advance_clock(current, kDefaultTimeStepUs * ptmc_state.choose);
-    const int rval = out->rval;
-    delete out;
-    return emu_gettimeofday_write(node, result, tv, tz) ?: rval;
+    if (out)
+    {
+      timeval result = current;
+      if (out->args[0] && out->len[0] >= static_cast<int>(sizeof(result)))
+        result = *static_cast<const timeval *>(out->args[0]);
+      else if (ptmc_state.choose > 0)
+        result = advance_clock(current, kDefaultTimeStepUs * ptmc_state.choose);
+      const int rval = out->rval;
+      delete out;
+      return emu_gettimeofday_write(node, result, tv, tz) ?: rval;
+    }
+    /* A null outcome keeps the default branch below. */
   }
 
   /* No plugin: each enumerated outcome advances by one default step so the
