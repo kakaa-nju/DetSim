@@ -17,6 +17,10 @@ void require_no_pending_fd(int node, int fd);
 // Zero-descriptor pselect6 timer admission; unsupported multiplexing/masks reject.
 void start_pselect_timer(int node, pid_t tid, syscall_info& call);
 
+// Stage a poll(2) request: ready probes return immediately, an unready wait is
+// retained with a finite deadline or as an unbounded readiness wait.
+void start_poll(int node, pid_t tid, syscall_info& call);
+
 // Normal process exit closes virtual descriptors only after all logical tasks
 // have exited. Unsupported TCP reset cases reject in the preflight phase.
 void preflight_process_io_exit(int node);

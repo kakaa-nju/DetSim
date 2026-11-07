@@ -147,9 +147,7 @@ int handle_getsockopt(pid_t pid, syscall_info &info) {
 }
 
 int handle_poll(pid_t pid, syscall_info &info) {
-    info.rval = emu_poll(reinterpret_cast<pollfd*>(info.args[0]),
-                         static_cast<uint32_t>(info.args[1]), static_cast<int>(info.args[2]));
-    tracee_set_rax(pid, info.rval);
+    start_poll(ptmc_state.cursor, pid, info);
     return CKPT_YES;
 }
 

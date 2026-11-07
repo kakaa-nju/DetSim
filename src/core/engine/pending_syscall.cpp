@@ -57,6 +57,12 @@ void validate_timed_pending(const PendingSyscall& pending)
         case SYS_pselect6:
             allowed &= pending.args[4] && deadline.clock_id == CLOCK_MONOTONIC;
             break;
+        case SYS_poll:
+            /* A finite millisecond timeout is the only poll deadline form;
+             * negative timeouts suspend without a deadline. */
+            allowed &= static_cast<int32_t>(pending.args[2]) > 0 &&
+                deadline.clock_id == CLOCK_MONOTONIC;
+            break;
         default:
             allowed = false;
             break;
@@ -275,6 +281,36 @@ bool complete_pending_syscall(int node, pid_t physical_tid, syscall_info& info)
             // A timed-out multiplexing call reports no ready descriptor.
             emu_select_clear(static_cast<int>(pending.args[0]), pending.args[1],
                              pending.args[2], pending.args[3]);
+        if (pending.nr == SYS_pselect6 && pending.result > 0) {
+            // Readiness was granted by a peer transition; publish the matching
+            // descriptor subset now that the waiting actor runs. The masks were
+            // left intact while the call was suspended.
+            struct CursorGuard {
+                int previous = ptmc_state.cursor;
+                ~CursorGuard() { ptmc_state.cursor = previous; }
+            } guard;
+            ptmc_state.cursor = node;
+            const long materialized = emu_select_scan(static_cast<int>(pending.args[0]),
+                pending.args[1], pending.args[2], pending.args[3]);
+            if (materialized != pending.result)
+                throw std::runtime_error("pselect6 readiness changed before completion");
+        }
+        if (pending.nr == SYS_poll) {
+            struct CursorGuard {
+                int previous = ptmc_state.cursor;
+                ~CursorGuard() { ptmc_state.cursor = previous; }
+            } guard;
+            ptmc_state.cursor = node;
+            auto* fds = reinterpret_cast<pollfd*>(pending.args[0]);
+            const auto count = static_cast<uint32_t>(pending.args[1]);
+            if (pending.result > 0) {
+                const long materialized = emu_poll(fds, count, 0);
+                if (materialized != pending.result)
+                    throw std::runtime_error("poll readiness changed before completion");
+            } else if (pending.result == 0) {
+                emu_poll_clear(fds, count);
+            }
+        }
     }
     tracee_set_rax(physical_tid, info.rval);
     thread.pending_syscall.reset();
@@ -308,6 +344,36 @@ void refresh_futex_pending(int node)
     sync_pending_blocked(node);
 }
 
+namespace {
+struct CursorGuard {
+    int previous = ptmc_state.cursor;
+    ~CursorGuard() { ptmc_state.cursor = previous; }
+};
+
+/* A suspended pselect6 keeps its request masks in guest memory. Recheck them
+ * against this node's descriptor and socket state whenever another actor runs:
+ * a peer write/send can satisfy the wait long before its timeout. */
+long pselect_readiness(int node, const PendingSyscall& pending)
+{
+    const int nfds = static_cast<int>(pending.args[0]);
+    if (pending.nr != SYS_pselect6 || nfds <= 0) return 0;
+    CursorGuard guard;
+    ptmc_state.cursor = node;
+    return emu_select_ready(nfds, pending.args[1], pending.args[2], pending.args[3]);
+}
+
+/* Poll is the same kind of readiness wait: its request array stays in guest
+ * memory while suspended, and a peer can satisfy it before the timeout. */
+long poll_readiness(int node, const PendingSyscall& pending)
+{
+    if (pending.nr != SYS_poll) return 0;
+    CursorGuard guard;
+    ptmc_state.cursor = node;
+    return emu_poll_ready(reinterpret_cast<pollfd*>(pending.args[0]),
+                          static_cast<uint32_t>(pending.args[1]));
+}
+}
+
 void refresh_pending_syscalls()
 {
     for (int node = 0; node < NP; ++node) {
@@ -315,6 +381,20 @@ void refresh_pending_syscalls()
         for (auto& thread : ptmc_state.running_state.child[node].threads) {
             if (!thread.alive || !thread.pending_syscall) continue;
             auto& pending = *thread.pending_syscall;
+            if (pending.phase == PendingPhase::Waiting && pending.nr == SYS_pselect6) {
+                const long ready = pselect_readiness(node, pending);
+                if (ready != 0) {
+                    ready_syscall(node, thread.tid, ready);
+                    continue;
+                }
+            }
+            if (pending.phase == PendingPhase::Waiting && pending.nr == SYS_poll) {
+                const long ready = poll_readiness(node, pending);
+                if (ready != 0) {
+                    ready_syscall(node, thread.tid, ready);
+                    continue;
+                }
+            }
             if (pending.reason != PendingReason::Io || pending.phase == PendingPhase::Ready) continue;
             syscall_info call{};
             call.nr = pending.nr;
@@ -344,9 +424,10 @@ void validate_pending_syscalls(const tracee_state& state)
             throw std::runtime_error("Invalid unfinished futex syscall");
         if (pending.reason == PendingReason::Timer &&
             ((pending.nr != SYS_nanosleep && pending.nr != SYS_clock_nanosleep &&
-              pending.nr != SYS_pselect6 && pending.nr != SYS_recvfrom) ||
+              pending.nr != SYS_pselect6 && pending.nr != SYS_recvfrom &&
+              pending.nr != SYS_poll) ||
              pending.phase == PendingPhase::Retry ||
-             (!pending.deadline && pending.nr != SYS_pselect6)))
+             (!pending.deadline && pending.nr != SYS_pselect6 && pending.nr != SYS_poll)))
             throw std::runtime_error("Invalid pending timer syscall");
         if (pending.nr == SYS_pselect6 &&
             (pending.reason != PendingReason::Timer || static_cast<int>(pending.args[0]) < 0 ||
@@ -356,6 +437,14 @@ void validate_pending_syscalls(const tracee_state& state)
              (pending.deadline && (pending.deadline->clock_id != CLOCK_MONOTONIC ||
                                    pending.deadline->timeout_result != 0))))
             throw std::runtime_error("Invalid pending pselect6 timer");
+        if (pending.nr == SYS_poll) {
+            const int32_t timeout = static_cast<int32_t>(pending.args[2]);
+            if (pending.reason != PendingReason::Timer || timeout == 0 ||
+                pending.deadline.has_value() != (timeout > 0) ||
+                (pending.deadline && (pending.deadline->clock_id != CLOCK_MONOTONIC ||
+                                      pending.deadline->timeout_result != 0)))
+                throw std::runtime_error("Invalid pending poll timer");
+        }
         if (pending.reason == PendingReason::Io && !supports_pending_io(pending.nr))
             throw std::runtime_error("Unsupported unfinished I/O syscall");
         if (pending.deadline) {

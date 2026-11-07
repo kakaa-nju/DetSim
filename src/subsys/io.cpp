@@ -326,8 +326,8 @@ long stage_guest_set(uintptr_t pointer, unsigned char* set, bool& present, bool&
 }
 } // namespace
 
-long emu_select_scan(int nfds, uintptr_t readfds, uintptr_t writefds,
-                     uintptr_t exceptfds) {
+static long select_scan_impl(int nfds, uintptr_t readfds, uintptr_t writefds,
+                             uintptr_t exceptfds, bool materialize) {
   if (nfds < 0) return -EINVAL;
   const int limit = std::min(nfds, FD_SETSIZE);
   unsigned char read_in[select_set_bytes], write_in[select_set_bytes];
@@ -367,6 +367,7 @@ long emu_select_scan(int nfds, uintptr_t readfds, uintptr_t writefds,
     /* Exceptional conditions are not modeled; the set stays empty. */
     if (fd_ready) ++ready_count;
   }
+  if (!materialize) return ready_count;
   const pid_t pid = ptmc_state.pids[ptmc_state.cursor];
   if (has_read && !guest_write_exact(pid, reinterpret_cast<void*>(readfds), read_out, select_set_bytes))
     return -EFAULT;
@@ -375,6 +376,16 @@ long emu_select_scan(int nfds, uintptr_t readfds, uintptr_t writefds,
   if (has_except && !guest_write_exact(pid, reinterpret_cast<void*>(exceptfds), except_out, select_set_bytes))
     return -EFAULT;
   return ready_count;
+}
+
+long emu_select_scan(int nfds, uintptr_t readfds, uintptr_t writefds,
+                     uintptr_t exceptfds) {
+  return select_scan_impl(nfds, readfds, writefds, exceptfds, true);
+}
+
+long emu_select_ready(int nfds, uintptr_t readfds, uintptr_t writefds,
+                      uintptr_t exceptfds) {
+  return select_scan_impl(nfds, readfds, writefds, exceptfds, false);
 }
 
 void emu_select_clear(int nfds, uintptr_t readfds, uintptr_t writefds,
@@ -387,8 +398,37 @@ void emu_select_clear(int nfds, uintptr_t readfds, uintptr_t writefds,
   (void)nfds;
 }
 
-long emu_poll(struct pollfd* fds, uint32_t count, int timeout) {
-  if (timeout != 0) throw std::runtime_error("Blocking poll is not modeled");
+static bool write_poll_revents(pid_t pid, struct pollfd* fds,
+                               const std::vector<pollfd>& entries) {
+  // Linux put_user(u16) cannot leave a prefix on a cross-page fault, whereas
+  // process_vm_writev can. Ordinary within-page stores need no maps lookup.
+  // All carriers are stopped; reuse one mapping read for every crossing scalar.
+  std::vector<maps_item> maps;
+  // Linux writes only revents, leaving fd/events untouched even for aliases.
+  for (size_t i=0;i<entries.size();++i) {
+    const auto address=reinterpret_cast<uintptr_t>(fds)+i*sizeof(pollfd)+offsetof(pollfd,revents);
+    if (address%4096==4095) {
+      if (maps.empty()) {
+        auto file=fileutils::open_cfile("/proc/"+std::to_string(pid)+"/maps","r");
+        if (!file) throw std::runtime_error("Cannot inspect poll scalar mappings");
+        get_maps_item(maps,file.get());
+        if (ferror(file.get()) || maps.empty()) throw std::runtime_error("Cannot read poll scalar mappings");
+      }
+      auto cursor=address;
+      for (const auto& map:maps) {
+        if (map.end<=cursor) continue;
+        if (map.start>cursor || map.flags[1]!='w') break;
+        cursor=std::min<uint64_t>(map.end,address+sizeof(short));
+        if (cursor==address+sizeof(short)) break;
+      }
+      if (cursor!=address+sizeof(short)) return false;
+    }
+    if (!guest_write_exact(pid,reinterpret_cast<void*>(address),&entries[i].revents,sizeof(short))) return false;
+  }
+  return true;
+}
+
+static long poll_scan_impl(struct pollfd* fds, uint32_t count, bool materialize) {
   // Explicit staging bound, not a fabricated guest resource-limit error.
   if (count > 65536) throw std::runtime_error("poll descriptor count exceeds model limit");
   std::vector<pollfd> entries(count);
@@ -428,30 +468,22 @@ long emu_poll(struct pollfd* fds, uint32_t count, int timeout) {
     }
     if (entry.revents) ++result;
   }
-  // Linux put_user(u16) cannot leave a prefix on a cross-page fault, whereas
-  // process_vm_writev can. Ordinary within-page stores need no maps lookup.
-  // All carriers are stopped; reuse one mapping read for every crossing scalar.
-  std::vector<maps_item> maps;
-  // Linux writes only revents, leaving fd/events untouched even for aliases.
-  for (size_t i=0;i<entries.size();++i) {
-    const auto address=reinterpret_cast<uintptr_t>(fds)+i*sizeof(pollfd)+offsetof(pollfd,revents);
-    if (address%4096==4095) {
-      if (maps.empty()) {
-        auto file=fileutils::open_cfile("/proc/"+std::to_string(pid)+"/maps","r");
-        if (!file) throw std::runtime_error("Cannot inspect poll scalar mappings");
-        get_maps_item(maps,file.get());
-        if (ferror(file.get()) || maps.empty()) throw std::runtime_error("Cannot read poll scalar mappings");
-      }
-      auto cursor=address;
-      for (const auto& map:maps) {
-        if (map.end<=cursor) continue;
-        if (map.start>cursor || map.flags[1]!='w') break;
-        cursor=std::min<uint64_t>(map.end,address+sizeof(short));
-        if (cursor==address+sizeof(short)) break;
-      }
-      if (cursor!=address+sizeof(short)) return -EFAULT;
-    }
-    if (!guest_write_exact(pid,reinterpret_cast<void*>(address),&entries[i].revents,sizeof(short))) return -EFAULT;
-  }
+  if (materialize && !write_poll_revents(pid,fds,entries)) return -EFAULT;
   return result;
+}
+
+long emu_poll(struct pollfd* fds, uint32_t count, int timeout) {
+  if (timeout != 0) throw std::runtime_error("Blocking poll is not modeled");
+  return poll_scan_impl(fds,count,true);
+}
+
+long emu_poll_ready(struct pollfd* fds, uint32_t count) {
+  return poll_scan_impl(fds,count,false);
+}
+
+void emu_poll_clear(struct pollfd* fds, uint32_t count) {
+  if (count > 65536) throw std::runtime_error("poll descriptor count exceeds model limit");
+  std::vector<pollfd> entries(count);
+  const pid_t pid=ptmc_state.pids[ptmc_state.cursor];
+  (void)write_poll_revents(pid,fds,entries);
 }

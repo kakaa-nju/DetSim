@@ -199,6 +199,52 @@ void close_process_io(int node) {
     if (emu_close(fd) != 0) throw std::runtime_error("Virtual descriptor close failed during process exit");
 }
 
+/* A blocking poll is a readiness wait, not a sleep: any peer transition may
+ * satisfy it before the timeout. Keep the pollfd request array untouched while
+ * the call is suspended so refresh can re-probe it. */
+void start_poll(int node, pid_t tid, syscall_info& call) {
+  auto* fds = reinterpret_cast<pollfd*>(call.args[0]);
+  const uint32_t count = static_cast<uint32_t>(call.args[1]);
+  const int timeout = static_cast<int>(call.args[2]);
+  const long ready = emu_poll_ready(fds, count);
+  if (ready < 0) {
+    call.rval = ready;
+    tracee_set_rax(tid, call.rval);
+    return;
+  }
+  if (ready > 0) {
+    const long result = emu_poll(fds, count, 0);
+    if (result < 0) {
+      call.rval = result;
+      tracee_set_rax(tid, result);
+      return;
+    }
+    if (result != ready)
+      throw std::runtime_error("poll readiness changed during entry scan");
+    call.rval = result;
+    tracee_set_rax(tid, result);
+    return;
+  }
+  if (timeout == 0) {
+    // Non-blocking probe with nothing ready: publish zero revents.
+    const long result = emu_poll(fds, count, 0);
+    call.rval = result;
+    tracee_set_rax(tid, result);
+    return;
+  }
+  suspend_syscall(node, tid, call, PendingReason::Timer);
+  if (timeout < 0) return; // Unbounded readiness wait; a peer action can finish it.
+  const auto deadline = make_pending_deadline(node, CLOCK_MONOTONIC, timeout / 1000,
+      (timeout % 1000) * 1000000, true, 0);
+  for (const auto& thread : ptmc_state.running_state.child[node].threads) {
+    if (thread.alive && thread.physical_tid == tid) {
+      set_pending_deadline(node, thread.tid, deadline);
+      return;
+    }
+  }
+  throw std::runtime_error("Pending poll has no live bound actor");
+}
+
 /* A length-6 pselect6 mask wrapper {pointer, size}: a NULL pointer is an
  * explicit empty temporary mask, which cannot deliver a signal and therefore
  * has the same wait semantics as no wrapper at all. Non-NULL masks (temporary
@@ -230,30 +276,36 @@ void start_pselect_timer(int node, pid_t tid, syscall_info& call) {
   /* Ordinary select() over virtual descriptors: readiness is a property of the
    * saved descriptor/socket/pipe state, so it is answered exactly. Only an
    * unready wait falls back to the pending timer, which reports the timeout and
-   * returns empty sets. */
+   * returns empty sets. The request masks must survive the suspension: a peer
+   * thread may make a descriptor ready before the deadline, and the pending
+   * refresh re-scans those original masks. */
   if (!result && static_cast<int>(call.args[0]) != 0) {
-    const long ready = emu_select_scan(static_cast<int>(call.args[0]), call.args[1],
+    const long ready = emu_select_ready(static_cast<int>(call.args[0]), call.args[1],
                                        call.args[2], call.args[3]);
-    if (ready < 0) result = ready;
-    else if (ready > 0) result = ready;
-    else if (!call.args[4] || (!timeout.tv_sec && !timeout.tv_nsec)) {
-      /* Non-blocking or zero timeout with nothing ready. */
-      result = 0;
-    } else {
-      suspend_syscall(node, tid, call, PendingReason::Timer);
-      const auto wait = make_pending_deadline(node, CLOCK_MONOTONIC,
-          timeout.tv_sec, timeout.tv_nsec, true, 0);
-      for (const auto& thread : ptmc_state.running_state.child[node].threads) {
-        if (thread.alive && thread.physical_tid == tid) {
-          set_pending_deadline(node, thread.tid, wait);
-          return;
-        }
-      }
-      throw std::runtime_error("Pending pselect6 has no live bound actor");
+    if (ready < 0) {
+      result = ready;
+    } else if (ready > 0) {
+      const long materialized = emu_select_scan(static_cast<int>(call.args[0]),
+          call.args[1], call.args[2], call.args[3]);
+      if (materialized < 0)
+        result = materialized;
+      else if (materialized != ready)
+        throw std::runtime_error("pselect6 readiness changed during entry scan");
+      else
+        result = materialized;
     }
   }
-  if (result || (call.args[4] && !timeout.tv_sec && !timeout.tv_nsec)) {
+  if (result) {
     call.rval = result;
+    tracee_set_rax(tid, call.rval);
+    return;
+  }
+  /* A zero-length timeout is a non-blocking probe: report an empty ready set. */
+  if (call.args[4] && !timeout.tv_sec && !timeout.tv_nsec) {
+    if (static_cast<int>(call.args[0]) != 0)
+      emu_select_clear(static_cast<int>(call.args[0]), call.args[1], call.args[2],
+                       call.args[3]);
+    call.rval = 0;
     tracee_set_rax(tid, call.rval);
     return;
   }

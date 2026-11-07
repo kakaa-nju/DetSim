@@ -1,0 +1,6 @@
+{
+  "Loglevel": 0,
+  "Nodes": 1,
+  "Tracee": [["./mt_async"]],
+  "Checkpoint": ["read", "write", "pipe", "pipe2"]
+}

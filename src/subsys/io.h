@@ -19,11 +19,24 @@ int emu_ioctl(int fd, unsigned long request, void* argument);
 
 long emu_poll(struct pollfd* fds, uint32_t count, int timeout);
 
+/* Readiness-only poll probe. It leaves every guest revents field untouched so a
+ * suspended poll keeps the request array intact until completion. */
+long emu_poll_ready(struct pollfd* fds, uint32_t count);
+
+/* Clear every revents field after a poll timeout. */
+void emu_poll_clear(struct pollfd* fds, uint32_t count);
+
 /* Readiness scan for pselect6/select over virtual descriptors. Guest fd_sets are
  * staged in and rewritten with the ready subset; returns the ready count or a
  * negative errno without touching the guest sets. */
 long emu_select_scan(int nfds, uintptr_t readfds, uintptr_t writefds,
                      uintptr_t exceptfds);
+
+/* The same readiness scan without rewriting the guest fd_sets. A pselect6 that
+ * suspends must keep its request masks intact so a later peer action can be
+ * matched against them. */
+long emu_select_ready(int nfds, uintptr_t readfds, uintptr_t writefds,
+                      uintptr_t exceptfds);
 
 /* Clear the staged guest fd_sets after a pselect6 timeout. */
 void emu_select_clear(int nfds, uintptr_t readfds, uintptr_t writefds,
