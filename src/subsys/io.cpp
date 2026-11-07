@@ -277,8 +277,15 @@ int emu_ioctl(int fd, unsigned long request, void* argument) {
 }
 
 namespace {
-/* One guest fd_set is FD_SETSIZE bits packed into longs. */
+/* One guest fd_set is FD_SETSIZE bits packed into longs. Linux only touches the
+ * bytes covering nfds, not the whole set: bytes above the requested descriptor
+ * range must survive a timeout/readiness update unchanged. */
 constexpr int select_set_bytes = int(sizeof(uint64_t) * (FD_SETSIZE / 64));
+
+int select_bytes(int nfds) {
+  if (nfds <= 0) return 0;
+  return (std::min(nfds, FD_SETSIZE) + 7) / 8;
+}
 
 bool set_bit(unsigned char* set, int fd) {
   return (set[fd / 8] >> (fd % 8)) & 1;
@@ -315,12 +322,12 @@ uint32_t descriptor_readiness(int fd) {
   return ready;
 }
 
-long stage_guest_set(uintptr_t pointer, unsigned char* set, bool& present, bool& changed) {
-  present = pointer != 0;
-  changed = false;
+long stage_guest_set(uintptr_t pointer, unsigned char* set, int bytes, bool& present) {
+  present = pointer != 0 && bytes > 0;
+  clear_set(set);
   if (!present) return 0;
   const pid_t pid = ptmc_state.pids[ptmc_state.cursor];
-  if (!guest_read_exact(pid, reinterpret_cast<void*>(pointer), set, select_set_bytes))
+  if (!guest_read_exact(pid, reinterpret_cast<void*>(pointer), set, bytes))
     return -EFAULT;
   return 0;
 }
@@ -330,17 +337,17 @@ static long select_scan_impl(int nfds, uintptr_t readfds, uintptr_t writefds,
                              uintptr_t exceptfds, bool materialize) {
   if (nfds < 0) return -EINVAL;
   const int limit = std::min(nfds, FD_SETSIZE);
+  const int bytes = select_bytes(nfds);
   unsigned char read_in[select_set_bytes], write_in[select_set_bytes];
   unsigned char except_in[select_set_bytes];
   unsigned char read_out[select_set_bytes], write_out[select_set_bytes];
   unsigned char except_out[select_set_bytes];
   bool has_read = false, has_write = false, has_except = false;
-  bool changed_read = false, changed_write = false, changed_except = false;
-  long error = stage_guest_set(readfds, read_in, has_read, changed_read);
+  long error = stage_guest_set(readfds, read_in, bytes, has_read);
   if (error) return error;
-  error = stage_guest_set(writefds, write_in, has_write, changed_write);
+  error = stage_guest_set(writefds, write_in, bytes, has_write);
   if (error) return error;
-  error = stage_guest_set(exceptfds, except_in, has_except, changed_except);
+  error = stage_guest_set(exceptfds, except_in, bytes, has_except);
   if (error) return error;
   clear_set(read_out);
   clear_set(write_out);
@@ -369,11 +376,11 @@ static long select_scan_impl(int nfds, uintptr_t readfds, uintptr_t writefds,
   }
   if (!materialize) return ready_count;
   const pid_t pid = ptmc_state.pids[ptmc_state.cursor];
-  if (has_read && !guest_write_exact(pid, reinterpret_cast<void*>(readfds), read_out, select_set_bytes))
+  if (has_read && !guest_write_exact(pid, reinterpret_cast<void*>(readfds), read_out, bytes))
     return -EFAULT;
-  if (has_write && !guest_write_exact(pid, reinterpret_cast<void*>(writefds), write_out, select_set_bytes))
+  if (has_write && !guest_write_exact(pid, reinterpret_cast<void*>(writefds), write_out, bytes))
     return -EFAULT;
-  if (has_except && !guest_write_exact(pid, reinterpret_cast<void*>(exceptfds), except_out, select_set_bytes))
+  if (has_except && !guest_write_exact(pid, reinterpret_cast<void*>(exceptfds), except_out, bytes))
     return -EFAULT;
   return ready_count;
 }
@@ -388,14 +395,17 @@ long emu_select_ready(int nfds, uintptr_t readfds, uintptr_t writefds,
   return select_scan_impl(nfds, readfds, writefds, exceptfds, false);
 }
 
-void emu_select_clear(int nfds, uintptr_t readfds, uintptr_t writefds,
+long emu_select_clear(int nfds, uintptr_t readfds, uintptr_t writefds,
                       uintptr_t exceptfds) {
+  const int bytes = select_bytes(nfds);
+  if (bytes == 0) return 0;
   const pid_t pid = ptmc_state.pids[ptmc_state.cursor];
   unsigned char empty[select_set_bytes] = {};
   for (uintptr_t pointer : {readfds, writefds, exceptfds})
-    if (pointer)
-      (void)guest_write_exact(pid, reinterpret_cast<void*>(pointer), empty, select_set_bytes);
-  (void)nfds;
+    if (pointer &&
+        !guest_write_exact(pid, reinterpret_cast<void*>(pointer), empty, bytes))
+      return -EFAULT;
+  return 0;
 }
 
 static bool write_poll_revents(pid_t pid, struct pollfd* fds,
@@ -481,9 +491,9 @@ long emu_poll_ready(struct pollfd* fds, uint32_t count) {
   return poll_scan_impl(fds,count,false);
 }
 
-void emu_poll_clear(struct pollfd* fds, uint32_t count) {
+long emu_poll_clear(struct pollfd* fds, uint32_t count) {
   if (count > 65536) throw std::runtime_error("poll descriptor count exceeds model limit");
   std::vector<pollfd> entries(count);
   const pid_t pid=ptmc_state.pids[ptmc_state.cursor];
-  (void)write_poll_revents(pid,fds,entries);
+  return write_poll_revents(pid,fds,entries) ? 0 : -EFAULT;
 }

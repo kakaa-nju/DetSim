@@ -245,24 +245,39 @@ void start_poll(int node, pid_t tid, syscall_info& call) {
   throw std::runtime_error("Pending poll has no live bound actor");
 }
 
-/* A length-6 pselect6 mask wrapper {pointer, size}: a NULL pointer is an
- * explicit empty temporary mask, which cannot deliver a signal and therefore
- * has the same wait semantics as no wrapper at all. Non-NULL masks (temporary
- * signal masking) remain outside the model. */
-static void validate_pselect_mask_wrapper(int node, pid_t tid, uint64_t wrapper)
+/* A length-6 pselect6 mask wrapper {pointer, size}: a NULL mask pointer is an
+ * explicit empty temporary mask.  A real mask is validated like Linux, but has
+ * no modeled effect because guest signal delivery itself is unsupported. */
+static long validate_pselect_mask_wrapper(int node, pid_t tid, uint64_t wrapper)
 {
   struct { uint64_t pointer; uint64_t size; } value{};
   if (!guest_read_exact(tid, reinterpret_cast<void*>(wrapper), &value, sizeof(value)))
-    throw std::runtime_error("Unreadable pselect6 signal mask wrapper");
-  if (!value.pointer) return;
+    return -EFAULT;
+  if (!value.pointer) return 0;
+  // The kernel ABI sigset is one 64-bit word; glibc's userspace sigset_t is
+  // larger, while pselect6's sigsetsize argument is the kernel size.
+  constexpr uint64_t kernel_sigset_bytes = 8;
+  if (value.size != kernel_sigset_bytes) return -EINVAL;
+  uint64_t mask = 0;
+  if (!guest_read_exact(tid, reinterpret_cast<void*>(value.pointer), &mask, sizeof(mask)))
+    return -EFAULT;
   (void)node;
-  throw std::runtime_error("Unsupported pselect6 signal mask");
+  (void)mask;
+  return 0;
 }
 
 void start_pselect_timer(int node, pid_t tid, syscall_info& call) {
   // pselect6 imports its optional mask wrapper before inspecting the timeout.
-  // Temporary signal masks and descriptor multiplexing have no model yet.
-  if (call.args[5]) validate_pselect_mask_wrapper(node, tid, call.args[5]);
+  // The wrapper is validated but cannot affect this model, which never delivers
+  // signals to guest handlers.
+  if (call.args[5]) {
+    const long mask_error = validate_pselect_mask_wrapper(node, tid, call.args[5]);
+    if (mask_error) {
+      call.rval = mask_error;
+      tracee_set_rax(tid, call.rval);
+      return;
+    }
+  }
   if (call.args[4] < scratch_page + 4096 && call.args[4] > scratch_page - sizeof(timespec))
     throw std::runtime_error("pselect6 timeout overlaps reserved control memory");
   timespec timeout{};
@@ -302,10 +317,12 @@ void start_pselect_timer(int node, pid_t tid, syscall_info& call) {
   }
   /* A zero-length timeout is a non-blocking probe: report an empty ready set. */
   if (call.args[4] && !timeout.tv_sec && !timeout.tv_nsec) {
-    if (static_cast<int>(call.args[0]) != 0)
-      emu_select_clear(static_cast<int>(call.args[0]), call.args[1], call.args[2],
-                       call.args[3]);
     call.rval = 0;
+    if (static_cast<int>(call.args[0]) != 0) {
+      const long cleared = emu_select_clear(static_cast<int>(call.args[0]), call.args[1],
+                                            call.args[2], call.args[3]);
+      if (cleared < 0) call.rval = cleared;
+    }
     tracee_set_rax(tid, call.rval);
     return;
   }

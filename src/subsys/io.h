@@ -23,8 +23,9 @@ long emu_poll(struct pollfd* fds, uint32_t count, int timeout);
  * suspended poll keeps the request array intact until completion. */
 long emu_poll_ready(struct pollfd* fds, uint32_t count);
 
-/* Clear every revents field after a poll timeout. */
-void emu_poll_clear(struct pollfd* fds, uint32_t count);
+/* Clear every revents field after a poll timeout. Returns 0 or -EFAULT when a
+ * revents field cannot be written. */
+long emu_poll_clear(struct pollfd* fds, uint32_t count);
 
 /* Readiness scan for pselect6/select over virtual descriptors. Guest fd_sets are
  * staged in and rewritten with the ready subset; returns the ready count or a
@@ -38,6 +39,7 @@ long emu_select_scan(int nfds, uintptr_t readfds, uintptr_t writefds,
 long emu_select_ready(int nfds, uintptr_t readfds, uintptr_t writefds,
                       uintptr_t exceptfds);
 
-/* Clear the staged guest fd_sets after a pselect6 timeout. */
-void emu_select_clear(int nfds, uintptr_t readfds, uintptr_t writefds,
+/* Clear the staged guest fd_sets after a pselect6 timeout. Returns 0 or
+ * -EFAULT when one of the output sets cannot be written. */
+long emu_select_clear(int nfds, uintptr_t readfds, uintptr_t writefds,
                       uintptr_t exceptfds);

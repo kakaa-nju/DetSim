@@ -277,10 +277,17 @@ bool complete_pending_syscall(int node, pid_t physical_tid, syscall_info& info)
             (void)guest_write_exact(physical_tid, reinterpret_cast<void*>(pending.args[4]),
                                     &remaining, sizeof(remaining));
         }
-        if (pending.nr == SYS_pselect6 && pending.result == 0)
+        if (pending.nr == SYS_pselect6 && pending.result == 0) {
             // A timed-out multiplexing call reports no ready descriptor.
-            emu_select_clear(static_cast<int>(pending.args[0]), pending.args[1],
-                             pending.args[2], pending.args[3]);
+            struct CursorGuard {
+                int previous = ptmc_state.cursor;
+                ~CursorGuard() { ptmc_state.cursor = previous; }
+            } guard;
+            ptmc_state.cursor = node;
+            const long cleared = emu_select_clear(static_cast<int>(pending.args[0]),
+                pending.args[1], pending.args[2], pending.args[3]);
+            if (cleared < 0) info.rval = static_cast<uintptr_t>(cleared);
+        }
         if (pending.nr == SYS_pselect6 && pending.result > 0) {
             // Readiness was granted by a peer transition; publish the matching
             // descriptor subset now that the waiting actor runs. The masks were
@@ -292,7 +299,9 @@ bool complete_pending_syscall(int node, pid_t physical_tid, syscall_info& info)
             ptmc_state.cursor = node;
             const long materialized = emu_select_scan(static_cast<int>(pending.args[0]),
                 pending.args[1], pending.args[2], pending.args[3]);
-            if (materialized != pending.result)
+            if (materialized < 0)
+                info.rval = static_cast<uintptr_t>(materialized);
+            else if (materialized != pending.result)
                 throw std::runtime_error("pselect6 readiness changed before completion");
         }
         if (pending.nr == SYS_poll) {
@@ -305,10 +314,13 @@ bool complete_pending_syscall(int node, pid_t physical_tid, syscall_info& info)
             const auto count = static_cast<uint32_t>(pending.args[1]);
             if (pending.result > 0) {
                 const long materialized = emu_poll(fds, count, 0);
-                if (materialized != pending.result)
+                if (materialized < 0)
+                    info.rval = static_cast<uintptr_t>(materialized);
+                else if (materialized != pending.result)
                     throw std::runtime_error("poll readiness changed before completion");
             } else if (pending.result == 0) {
-                emu_poll_clear(fds, count);
+                const long cleared = emu_poll_clear(fds, count);
+                if (cleared < 0) info.rval = static_cast<uintptr_t>(cleared);
             }
         }
     }
@@ -440,6 +452,7 @@ void validate_pending_syscalls(const tracee_state& state)
         if (pending.nr == SYS_poll) {
             const int32_t timeout = static_cast<int32_t>(pending.args[2]);
             if (pending.reason != PendingReason::Timer || timeout == 0 ||
+                static_cast<uint32_t>(pending.args[1]) > 65536 ||
                 pending.deadline.has_value() != (timeout > 0) ||
                 (pending.deadline && (pending.deadline->clock_id != CLOCK_MONOTONIC ||
                                       pending.deadline->timeout_result != 0)))
