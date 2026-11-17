@@ -9,6 +9,7 @@
 #include "monitor.h"
 #include "proc_status.h"
 #include "guest.h"
+#include "state/transition_profile.h"
 #include <linux/futex.h>
 #include <linux/prctl.h>
 #include <sys/syscall.h>
@@ -19,6 +20,8 @@
 #include <fstream>
 #include <cstdio>
 #include <csignal>
+#include <cstdlib>
+#include <cstring>
 #include <linux/audit.h>
 #include <sys/wait.h>
 #include <map>
@@ -551,16 +554,35 @@ void prepare_thread_pool(int node, const tracee_state& state)
     CarrierPool prepared{ptmc_state.pids[node], std::move(carriers), {}};
     for (pid_t tid : prepared.carriers) prepared.pending_status.retain(tid);
     found = pools.emplace(node, std::move(prepared)).first;
-  } else verify_thread_pool(node);
-  validate_bound_slots(found->second, state);
-  for (pid_t tid : found->second.carriers) {
-    require_thread_capture_boundary(tid);
-    uint64_t mask = 0;
-    for (const auto& thread : state.threads)
-      if (thread.alive && thread.physical_tid == tid) { mask = thread.signal_mask; break; }
-    if (read_thread_signal_mask(tid) != mask)
-      throw std::runtime_error("Physical thread signal mask differs from captured model");
+  } else {
+    /* The barrier is the expensive half of a capture: it re-enumerates the owned
+     * task set and probes every carrier. Reuse the proof a restore in this same
+     * cycle already established when nothing has been resumed since. */
+    const auto barrier_mode = detsim::threadbarrier::mode();
+    const bool intact = detsim::threadbarrier::intact(node);
+    if (barrier_mode == detsim::threadbarrier::Mode::Off || !intact ||
+        barrier_mode == detsim::threadbarrier::Mode::Verify)
+    {
+      const detsim::profile::DetailScope verify_scope(detsim::profile::kBarrierVerify);
+      verify_thread_pool(node);
+    }
   }
+  {
+    const detsim::profile::DetailScope slots_scope(detsim::profile::kBarrierSlots);
+    validate_bound_slots(found->second, state);
+  }
+  {
+    const detsim::profile::DetailScope boundary_scope(detsim::profile::kBarrierBoundary);
+    for (pid_t tid : found->second.carriers) {
+      require_thread_capture_boundary(tid);
+      uint64_t mask = 0;
+      for (const auto& thread : state.threads)
+        if (thread.alive && thread.physical_tid == tid) { mask = thread.signal_mask; break; }
+      if (read_thread_signal_mask(tid) != mask)
+        throw std::runtime_error("Physical thread signal mask differs from captured model");
+    }
+  }
+  detsim::threadbarrier::commit(node);
 }
 
 void ensure_thread_carriers(int node, size_t count)
@@ -620,6 +642,7 @@ void normalize_thread_pool_for_restore(int node)
       throw std::runtime_error("Cannot inspect pending syscall during snapshot rollback");
     registers.orig_rax = static_cast<unsigned long long>(-1);
     detsim::resident::invalidate(tid);
+    detsim::threadbarrier::note_task_change(tid);
     if (ptrace(PTRACE_SETREGS, tid, nullptr, &registers) == -1 ||
         ptrace(PTRACE_SYSCALL, tid, nullptr, nullptr) == -1)
       throw std::runtime_error("Cannot suppress pending syscall during snapshot rollback");
@@ -656,7 +679,61 @@ void bind_thread_carriers(int node, tracee_state& state)
   validate_bound_slots(pool, state);
 }
 
-void clear_thread_pools() { pools.clear(); }
+namespace detsim::threadbarrier {
+namespace {
+std::array<bool, NP> intact_state{};
+bool cleared = true;
+}  // namespace
+
+Mode mode()
+{
+  static const Mode configured = [] {
+    const char* value = std::getenv("DETSIM_POOL_BARRIER");
+    if (!value || !*value) return Mode::On;
+    if (!std::strcmp(value, "off") || !std::strcmp(value, "0")) return Mode::Off;
+    if (!std::strcmp(value, "on") || !std::strcmp(value, "1")) return Mode::On;
+    if (!std::strcmp(value, "verify")) return Mode::Verify;
+    throw std::runtime_error("DETSIM_POOL_BARRIER must be off, on or verify");
+  }();
+  return configured;
+}
+
+bool intact(int node)
+{
+  if (node < 0 || node >= NP) return false;
+  return intact_state[node];
+}
+
+void commit(int node)
+{
+  if (node < 0 || node >= NP) return;
+  intact_state[node] = true;
+  cleared = false;
+}
+
+void note_task_change(pid_t tid)
+{
+  if (cleared) return;
+  bool known = false;
+  for (const auto& [node, pool] : pools) {
+    if (tid != pool.anchor &&
+        std::find(pool.carriers.begin(), pool.carriers.end(), tid) == pool.carriers.end())
+      continue;
+    intact_state[node] = false;
+    known = true;
+  }
+  // An unowned tid cannot be attributed: void every proof rather than guess.
+  if (!known) intact_state.fill(false);
+}
+
+void clear()
+{
+  intact_state.fill(false);
+  cleared = true;
+}
+}  // namespace detsim::threadbarrier
+
+void clear_thread_pools() { pools.clear(); detsim::threadbarrier::clear(); }
 
 void validate_logical_clone(uint64_t flags)
 {

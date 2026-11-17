@@ -1,4 +1,5 @@
 #include "thread_control.h"
+#include "thread_pool.h"
 #include "utils.h"
 
 #include <algorithm>
@@ -92,6 +93,8 @@ void write_thread_signal_mask(pid_t tid, uint64_t mask)
 {
     if (ptrace(PTRACE_SETSIGMASK, tid, reinterpret_cast<void*>(sizeof(mask)), &mask) == -1)
         throw std::runtime_error("Cannot restore stopped thread signal mask");
+    /* The barrier certifies the mask too, so changing it voids the proof. */
+    detsim::threadbarrier::note_task_change(tid);
 }
 
 namespace {

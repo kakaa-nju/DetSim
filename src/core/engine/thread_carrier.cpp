@@ -1,4 +1,5 @@
 #include "thread_carrier.h"
+#include "thread_pool.h"
 #include "thread_control.h"
 #include "guest.h"
 
@@ -28,7 +29,12 @@ constexpr auto options = PTRACE_O_TRACECLONE | PTRACE_O_TRACESYSGOOD | PTRACE_O_
 long control(enum __ptrace_request request, pid_t tid, void* address, void* data)
 {
     if (request == PTRACE_SYSCALL || request == PTRACE_CONT || request == PTRACE_SINGLESTEP)
+    {
         detsim::resident::resuming(tid);
+        /* Same proof boundary as Ptrace_right: a resume voids the stop-barrier
+         * certificate for the owning node. */
+        detsim::threadbarrier::note_task_change(tid);
+    }
     const long result = ptrace(request, tid, address, data);
     if (result == -1) fail("ptrace: " + std::string(std::strerror(errno)));
     return result;

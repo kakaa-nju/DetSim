@@ -3,6 +3,7 @@
 #include <algorithm>
 #include "state_view.h"
 #include "transition_profile.h"
+#include "search/audit.h"
 #include <array>
 #include "user_plugin.h"
 #include "search/compatibility.h"
@@ -258,6 +259,7 @@ timeval timeout_action_clock(const sys_state& source,int process,int thread) {
 }
 
 std::vector<ActorAction> enabled_actor_actions(const sys_state& source) {
+  const detsim::profile::DetailScope enable_scope(detsim::profile::kEnableActions);
   std::vector<ActorAction> result;
   if (source.property_failed) return result;
   for (int process=0;process<NP;++process) {
@@ -359,6 +361,7 @@ TransitionResult state_transition(const sys_state &source_state,
     detsim::profile::Scope syscall_scope(detsim::profile::kSyscall);
     ckpt = exec_once(source_state, executed);
   }
+  detsim::search::audit::syscall(action == TransitionAction::Timeout ? DETSIM_CHOICE_TIMEOUT : executed.nr);
   const int transition_choice = action == TransitionAction::Timeout ? DETSIM_CHOICE_TIMEOUT :
       (ptmc_state.n_choose ? ptmc_state.choose : -1);
   // Automatic execution may skip a blocked/exited thread. Attribute the
@@ -374,15 +377,25 @@ TransitionResult state_transition(const sys_state &source_state,
     new_syscalls[process_index][slot]=runtime_child.si[slot];
 
   // Grant readiness without consuming a peer's data or publishing its return.
-  refresh_pending_syscalls();
+  {
+    const detsim::profile::DetailScope refresh_scope(detsim::profile::kRefreshPending);
+    refresh_pending_syscalls();
+  }
 
   // save state with timing
   auto t3 = std::chrono::high_resolution_clock::now();
-  result.new_state = sys_state(new_syscalls, &source_state, false);
+  {
+    const detsim::profile::DetailScope capture_scope(detsim::profile::kCaptureTotal);
+    result.new_state = sys_state(new_syscalls, &source_state, false);
+  }
   /* User-visible property surface: the state assertions and the UserCheck
    * hook observe every newly captured state (including discarded steps, as
    * the historical tracer did) without changing branch ownership. */
-  auto failures = check_assertions(result.new_state, process_index);
+  std::vector<std::string> failures;
+  {
+    const detsim::profile::DetailScope assertions_scope(detsim::profile::kCheckAssertions);
+    failures = check_assertions(result.new_state, process_index);
+  }
   result.property_violation = !failures.empty();
   /* The check may record observations in its shadow (for example the leader of
    * each term). Re-read it so those observations belong to this state and are
@@ -390,11 +403,15 @@ TransitionResult state_transition(const sys_state &source_state,
    * capture point for a transition: the constructor deliberately inherits the
    * predecessor's blob, because a shadow read before the check has run could
    * only repeat what the predecessor already said. */
-  result.new_state.capture_user_state();
+  {
+    const detsim::profile::DetailScope user_state_scope(detsim::profile::kUserStateCapture);
+    result.new_state.capture_user_state();
+  }
   // Property result and user state are committed with the product-state identity.
   result.new_state.property_failed = result.property_violation;
   {
     detsim::profile::Scope commit_scope(detsim::profile::kCheckpoint);
+    const detsim::profile::DetailScope commit_detail(detsim::profile::kCommitMetadata);
     result.new_state.commit_metadata();
   }
   /* The identity is final now, so the diagnostics can name the stored state. */
@@ -405,9 +422,19 @@ TransitionResult state_transition(const sys_state &source_state,
   result.code = static_cast<TransitionResultCode>(ckpt);
 
   // add to state tree for future exploration
-  state_tree_add(source_state, result.new_state, process_index,
-                 transition_choice);
-  ptmc_state.running_state = result.new_state;
+  {
+    const detsim::profile::DetailScope tree_scope(detsim::profile::kTreeAdd);
+    state_tree_add(source_state, result.new_state, process_index,
+                   transition_choice);
+  }
+  detsim::search::audit::edge(source_state.ss_hash, result.new_state.ss_hash,
+                             process_index, thread_idx, transition_choice,
+                             ptmc_state.n_choose, static_cast<int>(ckpt),
+                             result.property_violation);
+  {
+    const detsim::profile::DetailScope running_scope(detsim::profile::kRunningCopy);
+    ptmc_state.running_state = result.new_state;
+  }
   for (int node=0; node<NP; ++node) ptmc_state.tracee_image_dirty[node]=false;
   return result;
 }

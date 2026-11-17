@@ -68,6 +68,7 @@ SRCS = src/main.cpp \
        src/core/engine/exec_engine.cpp \
        src/core/syscall/dispatcher.cpp src/core/syscall/handlers.cpp \
        src/core/search/frontier.cpp src/core/search/protocol.cpp \
+       src/core/search/audit.cpp src/core/search/expand.cpp \
        src/core/search/worker.cpp src/core/search/parallel.cpp \
        src/core/search/compatibility.cpp src/core/search/object_transport.cpp \
        src/subsys/net/sockstate.cpp src/subsys/net/emu.cpp \

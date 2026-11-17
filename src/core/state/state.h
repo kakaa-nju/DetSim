@@ -387,6 +387,13 @@ typedef struct sys_state
    * is committed. */
   void capture_user_state();
 
+  /* Drop the transient host thread bindings that reopening a saved state never
+   * restores (archives do not carry them). A caller that hands a just-captured
+   * state to the search instead of reopening it must clear these first, or the
+   * restore path would trust the captured binding and skip register restores
+   * that a reopened state performs. */
+  void clear_runtime_bindings();
+
   /* ---------------------------------------------------------
    * Recovery
    * --------------------------------------------------------- */

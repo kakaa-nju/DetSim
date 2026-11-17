@@ -4,6 +4,7 @@
  */
 
 #include "state.h"
+#include "transition_profile.h"
 #include "xstate.h"
 #include "../engine/thread_control.h"
 #include "../engine/thread_pool.h"
@@ -19,6 +20,9 @@
 #include <charconv>
 #include <string_view>
 #include "cereal/archives/binary.hpp"
+#include "cereal/types/map.hpp"
+#include "cereal/types/string.hpp"
+#include "cereal/types/vector.hpp"
 #include "config.h"
 #include "debug.h"
 #include "../fs/fd_manager.h"
@@ -30,6 +34,7 @@
 #include "syscall_fmt.h"
 #include "../user_plugin.h"
 #include "sysstate_store.h"
+#include "search/audit.h"
 #include "utils.h"
 #include <assert.h>
 #include <cstdlib>
@@ -226,9 +231,17 @@ sys_state::sys_state(const struct syscall_info info[][MAX_THREADS_PER_PROCESS],
   model_identity = context.model_identity;
   // The product snapshot is one stopped cut: check every node before the
   // first injected brk query or memory read in any node.
-  for (int j = 0; j < NP; ++j) {
-    child[j] = tracee_state(j, info[j]);
-    child[j].prepare_capture(ptmc_state.pids[j]);
+  {
+    const detsim::profile::DetailScope prepare_scope(detsim::profile::kPrepareCapture);
+    for (int j = 0; j < NP; ++j) {
+      child[j] = tracee_state(j, info[j]);
+    }
+  }
+  {
+    const detsim::profile::DetailScope prepare_scope(detsim::profile::kPrepareBarrier);
+    for (int j = 0; j < NP; ++j) {
+      child[j].prepare_capture(ptmc_state.pids[j]);
+    }
   }
   for (int j = 0; j < NP; ++j) {
     status[j] = ptmc_state.status[j];
@@ -255,6 +268,15 @@ void sys_state::capture_user_state()
     return;
   for (int j = 0; j < NP; ++j)
     detsim::user_plugin::user_state_capture(j, user_state[j]);
+}
+
+void sys_state::clear_runtime_bindings()
+{
+  for (int j = 0; j < NP; ++j)
+  {
+    for (auto &thread : child[j].threads) thread.physical_tid = 0;
+    for (auto &record : child[j].thread_create_records) record.physical_tid = 0;
+  }
 }
 
 /* ======================================================================
@@ -301,6 +323,16 @@ std::string encode_system_identity(const sys_state& state)
   return std::move(encoded).str();
 }
 
+/* Identity-purity projection: what the identity would be if the monitor blob
+ * were excluded. Identical encoding order, only the blobs removed, so the
+ * variant differs from the committed identity in exactly that component. */
+std::string encode_system_identity_without_user_state(const sys_state& state)
+{
+  sys_state stripped = state;
+  for (int node = 0; node < NP; ++node) stripped.user_state[node].clear();
+  return encode_system_identity(stripped);
+}
+
 hash_type system_identity_key(std::string_view bytes)
 {
   const hash_type result = XXHash64::hash(bytes.data(), bytes.size());
@@ -333,9 +365,37 @@ hash_type sys_state::identity_hash() const
 
 void sys_state::commit_metadata()
 {
-  const auto encoded = encode_system_identity(*this);
-  ss_hash = system_identity_key(encoded);
-  persist_system_metadata(ss_hash, encoded);
+  std::string encoded;
+  {
+    const detsim::profile::DetailScope encode_scope(detsim::profile::kIdentityEncode);
+    encoded = encode_system_identity(*this);
+    ss_hash = system_identity_key(encoded);
+  }
+  if (detsim::search::audit::identity_diagnostics())
+  {
+    using namespace detsim::search::audit;
+    identity_sample(kIdentityBase, ss_hash);
+    identity_sample(kIdentityNoUserState,
+                    system_identity_key(encode_system_identity_without_user_state(*this)));
+    /* Node slices: rebuild this product identity with one node hash replaced by
+     * the projection that node reported during its capture. */
+    for (int variant = kIdentityNoMetadata; variant < kIdentityVariantCount; ++variant)
+    {
+      sys_state projected = *this;
+      bool usable = true;
+      for (int node = 0; node < NP; ++node)
+      {
+        const hash_type value = detsim::search::audit::identity_node_value(node, variant);
+        if (!value) { usable = false; break; }
+        projected.ts_hash[node] = value;
+      }
+      if (usable) identity_sample(variant, projected.identity_hash());
+    }
+  }
+  {
+    const detsim::profile::DetailScope persist_scope(detsim::profile::kMetadataPersist);
+    persist_system_metadata(ss_hash, encoded);
+  }
 }
 
 int sys_state::save_metadata() const
@@ -470,6 +530,7 @@ tracee_state::tracee_state(hash_type hash)
 /* Load sys_state from state_store by hash */
 sys_state::sys_state(hash_type hash) : sys_state()
 {
+  const detsim::profile::DetailScope load_scope(detsim::profile::kStateLoad);
   if (!hash)
     throw std::runtime_error("Cannot load zero system-state identity");
   std::vector<uint8_t> data;
@@ -1474,9 +1535,21 @@ void tracee_state::bind_threads_for_restore(int index, hash_type hash)
 
   }
   for (auto& record : thread_create_records) record.physical_tid = 0;
-  verify_thread_pool(index);
+  /* The kernel half of this barrier is the expensive one. A valid certificate
+   * means the owned task set still matches the model and every carrier is still
+   * parked where the last successful barrier left it, so only re-prove it when
+   * something has been resumed since (or when auditing). */
+  const auto barrier_mode = detsim::threadbarrier::mode();
+  if (barrier_mode == detsim::threadbarrier::Mode::Off ||
+      !detsim::threadbarrier::intact(index) ||
+      barrier_mode == detsim::threadbarrier::Mode::Verify)
+    verify_thread_pool(index);
   bind_thread_carriers(index, *this);
   validate_io_state();
+  /* No certificate is published here: the mask writes and the image restore that
+   * follow this call still change the node's parked state, and
+   * recover_running_state() publishes the proof only once the whole cut is in
+   * place. Publishing here would claim a window this function cannot vouch for. */
 }
 
 void tracee_state::recover_stopped(int index, hash_type ts_hash) const
@@ -1586,13 +1659,18 @@ void sys_state::clear()
 
 hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
 {
-  validate_io_state();
+  {
+    const detsim::profile::DetailScope validate_scope(detsim::profile::kValidateIo);
+    validate_io_state();
+  }
   const auto layout_cache_mode = capture_layout_cache_mode();
   const CaptureLayoutContext layout_context{scratch_page, PAGE_SIZE};
   std::vector<maps_item> parsed_maps;
   const auto resident = detsim::resident::get(pid);
   std::shared_ptr<const CaptureLayout> layout;
 
+  {
+  const detsim::profile::DetailScope layout_scope(detsim::profile::kCaptureLayout);
   if (resident.snapshot) {
     // Keep the historical resident path in control flow: the saved canonical
     // text is the authority and no live /proc read is performed. The cache is
@@ -1670,6 +1748,7 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
       }
     }
   }
+  } /* layout scope */
 
   const auto& regions = layout->regions;
   const auto& regions_to_capture = layout->regions_to_capture;
@@ -1677,11 +1756,14 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
   const size_t regions_data_size = layout->byte_count;
 
   // prepare_capture preserved and verified the complete logical slot layout.
-  for (auto& thread : threads) {
-    if (!thread.alive) continue;
-    if (ptrace(PTRACE_GETREGS, thread.physical_tid, nullptr, &thread.regs) == -1)
-      throw std::runtime_error("Cannot capture thread registers");
-    thread.xstate = capture_xstate(thread.physical_tid);
+  {
+    const detsim::profile::DetailScope regs_scope(detsim::profile::kCaptureRegs);
+    for (auto& thread : threads) {
+      if (!thread.alive) continue;
+      if (ptrace(PTRACE_GETREGS, thread.physical_tid, nullptr, &thread.regs) == -1)
+        throw std::runtime_error("Cannot capture thread registers");
+      thread.xstate = capture_xstate(thread.physical_tid);
+    }
   }
   if (current_thread_idx < 0 || current_thread_idx >= static_cast<int>(threads.size()))
     throw std::runtime_error("Invalid selected thread in snapshot");
@@ -1697,21 +1779,53 @@ hash_type tracee_state::capture_stopped(pid_t pid, hash_type comparison_hash)
   // Serialize tracee_state AFTER threads have been populated
   std::string tstate_data;
   {
+    const detsim::profile::DetailScope serialize_scope(detsim::profile::kCaptureSerialize);
     std::ostringstream oss;
     {
       FileContentSnapshotScope file_content_scope;
       cereal::BinaryOutputArchive ar(oss);
       ar(*this);
     }
+    /* cereal's binary format is the interchange format the store reads back, so
+     * the encoder is kept as-is: `std::move(oss).str()` moves the buffer. */
     tstate_data = std::move(oss).str();
   }
 
+  const detsim::profile::DetailScope snapshot_scope(detsim::profile::kCaptureSnapshot);
   if (page_capture_enabled())
   {
     const std::span<const uint8_t> metadata(
         reinterpret_cast<const uint8_t*>(tstate_data.data()), tstate_data.size());
+    /* Identity diagnostics: re-encode with every pending phase normalized, so the
+     * projection can answer whether removing that component from the identity
+     * would merge states. Read-only; the committed capture is untouched. */
+    std::string normalized_metadata;
+    if (detsim::search::audit::identity_diagnostics())
+    {
+      tracee_state normalized = *this;
+      bool rewrote = false;
+      for (auto& thread : normalized.threads)
+        if (thread.pending_syscall)
+        {
+          thread.pending_syscall->phase = PendingPhase::Ready;
+          rewrote = true;
+        }
+      if (rewrote)
+      {
+        std::ostringstream encoded;
+        {
+          FileContentSnapshotScope scope;
+          cereal::BinaryOutputArchive archive(encoded);
+          archive(normalized);
+        }
+        normalized_metadata = std::move(encoded).str();
+      }
+    }
+    const std::span<const uint8_t> normalized_span(
+        reinterpret_cast<const uint8_t*>(normalized_metadata.data()),
+        normalized_metadata.size());
     const auto hash = save_paged_snapshot(pid, regions, metadata, maps_text, regs,
-                              comparison_hash);
+                              comparison_hash, normalized_span);
     remember_thread_bindings(pid, hash, *this);
     detsim::resident::publish(pid, hash, brk);
     return hash;
@@ -2058,9 +2172,16 @@ void sys_state::recover_running_state() const try
   if (!ptmc_state.model_identity.empty() && model_identity != ptmc_state.model_identity)
     throw std::runtime_error("Snapshot execution model differs from the configured model");
   // Resolve and verify every node before changing any live or modeled state.
-  sys_state resolved = *this;
-  for (int i = 0; i < NP; ++i)
-    resolved.child[i].bind_threads_for_restore(i, ts_hash[i]);
+  sys_state resolved;
+  {
+    const detsim::profile::DetailScope copy_scope(detsim::profile::kRestoreCopy);
+    resolved = *this;
+  }
+  {
+    const detsim::profile::DetailScope bind_scope(detsim::profile::kRestoreBind);
+    for (int i = 0; i < NP; ++i)
+      resolved.child[i].bind_threads_for_restore(i, ts_hash[i]);
+  }
   bool restore_image[NP];
   for (int i = 0; i < NP; ++i) {
     const auto known = detsim::resident::get(ptmc_state.pids[i]);
@@ -2070,19 +2191,34 @@ void sys_state::recover_running_state() const try
     // running snapshot. Retain dirty flags until the whole operation commits.
     ptmc_state.tracee_image_dirty[i] = true;
   }
-  for (int i = 0; i < NP; ++i) {
-    restore_thread_signal_masks(i, resolved.child[i]);
-    if (restore_image[i]) normalize_thread_pool_for_restore(i);
+  {
+    const detsim::profile::DetailScope masks_scope(detsim::profile::kRestoreMasks);
+    for (int i = 0; i < NP; ++i) {
+      restore_thread_signal_masks(i, resolved.child[i]);
+      if (restore_image[i]) normalize_thread_pool_for_restore(i);
+    }
   }
   /* The model budget is a per-run statistic, not restored state. */
-  for (int i = 0; i < NP; ++i) {
-    ptmc_state.status[i] = status[i];
-    if (restore_image[i])
-      resolved.child[i].recover_stopped(i, ts_hash[i]);
-    else if (!same_runtime_bindings(resolved.child[i], ptmc_state.running_state.child[i]))
-      resolved.child[i].restore_thread_registers(ptmc_state.pids[i]);
-    resolved.child[i].restore_resources(i);
+  {
+    const detsim::profile::DetailScope image_scope(detsim::profile::kRestoreImage);
+    for (int i = 0; i < NP; ++i) {
+      ptmc_state.status[i] = status[i];
+      if (restore_image[i])
+        resolved.child[i].recover_stopped(i, ts_hash[i]);
+      else if (!same_runtime_bindings(resolved.child[i], ptmc_state.running_state.child[i]))
+        resolved.child[i].restore_thread_registers(ptmc_state.pids[i]);
+    }
   }
+  {
+    const detsim::profile::DetailScope resources_scope(detsim::profile::kRestoreResources);
+    for (int i = 0; i < NP; ++i)
+      resolved.child[i].restore_resources(i);
+  }
+  /* Every node is now a stopped cut with the modeled signal masks installed:
+   * the image restore and the mask writes above can only have voided the
+   * certificate, so re-publish it once the whole restore has committed. */
+  for (int i = 0; i < NP; ++i)
+    detsim::threadbarrier::commit(i);
   ptmc_state.running_state = std::move(resolved);
   /* Hand the loaded shadow back to the plugin: the restored blob is the state
    * the check hook must observe on this branch, never the pre-restore one. */

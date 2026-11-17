@@ -43,11 +43,17 @@ uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
                            uint64_t r9);
 
 #include "state/resident_memory.h"
+#include "engine/thread_pool.h"
 __attribute__((unused)) static inline long
 Ptrace_right(enum __ptrace_request op, pid_t pid, void *addr, void *data)
 {
   if (op == PTRACE_SYSCALL || op == PTRACE_CONT || op == PTRACE_SINGLESTEP)
+  {
     detsim::resident::resuming(pid);
+    /* A resume voids the node's stop-barrier proof: the task is no longer
+     * parked at the syscall boundary the barrier certified. */
+    detsim::threadbarrier::note_task_change(pid);
+  }
   if (op == PTRACE_POKEDATA || op == PTRACE_POKETEXT)
     detsim::resident::writing(pid, reinterpret_cast<uintptr_t>(addr), sizeof(long));
   /* ptrace(2): On success, the PTRACE_PEEK* operations return the requested *

@@ -15,6 +15,8 @@
 #include "state/state_store_packed.h"
 #include "state/state_transition.h"
 #include "state/transition_profile.h"
+#include "search/audit.h"
+#include "search/expand.h"
 #include "state/sysstate_store.h"
 #include "utils.h"
 #include "state/soft_dirty_experiment.h"
@@ -167,6 +169,38 @@ static void clear_search_bookkeeping()
   expanded_remaining.clear();
   fully_covered.clear();
   dfs_coverage.clear();
+}
+
+/* A search command normally continues from whatever the session already knows:
+ * coverage memos, the queue, and the state tree carry over. Comparing two
+ * searches of the same root inside one process (the only way to compare state
+ * identities, which are host-salted per process) needs each command to start
+ * from an empty bookkeeping state instead. Opt-in, default off. */
+static bool search_isolation()
+{
+  static const bool isolated = [] {
+    const char *value = std::getenv("DETSIM_SEARCH_ISOLATE");
+    return value && *value && std::strcmp(value, "0") != 0;
+  }();
+  return isolated;
+}
+
+static void reset_search_session_if_isolated()
+{
+  if (!search_isolation())
+    return;
+  /* Re-enter the state the session started from, so repeated commands explore
+   * the same root instead of continuing from wherever the previous one ended.
+   * That is what makes two searches in one process comparable: state identities
+   * carry a per-process host salt, so only same-process runs share them. */
+  static hash_type session_root = 0;
+  if (!session_root)
+    session_root = ptmc_state.running_state.ss_hash;
+  else
+    load(session_root);
+  clear_search_bookkeeping();
+  state_tree.clear();
+  StateStore::instance().queue_clear();
 }
 
 #include <sys/time.h>
@@ -684,34 +718,6 @@ static void report_search_exited(const std::optional<SearchExitedReceipt>& recei
   detsim::ui::ui_printf("SEARCH_EXITED %s\n",value.dump().c_str());
 }
 
-// Discover alternatives separately for every source x logical actor x action.
-// Restoring the source never carries a previous actor's choice cardinality.
-static TransitionResult search_actor_choice(const sys_state& source,const ActorAction& actor,
-                                           int preset,int& cardinality,std::vector<int>& remaining)
-{
-  ptmc_state.n_choose=0;
-  ptmc_state.choose=preset;
-  TransitionResult result;
-  try { result=state_transition(source,actor.process,actor.thread,actor.action); }
-  catch (const ActionRejected& error) {
-    throw std::runtime_error(std::string("Enumerated actor action was rejected: ")+error.what());
-  }
-  if (result.code==CKPT_DISCARD)
-    throw std::runtime_error("Enumerated actor action did not execute");
-  const int discovered=ptmc_state.n_choose;
-  const int selected=ptmc_state.choose;
-  if (discovered<0 || (discovered && (selected<0 || selected>=discovered)))
-    throw std::runtime_error("Invalid syscall choice discovery");
-  if (cardinality<0) {
-    cardinality=discovered;
-    for (int choice=0;choice<discovered;++choice)
-      if (choice!=selected) remaining.push_back(choice);
-  } else if (discovered!=cardinality || !discovered || selected!=preset) {
-    throw std::runtime_error("Syscall choice cardinality/preset changed for the same saved actor action");
-  }
-  return result;
-}
-
 EnumerationKind classify_enumeration(const sys_state& source,
     const std::vector<ActorAction>& actors, bool may_expand)
 {
@@ -726,36 +732,30 @@ EnumerationSummary enumerate_state(const sys_state& source, bool may_expand,
                                    const EdgeCallback& callback)
 {
   detsim::resident::Scope controlled_execution;
-  const auto actions = enabled_actor_actions(source);
-  const auto kind = classify_enumeration(source, actions, may_expand);
-  if (kind != EnumerationKind::Expanded) return {kind, 0};
-  if (!callback) throw std::runtime_error("Single-state expansion requires an edge callback");
-  // This API owns its choice policy independently of the invoking UI command.
-  // In particular a persistent worker has no stdin, and a previous RAND command
-  // must not replace explicit saved-actor presets with random choices.
+  /* This API owns its choice policy independently of the invoking UI command.
+   * In particular a persistent worker has no stdin, and a previous RAND command
+   * must not replace explicit saved-actor presets with random choices. */
   struct PresetChoiceScope {
     int previous_auto = auto_mode;
     decltype(ptmc_state.mode) previous_mode = ptmc_state.mode;
     PresetChoiceScope() { auto_mode = 1; ptmc_state.mode = PTMC_STATE::MODE_BFS; }
     ~PresetChoiceScope() { auto_mode = previous_auto; ptmc_state.mode = previous_mode; }
   } choice_scope;
+  detsim::search::Expansion expansion(source, may_expand);
+  if (!expansion.expanded()) return {expansion.kind(), 0};
+  if (!callback) throw std::runtime_error("Single-state expansion requires an edge callback");
   uint64_t emitted = 0;
-  for (const auto& actor : actions) {
-    int cardinality = -1;
-    std::vector<int> choices;
-    do {
-      int preset = 0;
-      if (cardinality >= 0) { preset = choices.back(); choices.pop_back(); }
-      TransitionResult result = search_actor_choice(source, actor, preset, cardinality, choices);
-      if (!result.new_state.ss_hash)
-        throw std::runtime_error("Single-state expansion produced no target identity");
-      const int choice = actor.action == TransitionAction::Timeout ? DETSIM_CHOICE_TIMEOUT :
-          (ptmc_state.n_choose ? ptmc_state.choose : -1);
-      const bool violation = result.property_violation || result.new_state.property_failed;
-      callback(actor, choice, cardinality, result);
-      ++emitted;
-      if (violation) return {EnumerationKind::Violation, emitted};
-    } while (!choices.empty());
+  TransitionResult result;
+  int choice = -1;
+  int cardinality = 0;
+  while (expansion.next(result, choice, cardinality))
+  {
+    if (!result.new_state.ss_hash)
+      throw std::runtime_error("Single-state expansion produced no target identity");
+    const bool violation = result.property_violation || result.new_state.property_failed;
+    callback(expansion.current_actor(), choice, cardinality, result);
+    ++emitted;
+    if (violation) return {EnumerationKind::Violation, emitted};
   }
   // A failed final restore is a worker failure, never a successful Done receipt.
   load(source.ss_hash);
@@ -782,6 +782,7 @@ EnumerationSummary enumerate_state(const sys_state& source, bool may_expand,
 int exec_bfs()
 {
   detsim::resident::Scope controlled_execution;
+  reset_search_session_if_isolated();
   g_save_count = 0; g_save_time_us = 0; g_restore_time_us = 0;
   std::optional<SearchExitedReceipt> exited_receipt;
   ptmc_state.mode = PTMC_STATE::MODE_BFS;
@@ -803,6 +804,7 @@ int exec_bfs()
   g_queue_size = 0;
 
   const auto& initial = ptmc_state.running_state;
+  const hash_type root_hash = initial.ss_hash;
   std::unordered_set<hash_type> queued;
   queued.insert(initial.ss_hash);
   StateStore::instance().queue_clear();
@@ -845,6 +847,8 @@ int exec_bfs()
                           time_used, states_searched_this_run / time_used);
     StateStore::instance().print_stats();
     report_work();
+    detsim::search::audit::summary("bfs", -1, root_hash, states_searched_this_run,
+                                  state_set.size(), "Violation", state_set);
     return 1;
   };
 
@@ -872,61 +876,59 @@ int exec_bfs()
       continue;
     if (state_fetched->property_failed)
       return stop_for_violation();
-    const auto actions=enabled_actor_actions(state_fetched.value());
-    bool state_complete = true;
-    for (const auto& actor:actions)
+    const auto& s = state_fetched.value();
+    for (int j = 0; j < NP; j++)
+      ptmc_state.status[j] = s.status[j];
+
+    for (int j = 0; j < NP; j++)
+      if (s.ts_hash[j] == 0)
+        LOG_CRIT("Child state hash is 0 for tracee %d. This should not "
+                 "happen if the state is properly saved.",
+                 j);
+
+    detsim::search::Expansion expansion(s, true);
+    if (expansion.expanded())
     {
-      int cardinality=-1;
-      std::vector<int> choices;
-      do
+      TransitionResult result;
+      int choice = -1, cardinality = 0;
+      while (expansion.next(result, choice, cardinality))
       {
-      const auto& s = state_fetched.value();
-      for (int j = 0; j < NP; j++)
-        ptmc_state.status[j] = s.status[j];
+        poll_status_monitor();
+        g_save_time_us += result.save_time.count();
+        g_restore_time_us += result.restore_time.count();
+        g_save_count++;
+        states_searched_this_run++;
+        g_states_searched = states_searched_this_run;
 
-      for (int j = 0; j < NP; j++)
-        if (s.ts_hash[j] == 0)
-          LOG_CRIT("Child state hash is 0 for tracee %d. This should not "
-                   "happen if the state is properly saved.",
-                   j);
+        int check_result = result.property_violation;
+        if (check_result != 0)
+          return stop_for_violation();
 
-      int preset=0;
-      if (cardinality>=0) { preset=choices.back(); choices.pop_back(); }
-      TransitionResult result=search_actor_choice(s,actor,preset,cardinality,choices);
-      poll_status_monitor();
-      g_save_time_us += result.save_time.count();
-      g_restore_time_us += result.restore_time.count();
-      g_save_count++;
-      states_searched_this_run++;
-      g_states_searched = states_searched_this_run;
+        remember_search_exited(exited_receipt, s.ss_hash,
+                               expansion.current_actor(), result);
 
-      int check_result = result.property_violation;
-      if (check_result != 0)
-        return stop_for_violation();
-
-      remember_search_exited(exited_receipt,s.ss_hash,actor,result);
-
-      if (result.code != CKPT_DISCARD)
-      {
-        const hash_type successor = result.new_state.ss_hash;
-        bool is_new = !state_set.count(successor);
-        if (is_new)
+        if (result.code != CKPT_DISCARD)
         {
-          state_set.emplace(successor);
-          states_new_this_run++;
+          const hash_type successor = result.new_state.ss_hash;
+          bool is_new = !state_set.count(successor);
+          if (is_new)
+          {
+            state_set.emplace(successor);
+            states_new_this_run++;
+          }
+          // A DFS or random walk may have discovered this identity without
+          // expanding it. Enqueue it even when it is not new to state_set.
+          if (check_result == 0 &&
+              expanded_budget(successor) != kExpandedUnbounded &&
+              queued.insert(successor).second)
+            state_queue_append(result.new_state);
         }
-        // A DFS or random walk may have discovered this identity without
-        // expanding it. Enqueue it even when it is not new to state_set.
-        if (check_result == 0 &&
-            expanded_budget(successor) != kExpandedUnbounded &&
-            queued.insert(successor).second)
-          state_queue_append(result.new_state);
       }
-
-      } while (!choices.empty());
     }
-    if (state_complete)
-      record_expanded(state_fetched->ss_hash, kExpandedUnbounded);
+    // Every actor and every discovered choice of this configuration was
+    // enumerated (a terminal state enumerates the empty set), so the state is
+    // fully expanded for the coverage receipt.
+    record_expanded(state_fetched->ss_hash, kExpandedUnbounded);
 
     /* Update global statistics for monitor */
     g_states_searched = states_searched_this_run;
@@ -981,11 +983,59 @@ int exec_bfs()
   StateStore::instance().print_stats();
   report_work();
   report_search_exited(exited_receipt);
+  detsim::search::audit::summary("bfs", -1, root_hash, states_searched_this_run,
+                                state_set.size(),
+                                all_discovered_fully_expanded() ? "Complete" : "Bounded",
+                                state_set);
   return 0;
 }
 
 static int states_searched_this_run = 0;
 static int states_new_this_run = 0;
+
+/* The DFS child frame takes ownership of the successor it just captured instead
+ * of reopening it from SysStateStore.
+ *
+ * off    -- reopen the successor instead of handing it over (bisection / oracle).
+ *           Ancestors still retain their captured state; the stack depth, not
+ *           the number of states, bounds that memory.
+ * on     -- hand the captured state over
+ * verify -- do both: reopen the successor and prove that it is the same product
+ *           state before handing the captured one over. Any semantic drift
+ *           between the two paths aborts the search instead of being silent.
+ */
+enum class DfsHandoff { Off, On, Verify };
+
+static DfsHandoff dfs_handoff_mode()
+{
+  static const DfsHandoff mode = [] {
+    const char *value = std::getenv("DETSIM_DFS_HANDOFF");
+    if (!value || !*value) return DfsHandoff::On;
+    if (!std::strcmp(value, "0") || !std::strcmp(value, "off")) return DfsHandoff::Off;
+    if (!std::strcmp(value, "1") || !std::strcmp(value, "on")) return DfsHandoff::On;
+    if (!std::strcmp(value, "verify")) return DfsHandoff::Verify;
+    throw std::runtime_error("DETSIM_DFS_HANDOFF must be off, on or verify");
+  }();
+  return mode;
+}
+
+/* Two product states are the same state iff they agree on everything the
+ * identity encodes: the archived monitor blob, the node status, the property
+ * flag and the per-node captured content hashes. Reopening a state and taking
+ * the just-captured one must always satisfy this. */
+static void require_same_product_state(const sys_state& reopened,
+                                       const sys_state& captured)
+{
+  bool equal = reopened.property_failed == captured.property_failed &&
+               reopened.model_identity == captured.model_identity;
+  for (int node = 0; node < NP; ++node)
+    equal = equal && reopened.ts_hash[node] == captured.ts_hash[node] &&
+            reopened.status[node] == captured.status[node] &&
+            reopened.user_state[node] == captured.user_state[node];
+  if (!equal || reopened.identity_hash() != captured.identity_hash())
+    throw std::runtime_error(
+        "DFS state handoff disagrees with reopening the saved state");
+}
 
 struct DFSFrame
 {
@@ -993,19 +1043,12 @@ struct DFSFrame
   int depth=0;
   int state=0;
   std::optional<sys_state> s;
-  std::vector<ActorAction> actors;
-  size_t actor_pos=0;
-  std::vector<int> choices;
-  int cardinality=-1;
+  /* One resumable enumerator per frame: DFS must be able to dive into a
+   * successor and come back for the next choice, so it drives next() itself
+   * instead of letting a callback own the loop. */
+  std::optional<detsim::search::Expansion> expansion;
   SearchCoverage coverage;
 };
-
-/* Move to the next actor of the current state. */
-static void advance_actor(DFSFrame& frame)
-{
-  frame.actor_pos++;
-  frame.state = 1;
-}
 
 int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
                      std::optional<SearchExitedReceipt>& exited_receipt,
@@ -1018,7 +1061,6 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
   root.ss_hash = initial_ss_hash;
   root.depth = initial_depth;
   root.state = 0;
-  root.actor_pos = 0;
   stack.push_back(std::move(root));
 
   auto stop_for_violation = [&]() {
@@ -1031,6 +1073,9 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
     detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
                           time_used, states_searched_this_run / time_used);
     StateStore::instance().print_stats();
+    detsim::search::audit::summary("dfs", initial_depth, initial_ss_hash,
+                                  states_searched_this_run, state_set.size(),
+                                  "Violation", state_set);
     return 1;
   };
 
@@ -1081,6 +1126,7 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
     if (frame.state == 0)
     {
       states_searched_this_run++;
+      detsim::search::audit::coverage(detsim::search::audit::kCoverageEntry);
       bool is_new = !state_set.count(frame.ss_hash);
       if (is_new)
       {
@@ -1090,6 +1136,7 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
 
       if (fully_covered.count(frame.ss_hash))
       {
+        detsim::search::audit::coverage(detsim::search::audit::kCoverageSkipFully);
         finish_frame({}, false);
         continue;
       }
@@ -1099,17 +1146,24 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
         const auto outcome = cached->second.find(frame.depth);
         if (outcome != cached->second.end())
         {
+          detsim::search::audit::coverage(detsim::search::audit::kCoverageSkipDepth);
           finish_frame(outcome->second, false);
           continue;
         }
       }
 
-      frame.s.emplace(frame.ss_hash);
+      /* A parent hands its freshly captured successor over directly; only a
+       * frame that was not produced by an ancestor expansion (the root, or one
+       * resumed after a memo/backtrack) has to reopen the saved state. */
+      if (!frame.s)
+        frame.s.emplace(frame.ss_hash);
       if (frame.s->property_failed)
         return stop_for_violation();
-      frame.actors=enabled_actor_actions(*frame.s);
-      if (frame.actors.empty())
+      frame.expansion.emplace(*frame.s, true);
+      if (!frame.expansion->expanded())
       {
+        // A terminal state expands the empty set; the cutoff is a completed
+        // result for this configuration, not a partial enumeration.
         finish_frame({}, true);
         continue;
       }
@@ -1118,98 +1172,81 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
         finish_frame({true}, true);
         continue;
       }
-
-      frame.state = 1;
-      frame.actor_pos = 0;
-    }
-
-    if (frame.state == 1)
-    {
-      if (frame.actor_pos >= frame.actors.size())
-      {
-        // All source actors/choices and their bounded child queries finished.
-        // Budget/depth cutoffs are completed results, not partial enumerations.
-        finish_frame(frame.coverage, true);
-        continue;
-      }
-
-      frame.choices.clear();
-      frame.cardinality=-1;
-
+      detsim::search::audit::coverage(detsim::search::audit::kCoverageExpand);
+      if (!is_new)
+        detsim::search::audit::coverage(detsim::search::audit::kCoverageReexpand);
       frame.state = 2;
     }
 
     if (frame.state == 2)
     {
-      const auto actor=frame.actors[frame.actor_pos];
+      /* Defensive: a frame always owns its state now, but reopening keeps the
+       * resume path correct if that ever changes. */
       if (!frame.s)
+      {
         frame.s.emplace(frame.ss_hash);
-
+        frame.expansion->rebind(*frame.s);
+      }
       for (int j = 0; j < NP; j++)
       {
         ptmc_state.status[j] = frame.s->status[j];
       }
+
+      TransitionResult result;
+      int choice = -1;
+      int cardinality = 0;
+      if (!frame.expansion->next(result, choice, cardinality))
+      {
+        // Every actor/choice of this configuration and all their bounded child
+        // queries finished.
+        finish_frame(frame.coverage, true);
+        continue;
+      }
+      poll_status_monitor();
+      g_save_time_us += result.save_time.count();
+      g_restore_time_us += result.restore_time.count();
       g_restore_count++;
+      g_save_count++;
       g_states_searched = states_searched_this_run;
       g_states_new = states_new_this_run;
       g_queue_size = 0;
 
-      int preset=-1;
-      if (frame.cardinality>=0) { preset=frame.choices.back(); frame.choices.pop_back(); }
-      TransitionResult result=search_actor_choice(*frame.s,actor,preset,frame.cardinality,frame.choices);
-      poll_status_monitor();
-      g_save_time_us += result.save_time.count();
-      g_restore_time_us += result.restore_time.count();
-
-      g_save_count++;
       if (result.property_violation != 0)
         return stop_for_violation();
 
-      remember_search_exited(exited_receipt,frame.ss_hash,actor,result);
+      const ActorAction& actor = frame.expansion->current_actor();
+      remember_search_exited(exited_receipt, frame.ss_hash, actor, result);
+      LOG_DEBUG("DFS depth %d, tracee %d, choose %d, hash %016lx",
+                frame.depth, actor.process, ptmc_state.choose,
+                result.new_state.ss_hash);
 
-      bool expanded = result.code != CKPT_DISCARD;
-      if (expanded)
+      DFSFrame new_frame;
+      new_frame.ss_hash = result.new_state.ss_hash;
+      new_frame.depth = frame.depth - 1;
+      new_frame.state = 0;
+      /* The successor was just captured; reopening it from SysStateStore
+       * would pay a full metadata decode plus one tracee decode per node for
+       * a state this frame already owns byte for byte. Reopening also drops
+       * the transient host thread bindings, so clear the captured ones: the
+       * restore path must resolve bindings from ts_hash exactly as it does
+       * for a reopened state. */
+      const DfsHandoff handoff = dfs_handoff_mode();
+      if (handoff != DfsHandoff::Off)
       {
-        LOG_DEBUG("DFS depth %d, tracee %d, choose %d, hash %016lx",
-                  frame.depth, actor.process, ptmc_state.choose, result.new_state.ss_hash);
-
-        if (!frame.choices.empty())
+        result.new_state.clear_runtime_bindings();
+        if (handoff == DfsHandoff::Verify)
         {
-          frame.state = 3;
+          const sys_state reopened(result.new_state.ss_hash);
+          require_same_product_state(reopened, result.new_state);
         }
-        else
-        {
-          advance_actor(frame);
-        }
-
-        DFSFrame new_frame;
-        new_frame.ss_hash = result.new_state.ss_hash;
-        new_frame.depth = frame.depth - 1;
-        new_frame.state = 0;
-        new_frame.actor_pos = 0;
-        // Ancestors need only their identity and pending search choices while
-        // descendants run. Reopen persisted state when backtracking needs it.
-        frame.s.reset();
-        stack.push_back(std::move(new_frame));
-        continue;
+        new_frame.s = std::move(result.new_state);
       }
-
-      if (frame.choices.empty())
-      {
-        advance_actor(frame);
-      }
-    }
-
-    if (frame.state == 3)
-    {
-      if (frame.choices.empty())
-      {
-        advance_actor(frame);
-      }
-      else
-      {
-        frame.state = 2;
-      }
+      /* The parent keeps its state: reopening it on every backtrack costs a
+       * full metadata decode plus one tracee decode per node, and a depth-first
+       * stack holds at most `depth` frames (a few hundred KB). The enumerator
+       * also points at it, so keeping it alive is what makes resume free. */
+      stack.push_back(std::move(new_frame));
+      continue;
     }
   }
 
@@ -1219,6 +1256,7 @@ int do_dfs_iterative(hash_type initial_ss_hash, int initial_depth,
 int exec_dfs(int depth)
 {
   reset_model_budget();
+  reset_search_session_if_isolated();
   detsim::resident::Scope controlled_execution;
   g_save_count = 0; g_save_time_us = 0; g_restore_time_us = 0;
   reset_page_capture_stats();
@@ -1240,8 +1278,9 @@ int exec_dfs(int depth)
 
   std::optional<SearchExitedReceipt> exited_receipt;
   bool depth_limit_reached = false;
-  const int stopped = do_dfs_iterative(ptmc_state.running_state.ss_hash, depth,
-                                       exited_receipt, depth_limit_reached);
+  const hash_type root_hash = ptmc_state.running_state.ss_hash;
+  const int stopped = do_dfs_iterative(root_hash, depth, exited_receipt,
+                                       depth_limit_reached);
   if (stopped) {
     stop_status_monitor();
     return stopped;
@@ -1282,6 +1321,9 @@ int exec_dfs(int depth)
   detsim::ui::ui_printf("SEARCH_WORK {\"transitions\":%zu}\n", g_save_count.load());
   detsim::profile::report("TRANSITION_PROFILE");
   report_search_exited(exited_receipt);
+  detsim::search::audit::summary(
+      "dfs", depth, root_hash, states_searched_this_run, state_set.size(),
+      depth_limit_reached ? "Bounded" : "Complete", state_set);
 
   return 0;
 }
@@ -1290,9 +1332,11 @@ int exec_rand(int depth)
 {
   ptmc_state.mode = PTMC_STATE::MODE_RAND;
   reset_model_budget();
+  reset_search_session_if_isolated();
   start_time = gettime();
   srand(time(NULL));
   hash_type current_hash = ptmc_state.running_state.ss_hash;
+  const hash_type root_hash = current_hash;
 
   /* Statistics for this execution only */
   size_t states_searched_this_run = 0;
@@ -1317,14 +1361,9 @@ int exec_rand(int depth)
     for (int k = 0; k < depth; k++)
     {
       // Pick a runnable saved actor; a waiting actor with a finite deadline uses
-      // its timeout outcome and is a runnable actor too.
-      std::vector<ActorAction> actors;
-      try { actors = enabled_actor_actions(s); } catch (const std::exception&) { actors.clear(); }
-      if (actors.empty())
-        break;
-      const auto& picked = actors[rand() % actors.size()];
-      const int i = picked.process;
-
+      // its timeout outcome and is a runnable actor too. The shared enumerator
+      // owns that choice (random_actor mode), so the walk uses the same funnel
+      // as every other path.
       for (int j = 0; j < NP; j++)
       {
         ptmc_state.status[j] = s.status[j];
@@ -1337,7 +1376,27 @@ int exec_rand(int depth)
         }
       }
 
-      TransitionResult result = state_transition(s, i, picked.thread, picked.action);
+      detsim::search::ExpandOptions walk;
+      walk.random_actor = true;
+      walk.first_choice_preset = -1;
+      TransitionResult result;
+      int choice = -1;
+      int cardinality = 0;
+      bool produced = false;
+      try
+      {
+        detsim::search::Expansion expansion(s, true, walk);
+        produced = expansion.next(result, choice, cardinality);
+      }
+      catch (const std::exception&)
+      {
+        /* A random walk samples; it never claims completeness. A configuration
+         * the enumerator rejects ends this walk, as it did before the paths
+         * were unified, instead of taking the tracer down with it. */
+        break;
+      }
+      if (!produced)
+        break;
       poll_status_monitor();
       g_save_count++;
       g_save_time_us += result.save_time.count();
@@ -1362,6 +1421,9 @@ int exec_rand(int depth)
         detsim::ui::ui_printf("Time elapsed: %lfs, speed = %lf states/s\n",
                               time_used, states_searched_this_run / time_used);
         StateStore::instance().print_stats();
+        detsim::search::audit::summary("rand", depth, root_hash,
+                                       states_searched_this_run, state_set.size(),
+                                       "Violation", state_set);
         return 1;
       }
       g_states_searched = states_searched_this_run;
@@ -1408,6 +1470,12 @@ int exec_rand(int depth)
                             100.0 * (total_save_us + total_restore_us) /
                                 (time_used * 1000000));
 
+      /* A random walk ends here: the receipt is emitted on the same exit path
+       * that reports the counts, so an interrupted sampling run still leaves a
+       * machine-readable record (status "Random", never a coverage claim). */
+      detsim::search::audit::summary("rand", depth, root_hash,
+                                     states_searched_this_run, state_set.size(),
+                                     "Random", state_set);
       sigint_received = 0;
       state_set.clear();
       return 0;
@@ -1436,6 +1504,9 @@ int exec_rand(int depth)
   detsim::ui::ui_printf("  Save+Restore overhead: %.1f%%\n",
                         100.0 * (total_save_us + total_restore_us) /
                             (time_used * 1000000));
+  /* A random walk proves nothing about coverage: the receipt says so. */
+  detsim::search::audit::summary("rand", depth, root_hash, states_searched_this_run,
+                                state_set.size(), "Random", state_set);
 
   return 0;
 }

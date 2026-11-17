@@ -1,4 +1,8 @@
 #include "page_capture.h"
+#include "search/audit.h"
+#include "utils.h"
+#include "config.h"
+#include "monitor.h"
 #include "snapshot_memory.h"
 #include "resident_memory.h"
 #include <sys/mman.h>
@@ -56,6 +60,47 @@ void read_regions(pid_t pid, const std::vector<detsim::experiment::Region>& rang
 }
 }
 
+
+namespace {
+/* Read-only projection of one node's capture: what its identity would be with
+ * one slice removed. Used only by DETSIM_IDENTITY_DIAG to decide whether
+ * purifying that slice is worth anything; never feeds the search. */
+void report_identity_variants(pid_t pid, hash_type committed,
+                              const std::vector<RegionInfo>& regions,
+                              const std::vector<PageRef>& pages,
+                              std::span<const uint8_t> metadata,
+                              std::span<const uint8_t> metadata_without_phase,
+                              std::string_view maps, const user_regs_struct& regs) {
+    if (!detsim::search::audit::identity_diagnostics()) return;
+    int node = -1;
+    for (int i = 0; i < NP; ++i) if (ptmc_state.pids[i] == pid) node = i;
+    if (node < 0) return;
+    const auto hash_of = [](const std::vector<uint8_t>& bytes) {
+        return XXHash64::hash(bytes.data(), bytes.size());
+    };
+    const user_regs_struct no_regs{};
+    const std::vector<uint8_t> no_metadata;
+    using namespace detsim::search::audit;
+    identity_node_variant(node, kIdentityNoMetadata,
+        hash_of(encode_page_manifest(regions, no_metadata, maps, regs, pages)));
+    identity_node_variant(node, kIdentityNoMaps,
+        hash_of(encode_page_manifest(regions, metadata, {}, regs, pages)));
+    identity_node_variant(node, kIdentityNoRegs,
+        hash_of(encode_page_manifest(regions, metadata, maps, no_regs, pages)));
+    /* The plan's R0: the pending phase is a pure function of the queues and the
+     * modelled clock, so a state that differs only in it is the same state. The
+     * caller re-encodes the capture with the phase normalized; a node with no
+     * pending syscall is already normalized, so its committed identity is the
+     * projection. Defaulting to it keeps mixed captures comparable. */
+    if (metadata_without_phase.empty())
+        identity_node_variant(node, kIdentityNoPendingPhase, committed);
+    else
+        identity_node_variant(node, kIdentityNoPendingPhase,
+            hash_of(encode_page_manifest(regions, metadata_without_phase, maps,
+                                         regs, pages)));
+}
+}  // namespace
+
 bool page_capture_enabled() {
     const char* mode=getenv("DETSIM_SNAPSHOT_BACKEND");
     if (!mode || !strcmp(mode,"full")) return false;
@@ -66,8 +111,8 @@ bool page_capture_enabled() {
 
 hash_type save_paged_snapshot(pid_t pid, const std::vector<RegionInfo>& regions,
     std::span<const uint8_t> metadata, std::string_view maps,
-    const user_regs_struct& regs,
-    hash_type reference_hash) {
+    const user_regs_struct& regs, hash_type reference_hash,
+    std::span<const uint8_t> metadata_without_pending_phase) {
     if (sysconf(_SC_PAGESIZE)!=4096) throw std::runtime_error("Page backend requires 4KiB host pages");
     auto& store=StateStore::instance();
     auto& work=scratch[pid];
@@ -117,6 +162,8 @@ hash_type save_paged_snapshot(pid_t pid, const std::vector<RegionInfo>& regions,
         std::vector<PageRef> refs(previous.begin(), previous.end());
         const auto manifest = encode_page_manifest(resident.snapshot->regions(), metadata, maps, regs, refs);
         const auto root = store.save(manifest.data(), manifest.size(), reference_hash);
+        report_identity_variants(pid, root, resident.snapshot->regions(), refs,
+                                 metadata, metadata_without_pending_phase, maps, regs);
         const char* backend = getenv("DETSIM_SNAPSHOT_BACKEND");
         if (detsim::resident::verify() || (backend && !strcmp(backend, "verify-pages")))
             check_oracle(root);
@@ -209,6 +256,8 @@ hash_type save_paged_snapshot(pid_t pid, const std::vector<RegionInfo>& regions,
     }
     auto manifest=encode_page_manifest(descriptors,metadata,maps,regs,refs);
     const auto root=store.save(manifest.data(),manifest.size(),reference_hash);
+    report_identity_variants(pid, root, descriptors, refs, metadata,
+                             metadata_without_pending_phase, maps, regs);
     const char* mode=getenv("DETSIM_SNAPSHOT_BACKEND");
     if ((mode && !strcmp(mode,"verify-pages")) || detsim::resident::verify()) check_oracle(root);
     work.previous=std::move(next);

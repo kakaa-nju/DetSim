@@ -47,4 +47,34 @@ void normalize_thread_pool_for_restore(int node);
 void bind_thread_carriers(int node, tracee_state& state);
 void clear_thread_pools();
 
+/* Stop-barrier epochs.
+ *
+ * A full `verify_thread_pool()` proves one stopped cut: the owned thread set
+ * matches the model and every carrier is parked at a syscall boundary with the
+ * captured signal mask. That proof stays valid until a task of the node is
+ * resumed or its stop state is changed by ptrace, so an exploration cycle that
+ * restores every node, runs exactly one syscall on the cursor, and then
+ * captures every node does not have to buy the same barrier twice.
+ *
+ * `note_task_change()` is called from the only places that can resume a task or
+ * rewrite its stop state (Ptrace_right, ThreadCarrier control, PTRACE_SETSIGMASK,
+ * the rollback resume). An unknown tid voids every node, so a missed ownership
+ * lookup can only cost the optimisation, never correctness.
+ *
+ * Modes: `on` (default) skips a verified-intact barrier, `off` always verifies,
+ * `verify` always verifies *and* audits that the intact claim held. A search run
+ * in `verify` mode therefore proves, transition by transition, that no skipped
+ * barrier would have rejected its cut.
+ */
+namespace detsim::threadbarrier {
+enum class Mode { Off, On, Verify };
+Mode mode();
+/* Full verification happened and nothing resumed since. */
+void commit(int node);
+void note_task_change(pid_t tid);
+/* True when the last committed barrier for `node` is still valid. */
+bool intact(int node);
+void clear();
+}
+
 #endif
