@@ -10,8 +10,11 @@
 # A second checker can be supplied to compare two plugin builds:
 #   bash bench_configs.sh /path/to/other/check.so   -> .bench-checkb.json
 #
-# Logging is off (Loglevel 0): per-state log lines cost more than the hooks
-# this benchmark measures, and would mask the difference.
+# Loglevel is a *minimum severity*, not a verbosity knob: should_log() prints
+# when level >= loglevel, so 0 means "print everything, including TRACE".
+# Turning logging off therefore needs a value above the CRIT level (5), and 6 is
+# used here. A Loglevel of 0 costs about 2.6x in a depth-8 DFS on the raft
+# example, which is far larger than any of the effects this benchmark measures.
 set -u
 D=${DETSIM_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}
 RAFT=$D/examples/raft
@@ -21,7 +24,7 @@ python3 - "$RAFT/raft.json" "$RAFT" "$OTHER" <<'PY'
 import json, os, sys
 src, out, other = sys.argv[1], sys.argv[2], sys.argv[3]
 base = json.load(open(src))
-base["Loglevel"] = 0
+base["Loglevel"] = 6
 
 def write(name, hooks):
     c = json.loads(json.dumps(base))

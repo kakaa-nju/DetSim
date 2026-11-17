@@ -391,7 +391,7 @@ void FileSystemState::init_from_mappings(
         node.metadata.st_nlink = 1;
       }
 #endif
-      node.metadata.st_mtim = st.st_mtim;
+      node.metadata.st_mtim = S_ISDIR(st.st_mode) ? timespec{} : st.st_mtim;
       node.metadata.st_mode = st.st_mode;
       node.metadata.st_size = 0;
       if (S_ISLNK(st.st_mode)) {
@@ -1596,7 +1596,9 @@ void FileSystemState::capture_executable(const std::string& executable)
       throw std::runtime_error("Cannot capture executable path: " + path);
     VFSNode node{};
     node.metadata.st_mode = metadata.st_mode;
-    node.metadata.st_mtim = metadata.st_mtim;
+    /* Same rule as the ancestor capture below: a host directory's mtime is not
+     * a modeled input, so it is not allowed to become part of the identity. */
+    node.metadata.st_mtim = S_ISDIR(metadata.st_mode) ? timespec{} : metadata.st_mtim;
     if (S_ISLNK(metadata.st_mode)) {
       char target[4096];
       const ssize_t length = readlink(path.c_str(), target, sizeof(target));
@@ -1623,7 +1625,14 @@ void FileSystemState::capture_executable(const std::string& executable)
       if (lstat(name.c_str(), &ancestor)) throw std::runtime_error("Cannot capture executable ancestor: " + name);
       VFSNode directory{};
       directory.metadata.st_mode = ancestor.st_mode;
-      directory.metadata.st_mtim = ancestor.st_mtim;
+      /* A host directory's mtime is not a modeled input: it changes whenever
+       * anything is written to that host directory (including this tracer's own
+       * memory/ and sstate/ stores), so recording it made the state identity
+       * differ between two runs of the same target. Directory mtimes that the
+       * guest itself causes are modelled by modeled_fs_time(); ancestors start
+       * at the same zero this model uses for every synthetic directory, so a
+       * captured root is indistinguishable from an ensured one. */
+      directory.metadata.st_mtim = timespec{};
       if (S_ISLNK(ancestor.st_mode)) {
         char target[4096];
         const ssize_t length = readlink(name.c_str(), target, sizeof(target));
