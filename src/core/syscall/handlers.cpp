@@ -275,8 +275,34 @@ int handle_openat(pid_t pid, syscall_info &info) {
     return CKPT_YES;
 }
 
+/* read(2) with a user-selected outcome.
+ *
+ * A configured choose_read() may replace the whole result, e.g. return -EIO.
+ * On that branch emu_read() is skipped, so the virtual file offset is left
+ * untouched, matching a failed read(2) on Linux. */
+static long emu_read_with_choice(pid_t pid, syscall_info& info) {
+    const auto read_default = [&info]() {
+        return emu_read(info.args[0], (void *)info.args[1], info.args[2]);
+    };
+    if (ptmc_state.n_choose <= 0 || !choose_syswhat[SYS_read])
+        return read_default();
+
+    uint64_t args[6];
+    for (int i = 0; i < 6; ++i)
+        args[i] = static_cast<uint64_t>(info.args[i]);
+    choose_in in(SYS_read, pid, ptmc_state.cursor, args,
+                 ptmc_state.time[ptmc_state.cursor]);
+    choose_out *out = choose_syswhat[SYS_read](pid, ptmc_state.choose, in);
+    if (!out)
+        return read_default();
+
+    const long result = emu_apply_choose_out(pid, info, *out);
+    delete out;
+    return result;
+}
+
 int handle_read(pid_t pid, syscall_info &info) {
-    long ret = emu_read(info.args[0], (void *)info.args[1], info.args[2]);
+    long ret = emu_read_with_choice(pid, info);
     return finish_io_call(pid,info,ret);
 }
 

@@ -11,13 +11,14 @@ choose_func choose_syswhat[450] = {};
 
 /* Syscalls whose outcome detsim can materialize today. Candidate-class calls
  * (recvfrom) and the special gettimeofday path are listed separately from the
- * value-class models in emu_process_syscall(). */
+ * value-class models and read(2), which is modelled by handle_read(). */
 bool emu_syscall_choice_supported(int nr)
 {
   switch (nr)
   {
     case SYS_gettimeofday:
     case SYS_recvfrom:
+    case SYS_read:
     case SYS_clock_gettime:
     case SYS_clock_getres:
     case SYS_getrandom:
@@ -29,13 +30,15 @@ bool emu_syscall_choice_supported(int nr)
   }
 }
 
-/* Value-class syscalls whose default result is produced by their own emulation
- * in emu_process_syscall(), so a ChooseFunc branch may replace it whole.
- * analyze_choose() uses this to demand a choose_ handler for a choice point. */
+/* Value-class syscalls whose default result is produced by their own model
+ * (emu_process_syscall(), or handle_read() for read(2)), so a ChooseFunc branch
+ * may replace it whole. analyze_choose() uses this to demand a choose_ handler
+ * for a choice point. */
 bool emu_syscall_uses_generic_choice(int nr)
 {
   switch (nr)
   {
+    case SYS_read:
     case SYS_clock_gettime:
     case SYS_clock_getres:
     case SYS_getrandom:
