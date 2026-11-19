@@ -41,6 +41,9 @@ void tracee_switch_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
 uint64_t tracee_do_syscall(int pid, int SYS_which, uint64_t rdi, uint64_t rsi,
                            uint64_t rdx, uint64_t r10, uint64_t r8,
                            uint64_t r9);
+uint64_t tracee_do_syscall_in_place(int pid, int SYS_which, uint64_t rdi,
+                                    uint64_t rsi, uint64_t rdx, uint64_t r10,
+                                    uint64_t r8, uint64_t r9);
 
 #include "state/resident_memory.h"
 #include "engine/thread_pool.h"

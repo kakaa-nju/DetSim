@@ -37,7 +37,9 @@
 #include <sys/mman.h>
 #include <sys/ptrace.h>
 #include <sys/prctl.h>
+#include <linux/prctl.h>
 #include <sys/personality.h>
+#include <sched.h>
 #include <sys/syscall.h>
 #include <sys/user.h>
 #include <sys/wait.h>
@@ -508,6 +510,52 @@ static void exit_all(void)
   if (failed) _Exit(EXIT_FAILURE);
 }
 
+/* CPU mask each tracee inherited at fork. start_tracee pins the child to one
+ * CPU for the whole startup prelude; this mask puts the original policy back
+ * once the configured boundary is reached. */
+static cpu_set_t tracee_startup_affinity[NP];
+
+/* Floor of the tracer's own [stack] mapping, parsed once before any fork.
+ * start_tracee's child scrubs the exec-retained stack region above it. */
+static uintptr_t tracer_stack_floor = 0;
+
+/* The startup prelude runs real loader code on the host, and that code reads
+ * the two remaining host interfaces that ptrace cannot see: CPUID (whose
+ * CPUID(1):EBX result embeds the scheduling CPU's APIC id) and RDTSC.
+ * start_tracee therefore starts the tracee with PR_TSC_SIGSEGV on one pinned
+ * CPU, both surviving exec. This converts every prelude cycle-counter read
+ * into a SIGSEGV ptrace stop that resume_startup_syscall() resolves here; a
+ * fault from anything else is a tracee defect and fails closed. */
+static bool emulate_startup_tsc_fault(pid_t pid)
+{
+  user_regs_struct regs{};
+  if (ptrace(PTRACE_GETREGS, pid, nullptr, &regs) < 0)
+    throw std::runtime_error("Cannot read registers of a TSC-faulted tracee");
+  errno = 0;
+  const long word =
+      ptrace(PTRACE_PEEKDATA, pid, reinterpret_cast<void *>(regs.rip), nullptr);
+  if (errno)
+    throw std::runtime_error("Cannot decode a TSC-faulted tracee instruction");
+  const unsigned prefix = static_cast<unsigned>(word) & 0xffffffu;
+  unsigned length = 0;
+  if ((prefix & 0xffffu) == 0x310fu)
+    length = 2; /* rdtsc */
+  else if (prefix == 0xf9010fu)
+    length = 3; /* rdtscp */
+  else
+    return false;
+  /* The modeled machine exposes no host cycle counter: every prelude TSC read
+   * observes a fixed value, like the zeroed startup getrandom output. RDTSC
+   * touches only EDX:EAX; RDTSCP additionally reports IA32_TSC_AUX in ECX. */
+  regs.rax = 0;
+  regs.rdx = 0;
+  if (length == 3)
+    regs.rcx = 0;
+  regs.rip += length;
+  ptrace_right(PTRACE_SETREGS, pid, nullptr, &regs);
+  return true;
+}
+
 static int resume_startup_syscall(pid_t pid)
 {
   ptrace_right(PTRACE_SYSCALL, pid, nullptr, nullptr);
@@ -525,6 +573,12 @@ static int resume_startup_syscall(pid_t pid)
           " before reaching the configured boundary; check RuntimeProfile startup_syscall/startup_syscalls");
     }
     if (WSTOPSIG(status) == PTRACE_TRAP_SIG) return status;
+    if (WSTOPSIG(status) == SIGSEGV && emulate_startup_tsc_fault(pid)) {
+      /* Deterministic TSC emulation consumed the fault; resume without
+       * delivering SIGSEGV to the tracee. */
+      ptrace_right(PTRACE_SYSCALL, pid, nullptr, nullptr);
+      continue;
+    }
     try {
       auto signal = sig::process(pid, status);
       if (!sig::should_continue(signal))
@@ -628,8 +682,72 @@ syscall_info extract_one_syscall(pid_t pid)
           !guest_write_exact(pid, reinterpret_cast<void*>(ret.args[argument]), &zero, sizeof(zero)))
         throw std::runtime_error("Cannot normalize startup getcpu output");
   }
+  /* The startup fstat reports the real stdout identity: the pipe inode and
+   * the wall-clock access, modification and change times. stdio reads only
+   * the type and block size, so normalize the identifying fields the same
+   * way the getrandom bytes are zeroed; otherwise the loaded stat image
+   * survives in reused stack frames into every snapshot. */
+  if (ret.nr == SYS_fstat && ret.rval == 0)
+  {
+    const unsigned char zeros[0x30]{};
+    if (!guest_write_exact(pid, reinterpret_cast<void*>(ret.args[1] + 0x08), zeros, 8) ||
+        !guest_write_exact(pid, reinterpret_cast<void*>(ret.args[1] + 0x48), zeros, sizeof(zeros)))
+      throw std::runtime_error("Cannot normalize startup fstat output");
+  }
 
   return ret;
+}
+
+/* Hand the host policies back once the boundary syscall is reached: the CPU
+ * mask inherited at fork and a readable TSC. The mask rides on the reserved
+ * scratch page, and both injections reuse the tracee's own boundary syscall
+ * instruction, so no guest code has run since the prelude stop. */
+static void restore_startup_host_policies(int index, pid_t pid)
+{
+  constexpr uintptr_t mask_scratch = 0x800;
+  tracee_write_mem(pid, (void *)(scratch_page + mask_scratch),
+                   &tracee_startup_affinity[index], sizeof(cpu_set_t));
+  const int64_t affinity = tracee_do_syscall_in_place(
+      pid, SYS_sched_setaffinity, 0, sizeof(cpu_set_t),
+      scratch_page + mask_scratch, 0, 0, 0);
+  if (affinity != 0)
+    throw std::runtime_error("Cannot restore tracee CPU affinity after the pinned prelude");
+  const int64_t tsc = tracee_do_syscall_in_place(
+      pid, SYS_prctl, PR_SET_TSC, PR_TSC_ENABLE, 0, 0, 0, 0);
+  if (tsc != 0)
+    throw std::runtime_error("Cannot restore tracee TSC policy after the pinned prelude");
+}
+
+/* Zero the dead stack the prelude leaves below the boundary frame. The child
+ * scrubbed the exec-inherited image before exec, so this region now holds the
+ * prelude's own dead frames; they are deterministic in principle, but the
+ * scrub keeps any future host-dependent prelude write out of the snapshot
+ * identity instead of trusting that. The 128-byte red zone below RSP stays
+ * untouched: leaf data there is preserved across plain syscalls. */
+static void scrub_inherited_dead_stack(pid_t pid)
+{
+  std::vector<maps_item> items;
+  {
+    auto maps = fileutils::open_cfile("/proc/" + std::to_string(pid) + "/maps", "r");
+    if (!maps)
+      throw std::runtime_error("Cannot open tracee mappings for dead-stack scrub");
+    get_maps_item(items, maps.get());
+  }
+  const maps_item *stack = nullptr;
+  for (const auto &item : items)
+    if (!strcmp(item.name, "[stack]")) { stack = &item; break; }
+  if (!stack)
+    throw std::runtime_error("Tracee has no main stack mapping to scrub");
+  user_regs_struct regs{};
+  if (ptrace(PTRACE_GETREGS, pid, nullptr, &regs) < 0)
+    throw std::runtime_error("Cannot read tracee stack pointer for dead-stack scrub");
+  if (regs.rsp <= stack->start || regs.rsp - 128 <= stack->start) return;
+  const uintptr_t ceiling = regs.rsp - 128;
+  const size_t length = ceiling - stack->start;
+  const std::vector<uint8_t> zeros(length, 0);
+  if (!guest_write_exact(pid, reinterpret_cast<void *>(stack->start),
+                         zeros.data(), zeros.size()))
+    throw std::runtime_error("Cannot scrub inherited dead stack below tracee frames");
 }
 
 static void init_tracee_state(int index)
@@ -683,6 +801,8 @@ static void init_tracee_state(int index)
   tracee_reserve_temp_page(pid);
   tracee_write_mem(pid, (void *)(scratch_page + 0xff0),
                    "\x0f\x05\x0f\x05\x0f\x05\x0f\x05", 8);
+  restore_startup_host_policies(index, pid);
+  scrub_inherited_dead_stack(pid);
   capture_process_kernel_state(pid,index);
   adopt_clear_child_tid(index,pid);
   adopt_thread_robust_list(index,pid);
@@ -700,6 +820,42 @@ static void start_tracee(int id)
     const long verified = applied < 0 ? -1 : syscall(SYS_personality, 0xffffffffUL);
     if (verified < 0 || !(verified & ADDR_NO_RANDOMIZE)) {
       static constexpr char message[] = "Cannot establish RuntimeProfile fixed_layout before exec\n";
+      (void)write(STDERR_FILENO, message, sizeof(message) - 1);
+      _exit(125);
+    }
+  }
+  /* Scrub the stack image this tracee will retain across exec. fork handed
+   * the child the tracer's own stack, and exec rewrites only the top (argv,
+   * environment, auxiliary vector); prelude frames that leave slots
+   * uninitialized would preserve the per-run tracer garbage into every
+   * snapshot. Zero from the [stack] mapping floor (bounded to 256KiB) up to
+   * 128 bytes below the real stack pointer: everything below that line is
+   * dead, while the red zone and this frame's call machinery stay live. The
+   * child's own fixed path from here to exec leaves only deterministic
+   * bytes behind. */
+  {
+    uintptr_t stack_pointer;
+    asm("mov %%rsp, %0" : "=r"(stack_pointer));
+    const uintptr_t ceiling = (stack_pointer - 128) & ~uintptr_t(0xf);
+    const uintptr_t floor_limit = ceiling - 256 * 1024;
+    const uintptr_t floor =
+        tracer_stack_floor > floor_limit ? tracer_stack_floor : floor_limit;
+    if (floor < ceiling)
+      memset(reinterpret_cast<void *>(floor), 0, ceiling - floor);
+  }
+  /* Deterministic startup CPU/TSC policy. Both settings cross exec: the
+   * prelude's CPUID(1) probes always observe CPU 0's APIC id, and every
+   * prelude RDTSC raises SIGSEGV for emulate_startup_tsc_fault() to
+   * normalize. The tracer restores both policies at the configured boundary
+   * syscall. */
+  {
+    cpu_set_t pinned;
+    CPU_ZERO(&pinned);
+    CPU_SET(0, &pinned);
+    if (prctl(PR_SET_TSC, PR_TSC_SIGSEGV) != 0 ||
+        sched_setaffinity(0, sizeof(pinned), &pinned) != 0) {
+      static constexpr char message[] =
+          "Cannot establish deterministic startup CPU/TSC policy before exec\n";
       (void)write(STDERR_FILENO, message, sizeof(message) - 1);
       _exit(125);
     }
@@ -746,7 +902,25 @@ int state_initialization()
   if (sigprocmask(SIG_BLOCK,&blocked,&previous_mask))
     throw std::runtime_error("Cannot protect tracee startup from SIGTERM");
   try {
+    /* Anchor the child's pre-exec stack scrub: parse the tracer's own main
+     * stack mapping once, in the parent, so the fork child never needs file
+     * I/O. */
+    {
+      auto maps = fileutils::open_cfile("/proc/self/maps", "r");
+      if (!maps)
+        throw std::runtime_error("Cannot open tracer mappings for startup stack scrub");
+      std::vector<maps_item> items;
+      get_maps_item(items, maps.get());
+      for (const auto &item : items)
+        if (!strcmp(item.name, "[stack]")) { tracer_stack_floor = item.start; break; }
+      if (!tracer_stack_floor)
+        throw std::runtime_error("Tracer has no main stack mapping for startup scrub");
+    }
     for (int i=0;i<NP;++i) {
+      /* The pinned prelude hands this mask back at the boundary syscall. */
+      if (sched_getaffinity(0, sizeof(tracee_startup_affinity[i]),
+                           &tracee_startup_affinity[i]) != 0)
+        throw std::runtime_error("Cannot preserve tracee CPU affinity across the pinned startup prelude");
       const pid_t child=fork();
       if (child<0) throw std::runtime_error("Cannot fork tracee");
       if (!child) {
