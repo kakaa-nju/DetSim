@@ -381,6 +381,12 @@ static void parse_type_info(Dwarf_Debug dbg, Dwarf_Die type_die,
             if (!pointed_name.empty())
             {
               info.name = pointed_name + " *";
+              /* Consumers dereference one level through element_type (the array
+               * branch above fills it the same way). Leaving it empty made a
+               * pointer's pointee unnameable, so `p->field` failed whenever the
+               * pointer type had been parsed from DWARF before any name-based
+               * lookup described it. */
+              info.element_type = pointed_name;
             }
             else
             {
