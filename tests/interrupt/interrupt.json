@@ -1,5 +1,9 @@
 {
   "Loglevel": 0,
   "Nodes": 1,
-  "Tracee": [["./interrupt"]]
+  "Tracee": [["./interrupt"]],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

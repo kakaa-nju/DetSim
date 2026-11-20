@@ -7,5 +7,9 @@
       "Path": "/dev/urandom",
       "Type": "urandom"
     }
-  ]
+  ],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

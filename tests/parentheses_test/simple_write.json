@@ -15,5 +15,9 @@
     "compression_level": 1,
     "enable_malloc_trim": true,
     "malloc_trim_threshold_mb": 64
+  },
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 10
   }
 }

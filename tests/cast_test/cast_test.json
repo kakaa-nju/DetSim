@@ -9,5 +9,9 @@
     "tracee0(((hidden_struct*)g_container.hidden_data)->secret_name[0] == 'H')",
     "tracee0(((point*)g_generic_ptr)->x == 10)",
     "tracee0(((point*)g_generic_ptr)->y == 20)"
-  ]
+  ],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

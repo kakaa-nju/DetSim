@@ -7,5 +7,9 @@
   "FSMap": [
     { "Host": "./fs_root", "Target": "/" }
   ],
-  "Checkpoint": ["open","write","close"]
+  "Checkpoint": ["open","write","close"],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

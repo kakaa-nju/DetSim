@@ -3,5 +3,9 @@
   "Nodes": 3,
   "Tracee": [["./exit", "0"],["./exit", "1"],["./exit", "2"]],
   "Addr": ["192.168.0.1","192.168.0.2","192.168.0.3"],
-  "Checkpoint": ["exit"]
+  "Checkpoint": ["exit"],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 10
+  }
 }

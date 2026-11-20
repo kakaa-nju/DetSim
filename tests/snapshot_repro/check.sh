@@ -31,6 +31,7 @@ for name in dyn stat; do
   "Tracee": [["./${name}_hello", "0"]],
   "Addr": ["192.168.0.1"],
   "RuntimeProfile": {
+    "fixed_layout": true,
     "startup_syscall": $([ "$name" = stat ] && echo 10 || echo 11)
   },
   "StateStore": {"packed_storage_path": "store$run"}

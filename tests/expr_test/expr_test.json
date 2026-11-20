@@ -19,5 +19,9 @@
     "tracee0(g_rect_ptr->br.x == 100)",
     "tracee0(g_head->next->data == 2)",
     "tracee0(g_head->next->next->data == 3)"
-  ]
+  ],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

@@ -4,5 +4,9 @@
   "Tracee": [
     ["./mt"]
   ],
-  "Checkpoint": ["write"]
+  "Checkpoint": ["write"],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

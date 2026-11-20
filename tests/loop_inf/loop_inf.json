@@ -7,6 +7,10 @@
     ["./loop_inf", "2"]
   ],
   "WorkingDir": "/",
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 10
+  },
   "Addr": ["192.168.0.1", "192.168.0.2", "192.168.0.3"],
   "Checkpoint": ["write"]
 }

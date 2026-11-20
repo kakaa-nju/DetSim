@@ -10,6 +10,7 @@
   "UserCheck": "./check.so",
   "UserState": "./check.so",
   "RuntimeProfile": {
+    "fixed_layout": true,
     "startup_syscall": 10
   }
 }

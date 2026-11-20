@@ -13,6 +13,7 @@
     { "syscall": 96, "choose": 1 }
   ],
   "RuntimeProfile": {
+    "fixed_layout": true,
     "startup_syscall": 10
   }
 }

@@ -2,5 +2,9 @@
   "Loglevel": 0,
   "Nodes": 3,
   "Tracee": [["./sigsegv", "0"],["./sigsegv", "1"],["./sigsegv", "2"]],
-  "Addr": ["192.168.0.1","192.168.0.2","192.168.0.3"]
+  "Addr": ["192.168.0.1","192.168.0.2","192.168.0.3"],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 10
+  }
 }

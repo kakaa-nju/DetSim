@@ -12,5 +12,9 @@
     "tracee0(g_container.rects[0]->bottom_right.x == 100)",
     "tracee0(g_tree_root.container->name[0] == 't')",
     "tracee0(g_node_list->next->value == 2)"
-  ]
+  ],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

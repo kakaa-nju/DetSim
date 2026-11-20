@@ -5,5 +5,9 @@
   "Includes": ["./member.h"],
   "Addr": ["192.168.0.1"],
   "Assertions": ["tracee0:test_member->c.s == 114514"],
-  "Checkpoint": ["write"]
+  "Checkpoint": ["write"],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

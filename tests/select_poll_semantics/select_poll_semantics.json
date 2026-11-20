@@ -2,5 +2,9 @@
   "Loglevel": 0,
   "Nodes": 1,
   "Tracee": [["./select_poll_semantics"]],
-  "Checkpoint": ["read", "write", "pipe", "pipe2", "poll"]
+  "Checkpoint": ["read", "write", "pipe", "pipe2", "poll"],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

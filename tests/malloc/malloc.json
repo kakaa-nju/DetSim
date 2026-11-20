@@ -3,5 +3,9 @@
   "Nodes": 3,
   "Tracee": [["./malloc", "0"], ["./malloc", "0"], ["./malloc", "0"]],
   "Addr": ["192.168.0.1","192.168.0.2","192.168.0.3"],
-  "Checkpoint": ["brk","mmap","munmap","write"]
+  "Checkpoint": ["brk","mmap","munmap","write"],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

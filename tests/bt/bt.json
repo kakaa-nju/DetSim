@@ -2,5 +2,9 @@
   "Loglevel": 2,
   "Nodes": 1,
   "Tracee": [["./bt", "0"]],
-  "Addr": ["192.168.0.1"]
+  "Addr": ["192.168.0.1"],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }

@@ -2,5 +2,9 @@
   "Loglevel": 0,
   "Nodes": 1,
   "Tracee": [["./mt_async"]],
-  "Checkpoint": ["read", "write", "pipe", "pipe2"]
+  "Checkpoint": ["read", "write", "pipe", "pipe2"],
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 11
+  }
 }
