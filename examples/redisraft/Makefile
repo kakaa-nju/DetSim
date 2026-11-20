@@ -19,12 +19,8 @@ RAFT_LIB = ./raft/libraft.a
 
 all: raft plugins
 
-# -no-pie: DetSim's symbol service resolves globals through fixed link-time
-# addresses. A PIE keeps DWARF/ELF at vaddr offsets (e.g. raft at 0x100b0) while
-# the tracee runs at load_bias + offset, so check()/ChooseFunc reads miss the
-# captured regions. A non-PIE image makes those addresses exact.
 raft: $(RAFT_LIB) raft/main.c
-	$(CC) $(CFLAGS) -no-pie raft/main.c $(RAFT_LIB) -o raft/raft
+	$(CC) $(CFLAGS) raft/main.c $(RAFT_LIB) -o raft/raft
 
 $(RAFT_LIB):
 	$(MAKE) -C raft static
