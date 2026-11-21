@@ -54,15 +54,19 @@ struct basic *g_basic_ptr = &g_basic;
 /* Double pointer - initialized to point to g_int_ptr */
 int **g_double_ptr = &g_int_ptr;
 
-/* Linked list node */
+/* Linked list node.
+ *
+ * The chain is expressed by static initializers (declared tail-first) so the
+ * assertions hold from exec onwards: main() runs no setup before the trigger
+ * syscall, and a state captured before that setup would not satisfy them. */
 struct node {
     int data;
     struct node *next;
 };
-struct node g_node1 = {1, NULL};
-struct node g_node2 = {2, NULL};  /* Will be fixed in main */
-struct node g_node3 = {3, NULL};  /* Will be fixed in main */
-struct node *g_head = NULL;       /* Will be fixed in main */
+struct node g_node3 = {3, NULL};
+struct node g_node2 = {2, &g_node3};
+struct node g_node1 = {1, &g_node2};
+struct node *g_head = &g_node1;
 
 /* Complex nested structure */
 struct point {
@@ -77,18 +81,12 @@ struct rect g_rect = {{10, 20}, {100, 200}, "rectangle"};
 struct rect *g_rect_ptr = &g_rect;
 
 int main() {
-    /* Setup linked list - nodes are defined in reverse order in C */
-    /* We need to set up the chain: g_node1 -> g_node2 -> g_node3 */
-    g_node1.next = &g_node2;
-    g_node2.next = &g_node3;
-    g_head = &g_node1;
-    
-    /* Setup double pointer - must be done after g_int_ptr is defined */
-    g_double_ptr = &g_int_ptr;
-    
+    /* Everything the assertions read is established by the static initializers
+     * above, so no state between exec and this write is missing data. */
+
     /* Trigger syscall for debugger */
     write(1, "expr_test\n", 10);
-    
+
     return 0;
 }
 
