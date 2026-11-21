@@ -52,4 +52,12 @@ grep -qF "user_counter decreased for node 0: 3 -> 2" "$here/violation.log" ||
     { tail -5 "$here/violation.log" >&2; fail "oracle breach was not reported"; }
 echo "PASS: regressing counter, checker reports 3 -> 2"
 
+# Direction 3: a DFS rewind restores the shadow, so a checkpoint reached again
+# after a rollback must not look like a regression.
+(cd "$here" && DETSIM_SNAPSHOT_BACKEND=pages timeout 180 \
+    "$tracer" -n -b cmds.txt -c rewind.json) > "$here/rewind.log" 2>&1 || true
+grep -qF "[CHECK FAILED]" "$here/rewind.log" &&
+    { tail -5 "$here/rewind.log" >&2; fail "rewind run raised a check failure"; }
+echo "PASS: rewind restores the shadow"
+
 rm -rf "$here"/memory "$here"/sstate
