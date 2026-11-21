@@ -5,6 +5,8 @@
 #include "debug.h"
 #include "dwarf_info.h"
 #include "expr_ast.hpp"
+#include "runtime_profile.h"
+#include <array>
 #include <atomic>
 #include <cctype>
 #include <cstring>
@@ -111,6 +113,14 @@ bool dwarf_main_image_contains(uint64_t address) {
   return false;
 }
 static int elf_symbols_loaded_for_pid = -1;
+
+/* ELF_MIN_ALIGN of the loader: max(PAGE_SIZE, ELF_EXEC_PAGESIZE). DetSim models
+ * x86-64 Linux, where both are 4 KiB; the page backends already require it. */
+constexpr uintptr_t page_size = 4096;
+
+/* The symbol tables are rebased in place, so relocating twice would add the load
+ * bias twice. Reset by dwarf_cleanup() together with the tables themselves. */
+static bool symbols_relocated = false;
 
 /* Symbol/type invalidation epoch. The service is serial-control-thread state;
  * the atomic only lets observation code read the epoch safely. */
@@ -856,6 +866,7 @@ void dwarf_cleanup(void)
   current_elf_fixed = false;
   current_elf_ranges.clear();
   elf_symbols_loaded_for_pid = -1;
+  symbols_relocated = false;
   DwarfLocalCache::instance().clear();
   current_frame_id = 0;
   current_stack_trace.clear();
@@ -926,19 +937,27 @@ static std::unordered_map<std::string, uintptr_t> parse_proc_maps(int pid)
   return libraries;
 }
 
-/* Load symbols from a single ELF file (executable or library)
- * base_addr: runtime load address (0 for non-PIE executables) */
-static void load_symbols_from_file(const char *path, uintptr_t base_addr)
+/* Load symbols from a single ELF file (executable or library).
+ *
+ * base_addr: relocation to add to every st_value.
+ * link_time_vaddrs: record link-time vaddrs instead of runtime addresses.
+ *
+ * A main image is loaded with link_time_vaddrs = true before any tracee
+ * exists (see dwarf_relocate_symbols()). Without that mode an ET_DYN image
+ * would be rejected outright by the base_addr == 0 guard below, leaving the
+ * ELF fallback permanently empty for every PIE. */
+static bool load_symbols_from_file(const char *path, uintptr_t base_addr,
+                                   bool link_time_vaddrs = false)
 {
   int fd = open(path, O_RDONLY);
   if (fd < 0)
-    return;
+    return false;
 
   Elf *e = elf_begin(fd, ELF_C_READ, nullptr);
   if (!e)
   {
     close(fd);
-    return;
+    return false;
   }
 
   /* Check if this is a PIE or shared library (needs base address adjustment) */
@@ -951,12 +970,14 @@ static void load_symbols_from_file(const char *path, uintptr_t base_addr)
     needs_relocation = (ehdr.e_type == ET_DYN);
   }
 
-  /* If base_addr is 0 but needs relocation, we can't resolve symbols */
-  if (needs_relocation && base_addr == 0)
+  /* Without a relocation an ET_DYN image cannot be resolved to runtime
+   * addresses. Link-time mode is the deliberate exception: the vaddrs it
+   * records are rebased later, once the tracee's load bias is known. */
+  if (needs_relocation && base_addr == 0 && !link_time_vaddrs)
   {
     elf_end(e);
     close(fd);
-    return;
+    return false;
   }
 
   size_t shstrndx;
@@ -964,7 +985,7 @@ static void load_symbols_from_file(const char *path, uintptr_t base_addr)
   {
     elf_end(e);
     close(fd);
-    return;
+    return false;
   }
 
   /* Create library entry */
@@ -1041,7 +1062,8 @@ static void load_symbols_from_file(const char *path, uintptr_t base_addr)
 
       elf_symbol esym;
       esym.name = sym_name;
-      /* Calculate runtime address: base + offset */
+      /* Runtime address: relocation + st_value (base_addr is 0 in link-time
+       * mode, so the vaddr is recorded verbatim for later rebasing). */
       esym.address = base_addr + (uintptr_t)sym.st_value;
       esym.size = (size_t)sym.st_size;
       esym.type = type;
@@ -1060,9 +1082,12 @@ static void load_symbols_from_file(const char *path, uintptr_t base_addr)
   {
     mark_symbol_change();
     elf_library_cache[path] = std::move(lib_syms);
-    LOG_INFO("ELF: Loaded %zu symbols from %s (base=0x%lx)",
-             elf_library_cache[path].symbols.size(), path, base_addr);
+    LOG_INFO("ELF: Loaded %zu symbols from %s (base=0x%lx%s)",
+             elf_library_cache[path].symbols.size(), path, base_addr,
+             link_time_vaddrs ? ", link-time vaddrs" : "");
+    return true;
   }
+  return false;
 }
 
 /* Load symbols from main executable */
@@ -1073,29 +1098,45 @@ static std::string real_path(const char *path)
   return path ? path : "";
 }
 
-/* Runtime base of the tracee's main executable image: the first mapping of the
- * same file in /proc/<pid>/maps. Non-PIE images retain base 0. */
-static uintptr_t tracee_image_base(const char *executable, bool fixed)
+/* /proc appends " (deleted)" once the backing file is unlinked, after which
+ * realpath() fails. Strip it so a deleted-but-mapped image still matches the
+ * configured path instead of silently looking like an unrelated mapping. */
+static std::string map_path(const char *path)
 {
-  if (fixed || !executable || !*executable) return 0;
-  const std::string wanted = real_path(executable);
-  for (int node = 0; node < NP; ++node) {
-    const pid_t pid = ptmc_state.pids[node];
-    if (pid <= 0) continue;
-    const std::string maps = "/proc/" + std::to_string(pid) + "/maps";
-    FILE *fp = fopen(maps.c_str(), "r");
-    if (!fp) continue;
-    char line[1024];
-    uintptr_t base = 0;
-    while (fgets(line, sizeof(line), fp)) {
-      uintptr_t start = 0; char path[512] = {0};
-      if (sscanf(line, "%lx-%*x %*s %*s %*s %*s %511s", &start, path) >= 1 && path[0] == '/' &&
-          real_path(path) == wanted) { base = start; break; }
-    }
-    fclose(fp);
-    if (base) return base;
+  std::string text = path ? path : "";
+  static const std::string deleted = " (deleted)";
+  if (text.size() > deleted.size() &&
+      text.compare(text.size() - deleted.size(), deleted.size(), deleted) == 0)
+    text.resize(text.size() - deleted.size());
+  return text;
+}
+
+static bool same_mapped_file(const char *mapped, const std::string &wanted)
+{
+  if (!mapped || mapped[0] != '/') return false;
+  const std::string resolved = map_path(mapped);
+  return resolved == wanted || real_path(resolved.c_str()) == wanted;
+}
+
+/* First mapping of `wanted` in /proc/<pid>/maps, or 0 when the file is absent.
+ * The kernel maps that file's ELF_MIN_LOAD there, so `start - ELF_MIN_LOAD` is
+ * the image's load bias (see dwarf_relocate_symbols()). */
+static uintptr_t first_mapping_start(pid_t pid, const std::string &wanted)
+{
+  if (pid <= 0) return 0;
+  const std::string maps = "/proc/" + std::to_string(pid) + "/maps";
+  FILE *fp = fopen(maps.c_str(), "r");
+  if (!fp) return 0;
+  char line[1024];
+  uintptr_t start = 0;
+  while (fgets(line, sizeof(line), fp)) {
+    uintptr_t candidate = 0;
+    char path[512] = {0};
+    if (sscanf(line, "%lx-%*x %*s %*s %*s %*s %511s", &candidate, path) >= 1 &&
+        same_mapped_file(path, wanted)) { start = candidate; break; }
   }
-  return 0;
+  fclose(fp);
+  return start;
 }
 
 static void load_elf_symbols(const char *executable)
@@ -1132,12 +1173,56 @@ static void load_elf_symbols(const char *executable)
     close(image_fd);
   }
 
-  /* A PIE image needs its actual runtime base for symbol addresses. */
-  const uintptr_t base = tracee_image_base(executable, current_elf_fixed);
-  load_symbols_from_file(executable, base);
+  /* Load at link-time vaddrs: no tracee exists yet. dwarf_relocate_symbols()
+   * rebases these addresses once the image is mapped. The link-time mode is
+   * required here: without it an ET_DYN main image is refused outright, which
+   * is why the ELF fallback used to be empty for every PIE. */
+  if (!load_symbols_from_file(executable, 0, /*link_time_vaddrs=*/true))
+    LOG_WARN("ELF: no symbols recorded for %s; only DWARF globals remain", executable);
 }
 
 /* Load symbols from all shared libraries mapped in process */
+static bool is_main_image(const std::string &path)
+{
+  /* /proc reports resolved paths while the configuration keeps the spelling the
+   * user typed ("./raft/raft"), so compare the resolved forms. A deleted image
+   * keeps its mapping but loses realpath(), hence map_path()'s normalization. */
+  if (path.empty() || current_elf_path.empty()) return false;
+  return same_mapped_file(path.c_str(), real_path(current_elf_path.c_str()));
+}
+
+/* Every tracee must map a cached shared library at the same address, because
+ * elf_library_cache stores one address per symbol name. A divergence means the
+ * run has per-node library layouts (ASLR active without fixed_layout), which
+ * this service cannot represent; resolve the error here instead of reading one
+ * node's library through another node's addresses. */
+static void verify_shared_library_layout()
+{
+  if (elf_library_cache.empty()) return;
+  std::unordered_map<std::string, uintptr_t> reference;
+  int reference_node = -1;
+  for (int node = 0; node < NP; ++node) {
+    const pid_t pid = ptmc_state.pids[node];
+    if (pid <= 0) continue;
+    auto libraries = parse_proc_maps(pid);
+    if (reference_node < 0) {
+      reference = std::move(libraries);
+      reference_node = node;
+      continue;
+    }
+    for (const auto &[path, base] : libraries) {
+      if (!elf_library_cache.count(path)) continue;
+      const auto found = reference.find(path);
+      if (found != reference.end() && found->second != base)
+        throw std::runtime_error(fmt::format(
+            "ELF: {} is mapped at 0x{:x} in node{} but 0x{:x} in node{}; one symbol "
+            "table cannot describe both. Enable RuntimeProfile fixed_layout or "
+            "disable address-space layout randomization.",
+            path, found->second, reference_node, base, node));
+    }
+  }
+}
+
 static void load_shared_library_symbols(int pid)
 {
   mark_symbol_change();
@@ -1145,28 +1230,11 @@ static void load_shared_library_symbols(int pid)
 
   for (const auto &[path, base_addr] : libraries)
   {
-    /* Skip main executable (already loaded) */
-    if (path == current_elf_path)
-    {
-      /* Update base address for main executable if it's PIE */
-      auto it = elf_library_cache.find(path);
-      if (it != elf_library_cache.end())
-      {
-        /* Check if we need to update addresses */
-        if (it->second.base_addr == 0 && base_addr != 0)
-        {
-          /* This is a PIE executable, update symbol addresses */
-          for (auto &sym_pair : it->second.symbols)
-          {
-            sym_pair.second.address += base_addr;
-          }
-          it->second.base_addr = base_addr;
-          LOG_INFO("ELF: Updated base address for %s to 0x%lx", path.c_str(),
-                   base_addr);
-        }
-      }
+    /* The main image is owned by load_elf_symbols()/dwarf_relocate_symbols().
+     * Loading it here would cache base + vaddr, which only matches images whose
+     * ELF_MIN_LOAD is 0 and would silently discard the DWARF rebasing. */
+    if (is_main_image(path))
       continue;
-    }
 
     /* Skip if already loaded */
     if (elf_library_cache.find(path) != elf_library_cache.end())
@@ -1242,6 +1310,125 @@ uintptr_t dwarf_get_global_addr(const char *varname)
    * This is a lazy loading approach - we load shared library symbols
    * only when needed and cache them */
   return 0;
+}
+
+/* Rebase the symbol service from the link-time layout to the tracee's actual one.
+ *
+ * dwarf_init() runs before any tracee is forked, so it records DW_OP_addr values,
+ * both symbol tables and the image ranges as link-time vaddrs. The kernel then
+ * loads the image at a load bias: fs/binfmt_elf.c keeps
+ *     load_bias = ELF_PAGESTART(load_bias - p_vaddr_first)
+ * and maps each segment at load_bias + p_vaddr, so
+ *     runtime(st_value) = load_bias + st_value
+ *     load_bias         = first_mapping_start - ELF_PAGESTART(lowest p_vaddr).
+ * Both halves matter. Using the raw lowest p_vaddr instead of its page-aligned
+ * form is only correct for page-aligned images, and trusting a parsed-out 0 as
+ * ELF_MIN_LOAD turns any parse failure into a silent "relocated by 0".
+ *
+ * Without this step every symbol read lands in unmapped guest space, and a miss
+ * on a captured state surfaces as "Snapshot read outside captured regions".
+ *
+ * The symbol service holds one address per name, so all tracees must share the
+ * image layout. That is the case for fixed_layout profiles and for hosts with
+ * Address Space Layout Randomization disabled; divergent layouts are rejected
+ * here rather than resolved to whichever node was scanned first. */
+void dwarf_relocate_symbols(void)
+{
+  if (current_elf_path.empty()) return;
+  /* The tables are rebased in place; a second call would double the bias. */
+  if (symbols_relocated) {
+    LOG_WARN("ELF: dwarf_relocate_symbols() already ran; ignoring the repeat");
+    return;
+  }
+  const std::string wanted = real_path(current_elf_path.c_str());
+
+  /* ELF_MIN_LOAD is the page-aligned-down lowest PT_LOAD vaddr, exactly the term
+   * the kernel subtracts. Refuse to continue when the file cannot be read:
+   * assuming 0 would silently place every symbol at its vaddr. */
+  uintptr_t elf_min_load = 0;
+  bool have_load = false;
+  {
+    int fd = open(current_elf_path.c_str(), O_RDONLY);
+    if (fd < 0) {
+      LOG_ERROR("ELF: cannot reopen %s to derive ELF_MIN_LOAD; symbols stay at link-time vaddrs",
+                current_elf_path.c_str());
+      return;
+    }
+    Elf *image = elf_begin(fd, ELF_C_READ, nullptr);
+    GElf_Ehdr header{};
+    size_t count = 0;
+    if (image && gelf_getehdr(image, &header) && elf_getphdrnum(image, &count) == 0) {
+      for (size_t i = 0; i < count; ++i) {
+        GElf_Phdr segment{};
+        if (!gelf_getphdr(image, i, &segment) || segment.p_type != PT_LOAD) continue;
+        const uintptr_t page_start = segment.p_vaddr & ~uintptr_t(page_size - 1);
+        if (!have_load || page_start < elf_min_load) { elf_min_load = page_start; have_load = true; }
+      }
+    }
+    if (image) elf_end(image);
+    close(fd);
+  }
+  if (!have_load) {
+    LOG_ERROR("ELF: %s has no readable PT_LOAD; symbols stay at link-time vaddrs",
+              current_elf_path.c_str());
+    return;
+  }
+
+  /* Collect each node's load bias. A missing mapping is never treated as bias 0,
+   * and layouts that differ between nodes cannot be represented by one table. */
+  std::array<uintptr_t, NP> biases{};
+  uintptr_t bias = 0;
+  bool resolved = false;
+  for (int node = 0; node < NP; ++node) {
+    const uintptr_t start = first_mapping_start(ptmc_state.pids[node], wanted);
+    if (!start) continue;
+    biases[node] = start - elf_min_load;
+    if (!resolved) { bias = biases[node]; resolved = true; }
+    else if (biases[node] != bias) {
+      throw std::runtime_error(fmt::format(
+          "ELF: {} is mapped at different addresses across tracees (node{} bias 0x{:x} "
+          "vs 0x{:x}); symbol resolution needs one shared image layout. Enable "
+          "RuntimeProfile fixed_layout or run with ASLR disabled.",
+          current_elf_path, node, bias, biases[node]));
+    }
+  }
+  if (!resolved) {
+    LOG_WARN("ELF: %s is not mapped in any tracee; symbols stay at link-time vaddrs",
+             current_elf_path.c_str());
+    return;
+  }
+
+  /* A fixed_layout run promises a deterministic layout, not the link-time one:
+   * a PIE image is placed at the kernel's ELF_ET_DYN_BASE even with
+   * randomization off, so a non-zero bias is expected and stays reproducible.
+   * Registering the actual layout is the point; only an unstable bias would be
+   * a problem, and the cross-node check above has already rejected that. */
+  if (detsim::runtime_profile().fixed_layout && bias != 0)
+    LOG_INFO("ELF: fixed_layout image %s is placed at 0x%lx instead of its link-time "
+             "vaddrs (PIE load bias); the placement is deterministic while "
+             "randomization is off",
+             current_elf_path.c_str(), bias + elf_min_load);
+
+  for (auto &[name, var] : global_vars) var.address += bias;
+  if (auto it = elf_library_cache.find(current_elf_path); it != elf_library_cache.end())
+    for (auto &[symbol, entry] : it->second.symbols) entry.address += bias;
+  for (auto &range : current_elf_ranges) {
+    range.first += bias;
+    range.second += bias;
+  }
+  /* Shared libraries always link from vaddr 0, so their base is the mapping
+   * start itself. Their addresses are recorded for the first node: the loop
+   * above has already established that every node shares this layout. */
+  for (int node = 0; node < NP; ++node)
+    if (ptmc_state.pids[node] > 0) {
+      dwarf_load_shared_library_symbols(ptmc_state.pids[node]);
+      break;
+    }
+  verify_shared_library_layout();
+  mark_symbol_change();
+  symbols_relocated = true;
+  LOG_INFO("ELF: Relocated %s symbols by 0x%lx (ELF_MIN_LOAD=0x%lx)",
+           current_elf_path.c_str(), bias, elf_min_load);
 }
 
 /* Load shared library symbols for a specific PID

@@ -8,6 +8,7 @@
 #include "user_plugin.h"
 #include "search/compatibility.h"
 #include "common.h"
+#include "dwarf_info.h"
 #include "runtime_profile.h"
 #include "engine/thread_pool.h"
 #include "engine/pending_syscall.h"
@@ -966,6 +967,14 @@ int state_initialization()
   struct syscall_info syscall_info[NP][MAX_THREADS_PER_PROCESS];
   memset(syscall_info, 0, sizeof(syscall_info));
   ptmc_state.cursor = -1;
+
+  /* The tracees now exist in their final address layout. dwarf_init() ran
+   * before them, so its main-image symbols still hold link-time vaddrs; rebase
+   * them before the first sys_state is captured, and therefore before any
+   * assertion, check or choice resolves a name. This must happen before
+   * check_assertions() below: a PIE symbol observed through its link-time vaddr
+   * misses the captured ranges. */
+  dwarf_relocate_symbols();
 
   sys_state first_state(syscall_info, nullptr, false);
   first_state.model_identity = ptmc_state.model_identity;

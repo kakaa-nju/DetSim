@@ -43,3 +43,13 @@ snapshot_repro/seq1
 snapshot_repro/seq2
 snapshot_repro/sstate1
 snapshot_repro/sstate2
+symbol_relocation/sym_pie
+symbol_relocation/sym_pie_stripped
+symbol_relocation/sym_exec
+symbol_relocation/cmds.txt
+symbol_relocation/memory
+symbol_relocation/sstate
+symbol_relocation/store_pie
+symbol_relocation/store_stripped
+symbol_relocation/store_exec
+symbol_relocation/*.log

@@ -95,6 +95,19 @@ uint64_t dwarf_symbol_generation(void);
 /* Legacy compatibility wrapper - uses tracee[0].executable */
 void init_dwarf(void);
 
+/* Rebase the symbol service onto the tracee's real address layout.
+ *
+ * dwarf_init() parses the image before any tracee exists, so DWARF DW_OP_addr
+ * values and both symbol tables still hold link-time vaddrs. Once the tracees
+ * are stopped at the prelude boundary, this moves every main-image symbol to
+ * the address the tracee actually uses and loads shared-library symbols from
+ * those live mappings. The move is derived from the file's first /proc mapping
+ * minus its ELF_MIN_LOAD, so PIE and fixed_layout images follow the same rule;
+ * a tracee that did not reach the layout its profile promised is reported
+ * instead of silently observed through unmapped addresses. Bumps the symbol
+ * epoch, invalidating caches that already resolved a name. */
+void dwarf_relocate_symbols(void);
+
 /* Load shared library symbols for a specific PID (for dynamic linking) */
 void dwarf_load_shared_library_symbols(int pid);
 
