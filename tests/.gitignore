@@ -2,7 +2,6 @@ brk/brk
 bt/bt
 cast_test/cast_test
 complex/complex
-devices/devices
 exception/exit
 exception/sigabrt
 exception/sigsegv
