@@ -5,6 +5,8 @@
 #include "transition_profile.h"
 #include "search/audit.h"
 #include <array>
+#include <cctype>
+#include <string_view>
 #include "user_plugin.h"
 #include "search/compatibility.h"
 #include "common.h"
@@ -201,6 +203,28 @@ int exec_once(const sys_state &s, syscall_info &info)
  * caller prints them once the state has been committed. The hash a diagnostic
  * names has to be the hash the state is stored under, and that identity only
  * exists after the post-check UserState capture has been folded in. */
+/* Node whose state an assertion observes: an explicit traceeN(...) or traceeN:
+ * prefix, otherwise the transition's actor. Returns -1 when the text does not
+ * name a node of this fixed-NP build, leaving the evaluator to report it. */
+static int assertion_node(std::string_view text, unsigned actor)
+{
+  size_t i = 0;
+  while (i < text.size() && std::isspace(static_cast<unsigned char>(text[i]))) ++i;
+  static constexpr std::string_view prefix = "tracee";
+  if (text.compare(i, prefix.size(), prefix) != 0) return static_cast<int>(actor);
+  i += prefix.size();
+  const size_t digits = i;
+  int node = 0;
+  while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) {
+    node = node * 10 + (text[i] - '0');
+    if (node >= NP) return -1;
+    ++i;
+  }
+  if (i == digits || i >= text.size()) return -1;
+  if (text[i] != '(' && text[i] != ':') return -1;
+  return node;
+}
+
 static std::vector<std::string> check_assertions(const sys_state& state, unsigned actor)
 {
   /* Both property surfaces are optional, and either may be configured alone:
@@ -217,6 +241,12 @@ static std::vector<std::string> check_assertions(const sys_state& state, unsigne
   {
     const detsim::StateView view(state);
     for (const auto& assertion : ptmc_state.assertions) {
+      /* A terminated process no longer owns the objects it ran with: its image
+       * holds whatever the exit path left behind, so an address it published
+       * (a pointer to its own stack, say) no longer names that object. Its own
+       * properties are therefore not evaluated; the other nodes keep theirs. */
+      const int node = assertion_node(assertion, actor);
+      if (node >= 0 && DISDEAD(state.status[node])) continue;
       if (!view.evaluate(actor, assertion))
         failures.push_back("Assertion \"" + assertion + "\" fail");
     }
@@ -224,6 +254,12 @@ static std::vector<std::string> check_assertions(const sys_state& state, unsigne
   /* A failing assertion already decides the state and the plugin is not
    * consulted then, exactly as before. */
   if (!failures.empty()) return failures;
+  /* The plugin receives the whole state and walks the nodes it cares about, so
+   * it can only be skipped once no process is left to describe. */
+  bool any_alive = false;
+  for (int node = 0; node < NP; ++node)
+    if (DISALIVE(state.status[node])) { any_alive = true; break; }
+  if (any_alive)
   {
     /* Timed only in a PROFILER=1 build; otherwise the scope is empty. */
     const detsim::profile::Scope check_scope(detsim::profile::kCheck);
@@ -979,13 +1015,15 @@ int state_initialization()
   sys_state first_state(syscall_info, nullptr, false);
   first_state.model_identity = ptmc_state.model_identity;
   detsim::search::initialize_compatibility_manifest(first_state);
-  auto failures = check_assertions(first_state, 0);
+  /* This cut sits at the prelude boundary: the program's own code has not run
+   * yet, so its globals are still zero and any pointer they hold is NULL. The
+   * configured properties describe the program's execution, not the loader's
+   * handover, so they are evaluated from the first transition onwards. */
+  std::vector<std::string> failures;
   first_state.capture_user_state();
-  first_state.property_failed = !failures.empty();
+  first_state.property_failed = false;
   first_state.commit_metadata();
-  report_property_failures(first_state, failures);
   ptmc_state.running_state = first_state;
   for (int node=0; node<NP; ++node) ptmc_state.tracee_image_dirty[node]=false;
-  if (!failures.empty()) throw std::runtime_error("Initial state violates configured properties");
   return 0;
 }
