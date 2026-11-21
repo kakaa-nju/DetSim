@@ -2,10 +2,12 @@
 # Builds the guest program and the user-state plugin, plus the rewind
 # regression case that checks the shadow state follows every restore.
 #
-#   make -C tests/userstate all
-#   cd tests/userstate && ../../tracer -c userstate.json -b userstate.cmds
-#   cd tests/userstate && ../../tracer -c rewind.json -b rewind.cmds
-# Both must finish without a "[CHECK FAILED]" line.
+#   cd tests/userstate && ./check.sh
+#
+# check.sh drives the control/violation pair: userstate.json (monotone counter,
+# checker stays silent) and userstate_violation.json (the same program driven
+# backwards, which the checker must report). The rewind case additionally needs
+# a "[CHECK FAILED]" to stay absent.
 
 CXXFLAGS ?= -O2 -gdwarf-4 -g -fPIC -shared \
             -I. -I../../src -I../../src/core -I../../src/utils -I../../src/subsys \

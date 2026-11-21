@@ -22,6 +22,10 @@ poll/poll
 simple_complex/simple_complex
 write/write
 userstate/userstate
+userstate/cmds.txt
+userstate/memory
+userstate/sstate
+userstate/*.log
 userstate/check.so
 userstate/rewind
 userstate/rewind_check.so

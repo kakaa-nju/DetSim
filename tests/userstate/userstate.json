@@ -2,9 +2,9 @@
   "Loglevel": 1,
   "Nodes": 3,
   "Tracee": [
-    ["./userstate", "0"],
-    ["./userstate", "1"],
-    ["./userstate", "2"]
+    ["./userstate", "0", "good"],
+    ["./userstate", "1", "good"],
+    ["./userstate", "2", "good"]
   ],
   "Addr": ["192.168.0.1", "192.168.0.2", "192.168.0.3"],
   "UserCheck": "./check.so",

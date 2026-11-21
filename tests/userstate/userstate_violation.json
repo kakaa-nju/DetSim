@@ -1,0 +1,16 @@
+{
+  "Loglevel": 1,
+  "Nodes": 3,
+  "Tracee": [
+    ["./userstate", "0", "violate"],
+    ["./userstate", "1", "violate"],
+    ["./userstate", "2", "violate"]
+  ],
+  "Addr": ["192.168.0.1", "192.168.0.2", "192.168.0.3"],
+  "UserCheck": "./check.so",
+  "UserState": "./check.so",
+  "RuntimeProfile": {
+    "fixed_layout": true,
+    "startup_syscall": 10
+  }
+}
